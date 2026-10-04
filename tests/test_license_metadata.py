@@ -45,6 +45,8 @@ def test_manifest_and_installer_include_license_and_notice():
     manifest = (ROOT / "MANIFEST.sha256").read_text()
     assert "  LICENSE\n" in manifest
     assert "  NOTICE\n" in manifest
+    assert "  scripts/build_manifest.py\n" in manifest
     installer = (ROOT / "install.sh").read_text()
     assert installer.count('"LICENSE"') >= 2
     assert installer.count('"NOTICE"') >= 2
+    assert installer.count('"scripts"') >= 2
