@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from git_trust import trusted_git_env
-from promotion_policy import require_exact_attestation
+from promotion_policy import (
+    REPOSITORY_PLANNING_REPAIR_CONTRACT,
+    require_exact_attestation,
+)
+from repo_identity import repo_state_dir
+from state_store import load_json
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -211,6 +216,39 @@ def _dirty_paths(root: Path) -> set[str]:
     return out
 
 
+def _canonical_plan_path(root: Path) -> str | None:
+    policy = load_json(repo_state_dir(root) / "planning-repair" / "policy.json", {})
+    if not isinstance(policy, dict):
+        return None
+    raw = policy.get("canonical_plan")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    path = Path(raw)
+    if path.is_absolute() or ".." in path.parts or path == Path("."):
+        raise ValueError("configured canonical plan path is invalid")
+    return path.as_posix()
+
+
+def _effective_attestation_contract(
+    root: Path,
+    *,
+    base_for_diff: str,
+    target: str,
+    explicit: str | None,
+) -> str | None:
+    canonical = _canonical_plan_path(root)
+    if not canonical or base_for_diff == target:
+        return explicit
+    changed = _changed_paths(root, base_for_diff, target)
+    if canonical not in changed:
+        return explicit
+    if explicit and explicit != REPOSITORY_PLANNING_REPAIR_CONTRACT:
+        raise ValueError(
+            "a promotion changing the configured canonical plan must use the repository planning-repair attestation contract"
+        )
+    return REPOSITORY_PLANNING_REPAIR_CONTRACT
+
+
 def _remote_head(root: Path, remote: str, branch: str) -> str | None:
     cp = _git(root, "ls-remote", "--heads", remote, f"refs/heads/{branch}")
     if cp.returncode != 0:
@@ -314,10 +352,24 @@ def promote_fast_forward(
     before_head = head_cp.stdout.strip().lower()
     target = target_cp.stdout.strip().lower()
 
+    # Canonical-plan commits are a stronger trust boundary than ordinary local
+    # fast-forwards. A worker cannot bypass the dedicated Planning Verifier by
+    # calling the generic promotion helper without an explicit contract.
+    attestation_base = before_head
+    if remote and expected_remote:
+        expected_probe = _git(root, "rev-parse", "--verify", f"{expected_remote}^{{commit}}")
+        if expected_probe.returncode == 0 and expected_probe.stdout.strip():
+            attestation_base = expected_probe.stdout.strip().lower()
+    effective_contract = _effective_attestation_contract(
+        root,
+        base_for_diff=attestation_base,
+        target=target,
+        explicit=attestation_contract,
+    )
     attestation = require_exact_attestation(
         root,
         target,
-        contract=attestation_contract,
+        contract=effective_contract,
     )
 
     before_wip = _local_wip_signature(root)
