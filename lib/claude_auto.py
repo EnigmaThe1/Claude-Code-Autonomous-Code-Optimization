@@ -231,6 +231,8 @@ from cli_schema import (
     show_profiles,
 )
 from environment_policy import apply_resume_environment, capture_resume_environment
+from git_trust import git_trust_action
+from promotion_policy import promotion_policy_action
 from toolchain_preflight import probe_toolchain
 from workspace_recovery import cleanup_untracked_action, promote_ff_action
 from profile_switch import (
@@ -2298,6 +2300,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.gateway_command in {"start", "stop", "ui"}: return gateway_service(args)
     if args.command == "permissions": return permission_action(args)
     if args.command == "profile": return profile_action(args)
+    if args.command == "git-trust": return git_trust_action(args, find_repo_root=find_repo_root)
+    if args.command == "promotion": return promotion_policy_action(args, find_repo_root=find_repo_root)
     if args.command == "promote-ff": return promote_ff_action(args, find_repo_root=find_repo_root)
     if args.command == "cleanup-untracked": return cleanup_untracked_action(args, find_repo_root=find_repo_root)
     if args.command == "models":
