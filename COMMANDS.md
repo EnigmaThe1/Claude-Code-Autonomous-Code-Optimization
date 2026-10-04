@@ -1,4 +1,4 @@
-# Claude Auto command reference — 1.0.0-rc1
+# Claude Auto command reference — 1.0.0-rc2
 
 ## Installation and health
 
@@ -91,9 +91,66 @@ claude-auto service start --repo /path/to/repo
 claude-auto service stop --repo /path/to/repo
 ```
 
-## Narrow recovery
+## Trusted Git policy
+
+```bash
+claude-auto git-trust status --repo /path/to/repo
+claude-auto git-trust set-excludes --repo /path/to/repo --path /path/to/operator-owned-excludes
+claude-auto git-trust clear-excludes --repo /path/to/repo
+```
+
+`set-excludes` copies the validated source into private Claude Auto state. Authority-changing operations are refused when invoked from inside an active Claude worker.
+
+## Promotion policy and exact-SHA attestations
+
+```bash
+claude-auto promotion status --repo /path/to/repo
+claude-auto promotion status --repo /path/to/repo --sha TARGET_SHA
+claude-auto promotion require-contract --repo /path/to/repo --contract CONTRACT_ID
+claude-auto promotion clear-contract --repo /path/to/repo
+```
+
+## Repository-owned planning repair
+
+```bash
+claude-auto planning-repair configure --repo /path/to/repo --plan IMPLEMENTATION_PLAN.md
+claude-auto planning-repair status --repo /path/to/repo
+```
+
+Optional remote-backed canonical planning:
+
+```bash
+claude-auto planning-repair configure \
+  --repo /path/to/repo \
+  --plan IMPLEMENTATION_PLAN.md \
+  --remote origin \
+  --remote-branch main
+```
+
+The normal autonomous path is then:
+
+```bash
+claude-auto run --repo /path/to/repo --plan IMPLEMENTATION_PLAN.md
+```
+
+When a material plan defect is detected, the supervisor automatically performs the configured repair/verify/promote/revalidate sequence. The following commands are available for operator diagnostics/recovery and are top-level-operator only when they change authority:
+
+```bash
+claude-auto planning-repair begin --repo /path/to/repo --reason "..."
+claude-auto planning-repair architect --repo /path/to/repo --reason "..."
+claude-auto planning-repair verify --repo /path/to/repo
+claude-auto planning-repair refresh-base --repo /path/to/repo
+claude-auto planning-repair promote --repo /path/to/repo
+claude-auto planning-repair abort --repo /path/to/repo
+```
+
+## Narrow recovery and promotion
 
 ```bash
 claude-auto cleanup-untracked --repo /path/to/repo --path relative/file --match-commit REPAIR_SHA
 claude-auto promote-ff --repo /path/to/repo --sha DESCENDANT_SHA
+claude-auto promote-ff --repo /path/to/repo --sha TARGET_SHA \
+  --remote origin --remote-branch main --expected-remote-sha BASE_SHA
 ```
+
+Protected promotion supports `--attestation-contract CONTRACT_ID`. A target that changes a configured canonical plan automatically requires the repository planning-repair contract.
