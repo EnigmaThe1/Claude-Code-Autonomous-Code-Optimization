@@ -168,8 +168,10 @@ def test_supervisor_repair_chain_promotes_then_rereads_canonical_plan(monkeypatc
         assert new_hash != source_hash
         assert captured["source_text"] == new_text
         assert captured["source_hash"] == new_hash
+        # fake_load() deliberately reports a durable active repair, so the
+        # supervisor must resume it rather than starting a duplicate repair.
         assert calls == [
-            "begin", "refresh", "architect", "verify", "refresh",
+            "refresh", "architect", "verify", "refresh",
             "promote", "validate",
         ]
 
