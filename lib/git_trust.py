@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from environment_policy import sanitised_subprocess_env
+from operator_authority import require_top_level_operator
 from repo_identity import repo_state_dir
 from runtime_paths import ensure_private_dir, utcnow
 from state_store import json_dump, load_json
@@ -220,11 +221,9 @@ def git_trust_status(root: Path) -> dict[str, Any]:
 def git_trust_action(args: Any, *, find_repo_root) -> int:
     try:
         action = getattr(args, "git_trust_command", None)
-        if action in ["set-excludes","clear-excludes"] and os.environ.get("CLAUDECODE") == "1":
-            raise ValueError(
-                "this authority-changing command must be run by the operator/supervisor from a top-level shell"
-            )
         root = find_repo_root(getattr(args, "repo", None))
+        if action in ["set-excludes","clear-excludes"]:
+            require_top_level_operator(root, "Git trust policy change")
         action = getattr(args, "git_trust_command", None)
         if action == "status":
             result = git_trust_status(root)
