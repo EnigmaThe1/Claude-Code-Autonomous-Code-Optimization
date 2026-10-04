@@ -161,7 +161,6 @@ def _sandbox_settings(
     *,
     read_only_root: bool = False,
     hidden_paths: list[Path] | None = None,
-    max_output_bytes: int | None = None,
     read_allowlist_only: bool = False,
 ) -> dict[str, Any]:
     root = root.resolve()
@@ -460,6 +459,7 @@ def run_repository_command(
     working_directory: Path | None = None,
     hidden_paths: list[Path] | None = None,
     max_output_bytes: int | None = None,
+    read_allowlist_only: bool = False,
 ) -> dict[str, Any]:
     """Run repository-controlled code under an explicit execution boundary.
 
