@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from authority_set import AuthoritySetError, build_authority_snapshot
-from execution import _bwrap_base, _sandbox_settings
+from execution import _bounded_execution_output, _bwrap_base, _sandbox_settings
 from governance_contract import GovernanceContractError, load_governance_contract
 from repo_identity import repo_state_dir
 from task_sources import TaskSourceError, resolve_task_sources, task_source_status
@@ -493,3 +493,199 @@ def test_read_only_execution_recipe_masks_live_repo_and_mounts_view_read_only(mo
         settings = _sandbox_settings(view, base / "home", read_only_root=True, hidden_paths=[live])
         assert str(view) in settings["filesystem"]["denyWrite"]
         assert str(live) in settings["filesystem"]["denyRead"]
+
+
+def test_malformed_builtin_sources_fail_closed(monkeypatch):
+    fixtures = [
+        ("json", '{"schema_version":1,"tasks":[],"tasks":[]}', "duplicate JSON key"),
+        ("jsonl", '[]\n', "must be one TaskSpec object"),
+        ("toml", 'schema_version = 1\ntasks = [', "invalid TOML"),
+    ]
+    for kind, payload, message in fixtures:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+            monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+            root = _repo(Path(td) / "repo")
+            path = f"tasks/source.{kind}"
+            _commit_file(root, path, payload, f"{kind} source")
+            source = {"id": "s", "kind": kind, "authority_sets": ["default"], "paths": [path]}
+            _write_governance(root, _contract([source]))
+            with pytest.raises(TaskSourceError, match=message):
+                resolve_task_sources(root, persist=False)
+
+
+def test_missing_and_duplicate_source_selector_resolution_fail(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _write_governance(root, _contract([_json_source("s", "tasks/missing*.json")]))
+        with pytest.raises(TaskSourceError, match="zero tracked files"):
+            resolve_task_sources(root, persist=False)
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _commit_file(root, "tasks/a.json", json.dumps([_task("T1")]), "source")
+        source = {
+            "id": "s",
+            "kind": "json",
+            "authority_sets": ["default"],
+            "paths": ["tasks/*.json", "tasks/a.json"],
+        }
+        _write_governance(root, _contract([source]))
+        with pytest.raises(TaskSourceError, match="same file more than once"):
+            resolve_task_sources(root, persist=False)
+
+
+def test_source_symlink_and_gitlink_are_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _commit_file(root, "tasks/real.json", json.dumps([_task("T1")]), "real")
+        (root / "tasks/link.json").symlink_to("real.json")
+        _run(root, "git", "add", "tasks/link.json")
+        _run(root, "git", "commit", "-qm", "symlink")
+        _write_governance(root, _contract([_json_source("s", "tasks/link.json")]))
+        with pytest.raises(TaskSourceError, match="symlink"):
+            resolve_task_sources(root, persist=False)
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+        _run(root, "git", "update-index", "--add", "--cacheinfo", f"160000,{head},nested")
+        _run(root, "git", "commit", "-qm", "gitlink")
+        _write_governance(root, _contract([_json_source("s", "nested")]))
+        with pytest.raises(TaskSourceError, match="gitlink"):
+            resolve_task_sources(root, persist=False)
+
+
+@pytest.mark.parametrize(
+    ("task", "message"),
+    [
+        (_task("bad id"), "must match"),
+        (_task("T1", owned_paths=["../escape"]), "must not contain '..'"),
+        (_task("T1", owned_paths=["src/**", "src/**"]), "duplicate entry"),
+        (_task("T1", depends_on=["T1"]), "cannot depend on itself"),
+    ],
+)
+def test_malformed_taskspec_fields_fail(task, message):
+    with pytest.raises(TaskSpecError, match=message):
+        normalise_task_spec(
+            task,
+            source_id="s",
+            source_authority_sets={"default"},
+            known_authority_sets={"default"},
+            protected_paths={"PLAN.md"},
+        )
+
+
+def test_adapter_output_cannot_expand_authority_or_duplicate_ids(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "live")
+        _prepare_adapter_repo(root)
+        other = {"id": "other", "members": [], "validators": [], "reconcilers": []}
+        _write_governance(root, _contract([_adapter_source()], sets=[_authority_set(), other]))
+
+        def escalator(view, argv, **kwargs):
+            return {
+                "returncode": 0,
+                "stdout": json.dumps([_task("T1", authority_sets=["other"])]),
+                "stderr": "",
+                "execution_boundary": "test-sandbox",
+                "sandboxed": True,
+                "environment_scrubbed": True,
+            }
+
+        with pytest.raises(TaskSourceError, match="AuthoritySet ceiling"):
+            resolve_task_sources(root, runner=escalator, persist=False)
+
+        def duplicate(view, argv, **kwargs):
+            return {
+                "returncode": 0,
+                "stdout": json.dumps([_task("T1"), _task("T1")]),
+                "stderr": "",
+                "execution_boundary": "test-sandbox",
+                "sandboxed": True,
+                "environment_scrubbed": True,
+            }
+
+        with pytest.raises(TaskSourceError, match="duplicate TaskSpec"):
+            resolve_task_sources(root, runner=duplicate, persist=False)
+
+
+def test_adapter_timeout_and_oversized_output_fail(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "live")
+        _prepare_adapter_repo(root)
+        _write_governance(root, _contract([_adapter_source()]))
+
+        def timeout(view, argv, **kwargs):
+            return {
+                "returncode": 124,
+                "stdout": "",
+                "stderr": "timed out",
+                "timed_out": True,
+                "execution_boundary": "test-sandbox",
+                "sandboxed": True,
+                "environment_scrubbed": True,
+            }
+        with pytest.raises(TaskSourceError, match="exit 124"):
+            resolve_task_sources(root, runner=timeout, persist=False)
+
+        huge = "x" * (8 * 1024 * 1024 + 1)
+        def oversized(view, argv, **kwargs):
+            return {
+                "returncode": 0,
+                "stdout": huge,
+                "stderr": "",
+                "execution_boundary": "test-sandbox",
+                "sandboxed": True,
+                "environment_scrubbed": True,
+            }
+        with pytest.raises(TaskSourceError, match="maximum supported size"):
+            resolve_task_sources(root, runner=oversized, persist=False)
+
+
+def test_execution_output_cap_turns_oversize_into_fail_closed_result():
+    result = {
+        "returncode": 0,
+        "stdout": "a" * 100,
+        "stderr": "b" * 100,
+        "execution_boundary": "test",
+    }
+    bounded = _bounded_execution_output(result, 128)
+    assert bounded["returncode"] == 125
+    assert bounded["output_limit_exceeded"] is True
+    assert "OUTPUT_LIMIT_EXCEEDED" in bounded["stderr"]
+
+
+def test_task_source_contract_change_changes_set_digest(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _commit_file(root, "tasks/a.json", json.dumps([_task("T1")]), "source")
+        source = _json_source("a", "tasks/a.json")
+        _write_governance(root, _contract([source], strict=True), "strict")
+        first = resolve_task_sources(root, persist=False)
+        _write_governance(root, _contract([source], strict=False), "non-strict")
+        second = resolve_task_sources(root, persist=False)
+        assert first["merged_tasks_sha256"] == second["merged_tasks_sha256"]
+        assert first["task_source_set_sha256"] != second["task_source_set_sha256"]
+
+
+def test_committed_source_blob_change_changes_task_source_set(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _commit_file(root, "tasks/a.json", json.dumps([_task("T1")]), "source one")
+        source = _json_source("a", "tasks/a.json")
+        _write_governance(root, _contract([source]))
+        first = resolve_task_sources(root, persist=False)
+        (root / "tasks/a.json").write_text(json.dumps([_task("T2")]))
+        _run(root, "git", "add", "tasks/a.json")
+        _run(root, "git", "commit", "-qm", "source two")
+        second = resolve_task_sources(root, persist=False)
+        assert first["task_source_set_sha256"] != second["task_source_set_sha256"]
+        assert first["merged_tasks_sha256"] != second["merged_tasks_sha256"]
