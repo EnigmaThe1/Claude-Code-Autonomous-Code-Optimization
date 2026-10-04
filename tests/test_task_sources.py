@@ -28,7 +28,12 @@ from cli_schema import build_parser as build_cli_parser
 from governance_contract import GovernanceContractError, load_governance_contract
 from repo_identity import repo_state_dir
 from repo_runtime import activate
-from task_sources import TaskSourceError, resolve_task_sources, task_source_status
+from task_sources import (
+    TaskSourceError,
+    load_resolved_task_source_set,
+    resolve_task_sources,
+    task_source_status,
+)
 from task_spec import TaskSpecError, normalise_task_spec, validate_task_graph
 
 
@@ -983,3 +988,23 @@ print({task_json!r})
         )
         assert (root / "data/input.txt").read_text() == before_input
         assert _run(root, "git", "status", "--porcelain=v1").stdout == before_status
+
+
+def test_persisted_task_source_set_tampering_fails_integrity_check(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _commit_file(root, "tasks/a.json", json.dumps([_task("T1")]), "source")
+        _write_governance(root, _contract([_json_source("a", "tasks/a.json")]))
+        resolve_task_sources(root, persist=True)
+
+        path = repo_state_dir(root) / "tasks" / "task-source-set.json"
+        persisted = json.loads(path.read_text())
+        persisted["tasks"][0]["task"]["id"] = "TAMPERED"
+        path.write_text(json.dumps(persisted))
+
+        with pytest.raises(TaskSourceError, match="semantic digest mismatch"):
+            load_resolved_task_source_set(root)
+        status = task_source_status(root)
+        assert status["status"] == "BLOCKED"
+        assert "integrity check failed" in status["error"]
