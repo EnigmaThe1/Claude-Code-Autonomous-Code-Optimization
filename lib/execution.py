@@ -261,7 +261,10 @@ def _bwrap_base(
                 continue
             try:
                 if candidate.is_symlink():
-                    return None
+                    # The link target is either inside an allowed runtime tree
+                    # (which is already permitted) or inside a top-level tree
+                    # masked below. Do not follow/mount over the symlink itself.
+                    continue
                 if candidate.is_dir():
                     mask_points.append(candidate)
                     args += ["--tmpfs", str(candidate)]
