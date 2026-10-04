@@ -126,6 +126,8 @@ def configure_planning_repair(
     remote_branch: str | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
+    if load_active_repair(root):
+        raise ValueError("cannot reconfigure repository-owned planning while a repair is active")
     rel = _normalise_plan_path(canonical_plan)
     plan = root / rel
     try:
@@ -184,6 +186,24 @@ def begin_planning_repair(root: Path, *, reason: str = "") -> dict[str, Any]:
         raise ValueError("repository-owned planning repair is not configured")
     active = load_active_repair(root)
     if active:
+        raw_worktree = str(active.get("worktree") or "")
+        repair_branch = str(active.get("repair_branch") or "")
+        if not raw_worktree or not repair_branch.startswith("claude-auto/planning-repair/"):
+            raise ValueError("active planning repair state is incomplete or untrusted")
+        worktree = Path(raw_worktree).expanduser().resolve()
+        branch_exists = _git(root, "show-ref", "--verify", f"refs/heads/{repair_branch}").returncode == 0
+        if worktree.exists():
+            if not branch_exists:
+                raise ValueError("planning repair worktree exists but its branch is missing")
+            return active
+        if not branch_exists:
+            raise ValueError("planning repair state exists but both worktree and repair branch are missing")
+        cp = _git(root, "worktree", "add", str(worktree), repair_branch)
+        if cp.returncode != 0:
+            detail = (cp.stderr or cp.stdout or "git worktree recovery failed").strip()
+            raise ValueError(detail[:1600])
+        active["worktree_recovered_at"] = utcnow()
+        json_dump(_active_path(root), active)
         return active
 
     product_branch = str(policy["product_branch"])
@@ -562,6 +582,22 @@ def refresh_planning_repair_base(root: Path) -> dict[str, Any]:
     old_to_new = _git(root, "merge-base", "--is-ancestor", old_base, new_base)
     if old_to_new.returncode != 0:
         raise ValueError("new product base is not a descendant of the planning repair base")
+
+    if candidate == old_base and not active.get("candidate_sha"):
+        if _worktree_dirty_paths(worktree):
+            raise ValueError("planning repair worktree must be clean before refreshing its empty candidate base")
+        reset = _git(worktree, "reset", "--hard", "-q", new_base)
+        if reset.returncode != 0:
+            raise ValueError("unable to advance empty planning repair worktree to the new product base")
+        active.update({
+            "base_sha": new_base,
+            "candidate_sha": None,
+            "verified_sha": None,
+            "refresh": None,
+            "refreshed_at": utcnow(),
+        })
+        json_dump(_active_path(root), active)
+        return {"status": "advanced-empty", "base_sha": new_base, "candidate_sha": None}
 
     new_in_candidate = _git(worktree, "merge-base", "--is-ancestor", new_base, candidate)
     if new_in_candidate.returncode == 0:
