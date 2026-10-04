@@ -489,7 +489,12 @@ def test_read_only_execution_recipe_masks_live_repo_and_mounts_view_read_only(mo
         assert args is not None
         joined = "\n".join(args)
         assert f"--ro-bind\n{view}\n{view}" in joined
-        assert f"--tmpfs\n{live}" in joined
+        # Both paths live below /tmp in this fixture. Bubblewrap masks /tmp as a
+        # whole, then recreates/binds only the adapter view, so the live sibling
+        # is hidden without needing a redundant nested tmpfs mount.
+        assert "--tmpfs\n/tmp" in joined
+        assert f"--bind\n{live}\n{live}" not in joined
+        assert f"--ro-bind\n{live}\n{live}" not in joined
         settings = _sandbox_settings(view, base / "home", read_only_root=True, hidden_paths=[live])
         assert str(view) in settings["filesystem"]["denyWrite"]
         assert str(live) in settings["filesystem"]["denyRead"]
