@@ -74,16 +74,25 @@ def test_trusted_git_reconstruction_discards_poison_and_rebuilds_only_package_co
             "GIT_SSH_COMMAND": "ssh test",
         })
 
-        assert env["GIT_CONFIG_COUNT"] == "3"
+        assert env["GIT_CONFIG_COUNT"] == "5"
         pairs = {
             env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
             for i in range(int(env["GIT_CONFIG_COUNT"]))
         }
-        assert pairs == {
-            "core.excludesFile": str(excludes.resolve()),
-            "fetch.recurseSubmodules": "false",
-            "submodule.recurse": "false",
+        assert set(pairs) == {
+            "core.excludesFile",
+            "core.hooksPath",
+            "core.fsmonitor",
+            "fetch.recurseSubmodules",
+            "submodule.recurse",
         }
+        trusted_copy = Path(pairs["core.excludesFile"])
+        assert trusted_copy != excludes.resolve()
+        assert trusted_copy.read_text() == excludes.read_text()
+        assert pairs["core.hooksPath"] == os.devnull
+        assert pairs["core.fsmonitor"] == "false"
+        assert pairs["fetch.recurseSubmodules"] == "false"
+        assert pairs["submodule.recurse"] == "false"
         assert env["GIT_SSH_COMMAND"] == "ssh test"
         assert "core.filemode" not in pairs
         assert "core.ignorecase" not in pairs
@@ -366,3 +375,44 @@ def test_non_plan_fast_forward_remains_available_without_planning_attestation(mo
         result = promote_fast_forward(root, target)
         assert result["status"] == "promoted"
         assert result["attestation"] is None
+
+
+def test_operator_excludes_are_copied_so_later_source_mutation_cannot_change_broker_view(monkeypatch):
+    from git_trust import trusted_git_config
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        source = Path(td) / "operator-excludes"
+        source.write_text(".bashrc\n")
+        source.chmod(0o600)
+        configure_trusted_excludes(root, source)
+
+        before = dict(trusted_git_config(root))
+        trusted_copy = Path(before["core.excludesFile"])
+        assert trusted_copy.read_text() == ".bashrc\n"
+
+        source.write_text(".bashrc\nreal-untracked.txt\n")
+        after = dict(trusted_git_config(root))
+        assert after["core.excludesFile"] == str(trusted_copy)
+        assert trusted_copy.read_text() == ".bashrc\n"
+
+        (root / ".bashrc").write_text("stub\n")
+        (root / "real-untracked.txt").write_text("real\n")
+        assert _visible_untracked(root) == {"real-untracked.txt"}
+
+
+def test_default_broker_view_overrides_global_excludes_with_empty_package_file(monkeypatch):
+    from git_trust import trusted_git_env
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        global_excludes = Path(td) / "global-excludes"
+        global_excludes.write_text("real-untracked.txt\n")
+        _run("git", "-C", str(root), "config", "core.excludesFile", str(global_excludes))
+
+        (root / "real-untracked.txt").write_text("real\n")
+        env = trusted_git_env(root)
+        assert env["GIT_CONFIG_COUNT"] == "5"
+        assert _visible_untracked(root) == {"real-untracked.txt"}
