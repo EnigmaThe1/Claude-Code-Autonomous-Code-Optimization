@@ -1,6 +1,6 @@
 # Claude Code Autonomous Code Optimization
 
-**Version 1.0.0-rc2**
+**Version 1.0.0-rc3**
 
 Claude Code Autonomous Code Optimization is a user-level control and optimisation layer for Claude Code. It is designed for long-running software-engineering work where Claude should keep implementing, testing, diagnosing and repairing until the requested objective is complete or a genuine external blocker is reached.
 
@@ -207,7 +207,15 @@ See [Model routing](docs/MODEL_ROUTING.md).
 
 `main` represents the latest accepted and qualified public state. Each candidate is developed on `release/<version>`, qualified there, then merged or fast-forwarded into `main`. Accepted release branches remain fixed as recovery/comparison references and version tags are immutable.
 
-The first public baseline is **1.0.0-rc1**. **1.0.0-rc2** is the next candidate and adds trusted Git reconstruction, protected/idempotent promotion and repository-owned planning repair.
+The first public baseline is **1.0.0-rc1**. **1.0.0-rc2** adds trusted Git reconstruction, protected/idempotent promotion and repository-owned planning repair. **1.0.0-rc3** is the current development candidate and adds explicit Apache-2.0 licensing plus release-workflow hardening.
+
+## License
+
+Licensed under the Apache License, Version 2.0.
+
+Copyright 2026 Bogdan Carp (@EnigmaThe1).
+
+See [LICENSE](LICENSE) and [NOTICE](NOTICE) for the licence text and attribution notice.
 
 ## Project status
 

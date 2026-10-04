@@ -12,3 +12,9 @@ Contributions should preserve long-running autonomous engineering, truthful comp
 Release-candidate integration uses `release/<version>` branches. See [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md).
 
 Permission, sandbox, profile-switching, secret-access, write-boundary, provider-routing, recovery and completion-gate changes should include adversarial negative-path tests.
+
+## Licence of contributions
+
+This project is licensed under the Apache License, Version 2.0. Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project is provided under the Apache License, Version 2.0, consistent with section 5 of that licence.
+
+Copyright and attribution notices that apply to existing project code must be preserved. Contributors may add appropriate copyright notices for their own contributions.

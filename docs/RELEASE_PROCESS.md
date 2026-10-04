@@ -2,17 +2,19 @@
 
 `main` is the latest accepted and qualified public state.
 
-Each candidate is developed on `release/<version>`, for example `release/1.0.0-rc2`.
+Each candidate is developed on `release/<version>`, for example `release/1.0.0-rc3`.
 
-1. Create the next release branch from `main`.
-2. Develop and test only on that branch.
-3. Keep `VERSION` aligned with the branch suffix.
-4. Run normal CI and release qualification.
-5. Do not advance `main` until qualification is green.
-6. Advance `main` to the exact accepted candidate.
-7. Create immutable tag `v<version>`.
-8. Keep the accepted release branch fixed for recovery/comparison.
-9. Start the next candidate from the new `main`.
+1. Prepare the candidate identity (`VERSION`) and release-workflow changes before creating the branch so the first branch SHA is internally consistent.
+2. Create the next release branch from the latest accepted `main` ancestry.
+3. Develop and test only on that branch. Normal CI runs on every candidate push and regenerates the package manifest only inside the CI workspace when development changes make the committed manifest stale.
+4. Keep `VERSION` aligned with the branch suffix throughout development.
+5. When the candidate is ready, create or update `.release-finalize` with `version=<version>` and an incremented `sequence=<n>`.
+6. The guarded finalisation workflow validates the branch/version identity, rebuilds `MANIFEST.sha256`, records the exact source SHA in `.release-qualify`, and lease-protected pushes only those finalisation files.
+7. The resulting `.release-qualify` commit triggers release qualification, which requires a current committed manifest and runs complete source/archive/installer qualification.
+8. Do not advance `main` unless that exact finalised candidate SHA has a green release qualification.
+9. Advance `main` to the exact accepted candidate, then require normal `main` CI to pass at that same SHA.
+10. Create immutable tag `v<version>` only for the accepted SHA.
+11. Keep accepted release branches fixed for recovery/comparison, and start the next candidate from the new `main`.
 
 This repository starts public version history at `1.0.0-rc1`.
 

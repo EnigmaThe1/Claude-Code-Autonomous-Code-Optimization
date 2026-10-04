@@ -17,12 +17,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 70
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Validate branch/version identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(cat VERSION)"
+          if [[ "$GITHUB_REF_NAME" == release/* ]]; then
+            EXPECTED="${GITHUB_REF_NAME#release/}"
+            if [[ "$VERSION" != "$EXPECTED" ]]; then
+              echo "::error title=Release branch/version mismatch::Branch '$GITHUB_REF_NAME' requires VERSION '$EXPECTED', but VERSION contains '$VERSION'."
+              exit 1
+            fi
+          fi
       - name: Install test prerequisites
         run: |
           set -euo pipefail
@@ -61,18 +73,33 @@ jobs:
           if hits:
               raise SystemExit("Historical pre-public release labels detected:\n" + "\n".join(hits))
           PY
-      - name: Package integrity and static checks
+      - name: Prepare release-branch development manifest
+        if: startsWith(github.ref, 'refs/heads/release/')
         run: |
           set -euo pipefail
+          python scripts/build_manifest.py --write
+          if ! git diff --quiet -- MANIFEST.sha256; then
+            echo "::notice title=Development manifest refreshed::The committed MANIFEST.sha256 is not release-final for this development SHA. CI regenerated it in the runner so installer regressions can still execute."
+          fi
+      - name: Verify committed package manifest
+        if: ${{ !startsWith(github.ref, 'refs/heads/release/') }}
+        run: |
+          set -euo pipefail
+          python scripts/build_manifest.py --check
           sha256sum -c MANIFEST.sha256
+      - name: Package static checks
+        run: |
+          set -euo pipefail
           bash -n install.sh
           bash -n uninstall.sh
           bash -n bin/claude-auto
-          python -m compileall -q lib hooks tests
-          ruff check lib hooks tests --select E9,F63,F7,F82
+          python -m compileall -q lib hooks tests scripts
+          ruff check lib hooks tests scripts --select E9,F63,F7,F82
           shellcheck -x install.sh uninstall.sh bin/claude-auto
           test "$(./bin/claude-auto --version)" = "claude-auto $(cat VERSION)"
       - name: Full regression and coverage
+        env:
+          PYTHONPATH: lib
         run: |
           set -euo pipefail
           python -m pytest -q

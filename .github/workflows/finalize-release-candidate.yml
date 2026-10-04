@@ -1,0 +1,68 @@
+name: Finalize release candidate
+
+on:
+  push:
+    branches:
+      - "release/**"
+    paths:
+      - ".release-finalize"
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Validate finalization request
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(cat VERSION)"
+          EXPECTED="${GITHUB_REF_NAME#release/}"
+          if [[ "$VERSION" != "$EXPECTED" ]]; then
+            echo "::error title=Release branch/version mismatch::Branch '$GITHUB_REF_NAME' requires VERSION '$EXPECTED', but VERSION contains '$VERSION'."
+            exit 1
+          fi
+          test -f .release-finalize || { echo "::error title=Finalization request missing::.release-finalize is required."; exit 1; }
+          grep -Fxq "version=$VERSION" .release-finalize || { echo "::error title=Finalization request/version mismatch::.release-finalize must contain version=$VERSION."; exit 1; }
+          grep -Eq '^sequence=[1-9][0-9]*$' .release-finalize || { echo "::error title=Invalid finalization sequence::.release-finalize requires sequence=<positive integer>."; exit 1; }
+      - name: Rebuild final package manifest
+        run: |
+          set -euo pipefail
+          python scripts/build_manifest.py --write
+          python scripts/build_manifest.py --check
+          sha256sum -c MANIFEST.sha256
+      - name: Commit qualification trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(cat VERSION)"
+          SEQUENCE="$(sed -n 's/^sequence=//p' .release-finalize)"
+          cat > .release-qualify <<EOF
+          version=$VERSION
+          sequence=$SEQUENCE
+          source_sha=$GITHUB_SHA
+          EOF
+          git add MANIFEST.sha256 .release-qualify
+          STATUS="$(git status --porcelain)"
+          if [[ -z "$STATUS" ]]; then
+            echo "::error title=Nothing to finalize::Finalization produced no manifest or qualification-trigger change."
+            exit 1
+          fi
+          BAD="$(git status --porcelain | awk '{print $2}' | grep -Ev '^(MANIFEST\.sha256|\.release-qualify)$' || true)"
+          if [[ -n "$BAD" ]]; then
+            echo "::error title=Unexpected finalizer mutation::Finalizer may modify only MANIFEST.sha256 and .release-qualify: $BAD"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Finalize $VERSION qualification sequence $SEQUENCE"
+          git push --force-with-lease="refs/heads/$GITHUB_REF_NAME:$GITHUB_SHA" origin "HEAD:refs/heads/$GITHUB_REF_NAME"

@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - "release/**"
+    paths:
+      - ".release-qualify"
   workflow_dispatch:
 
 permissions:
@@ -14,10 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Validate release branch identity
@@ -26,7 +28,17 @@ jobs:
           set -euo pipefail
           VERSION="$(cat VERSION)"
           if [[ "$GITHUB_REF_NAME" == release/* ]]; then
-            test "${GITHUB_REF_NAME#release/}" = "$VERSION"
+            EXPECTED="${GITHUB_REF_NAME#release/}"
+            if [[ "$VERSION" != "$EXPECTED" ]]; then
+              echo "::error title=Release branch/version mismatch::Branch '$GITHUB_REF_NAME' requires VERSION '$EXPECTED', but VERSION contains '$VERSION'."
+              exit 1
+            fi
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            test -f .release-qualify || { echo "::error title=Qualification trigger missing::.release-qualify is required."; exit 1; }
+            grep -Fxq "version=$VERSION" .release-qualify || { echo "::error title=Qualification trigger/version mismatch::.release-qualify must contain version=$VERSION."; exit 1; }
+            EXPECTED_SOURCE="$(git rev-parse HEAD^)"
+            grep -Fxq "source_sha=$EXPECTED_SOURCE" .release-qualify || { echo "::error title=Qualification source mismatch::.release-qualify must attest immediate parent $EXPECTED_SOURCE."; exit 1; }
           fi
       - name: Install qualification prerequisites
         run: |
@@ -39,13 +51,15 @@ jobs:
           PYTHONPATH: lib
         run: |
           set -euo pipefail
+          python scripts/build_manifest.py --check
           sha256sum -c MANIFEST.sha256
           bash -n install.sh
           bash -n uninstall.sh
           bash -n bin/claude-auto
-          python -m compileall -q lib hooks tests
-          ruff check lib hooks tests --select E9,F63,F7,F82
+          python -m compileall -q lib hooks tests scripts
+          ruff check lib hooks tests scripts --select E9,F63,F7,F82
           shellcheck -x install.sh uninstall.sh bin/claude-auto
+          test "$(./bin/claude-auto --version)" = "claude-auto $(cat VERSION)"
           python -m pytest -q
           python -m pytest -q --cov=lib --cov=hooks --cov-report=term
       - name: Build deterministic archive
@@ -74,6 +88,8 @@ jobs:
               for rel in ("bin/claude-auto","install.sh","uninstall.sh"):
                   if ((zf.getinfo(f"{top}/{rel}").external_attr>>16)&0o111)==0:
                       raise SystemExit(f"{rel} lost executable archive mode")
+              for rel in ("LICENSE","NOTICE"):
+                  zf.getinfo(f"{top}/{rel}")
           Path("/tmp/archive-path").write_text(str(out))
           PY
       - name: Qualify extracted archive
@@ -85,6 +101,8 @@ jobs:
           PKG="/tmp/claude-auto-release/claude-code-autonomous-code-optimization-$(cat VERSION)"
           cd "$PKG"
           sha256sum -c MANIFEST.sha256
+          test -f LICENSE
+          test -f NOTICE
           PYTHONPATH=lib python -m pytest -q
       - name: Transactional installer smoke
         run: |
@@ -100,10 +118,12 @@ jobs:
           mkdir -p "$CLAUDE_AUTONOMY_BIN"
           cd "$PKG"
           ./install.sh --no-plugins
+          test -f "$CLAUDE_AUTONOMY_HOME/LICENSE"
+          test -f "$CLAUDE_AUTONOMY_HOME/NOTICE"
           test "$("$CLAUDE_AUTONOMY_BIN/claude-auto" --version)" = "claude-auto $(cat VERSION)"
           "$CLAUDE_AUTONOMY_HOME/uninstall.sh"
       - name: Upload qualified archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: claude-code-autonomous-code-optimization-${{ github.sha }}
           path: /tmp/claude-code-autonomous-code-optimization-*.zip

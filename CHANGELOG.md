@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0-rc3
+
+Third public release candidate (in development).
+
+- license the project under Apache License 2.0 with copyright attribution to Bogdan Carp (@EnigmaThe1);
+- include LICENSE and NOTICE in repository, installation and qualified release archives;
+- add standard Apache 2.0 headers to project-owned runtime source files;
+- separate development CI from explicit release finalisation/qualification;
+- move maintained GitHub Actions to Node-24-capable major versions and improve qualification diagnostics.
+
 ## 1.0.0-rc2
 
 Second public release candidate.

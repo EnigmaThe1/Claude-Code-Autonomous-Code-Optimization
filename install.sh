@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Copyright 2026 Bogdan Carp (@EnigmaThe1)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set -euo pipefail
 umask 077
 export PYTHONDONTWRITEBYTECODE=1
@@ -95,7 +109,7 @@ python3 - "$SELF_DIR" "$STAGE" <<'PY'
 import os, shutil, sys
 src, stage = map(os.path.realpath, sys.argv[1:3])
 package_dirs = {"bin", "docs", "hooks", "lib", "templates", "tests"}
-package_files = {".gitignore", "CHANGELOG.md", "COMMANDS.md", "MANIFEST.sha256", "QUICKSTART.md", "README.md", "SOURCES.md", "VERSION", "install.sh", "uninstall.sh"}
+package_files = {".gitignore", "CHANGELOG.md", "COMMANDS.md", "LICENSE", "MANIFEST.sha256", "NOTICE", "QUICKSTART.md", "README.md", "SOURCES.md", "VERSION", "install.sh", "uninstall.sh"}
 ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".pytest_cache")
 for name in package_dirs:
     d = os.path.join(stage, name)
@@ -141,7 +155,7 @@ import sys
 
 package_dirs = ("bin", "docs", "hooks", "lib", "templates", "tests")
 package_files = {
-    ".gitignore", "CHANGELOG.md", "COMMANDS.md", "QUICKSTART.md", "README.md",
+    ".gitignore", "CHANGELOG.md", "COMMANDS.md", "LICENSE", "NOTICE", "QUICKSTART.md", "README.md",
     "SOURCES.md", "VERSION", "install.sh", "uninstall.sh",
 }
 expected = set(package_files)
