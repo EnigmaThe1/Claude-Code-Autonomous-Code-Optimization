@@ -22,7 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from authority_set import AuthoritySetError, build_authority_snapshot
+from authority_set import AuthoritySetError, authority_status, build_authority_snapshot
+from cli_schema import build_parser as build_cli_parser
 from governance_contract import GovernanceContractError, load_governance_contract
 from repo_identity import repo_state_dir
 from repo_runtime import activate
@@ -450,3 +451,26 @@ def test_role_mutability_and_helper_contract_changes_invalidate_snapshot(monkeyp
         assert second["sets"][0]["members"][0]["repair"] == "immutable"
         assert first["sets"][0]["validator_digest"] != second["sets"][0]["validator_digest"]
         assert first["snapshot_sha256"] != second["snapshot_sha256"]
+
+
+def test_governance_status_surface_is_read_only_and_parseable(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        _write_contract(root, _contract([_set("default", [_member("PLAN.md")])]))
+        before = _run(root, "git", "status", "--porcelain=v1").stdout
+
+        args = build_cli_parser("test").parse_args([
+            "governance", "status", "--repo", str(root)
+        ])
+        assert args.command == "governance"
+        assert args.governance_command == "status"
+
+        result = authority_status(root)
+        assert result["status"] == "READY"
+        assert result["snapshot"]["sets"][0]["members"][0]["path"] == "PLAN.md"
+        after = _run(root, "git", "status", "--porcelain=v1").stdout
+        assert after == before == ""
