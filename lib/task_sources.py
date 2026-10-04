@@ -604,9 +604,14 @@ def load_resolved_task_source_set(
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     path = _resolved_path(root)
-    persisted = load_json(path, {})
-    if not isinstance(persisted, dict) or not persisted:
+    if not path.exists():
         raise TaskSourceError("no persisted TaskSourceSet is available")
+    try:
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskSourceError(f"persisted TaskSourceSet is unreadable or malformed: {exc}") from exc
+    if not isinstance(persisted, dict) or not persisted:
+        raise TaskSourceError("persisted TaskSourceSet must be a non-empty JSON object")
 
     missing = [key for key in _PERSISTED_CANONICAL_KEYS if key not in persisted]
     if missing:
@@ -679,8 +684,7 @@ def task_source_status(root: Path) -> dict[str, Any]:
         return {"status": "UNCONFIGURED", "repository": str(root)}
 
     path = _resolved_path(root)
-    persisted = load_json(path, {})
-    if not isinstance(persisted, dict) or not persisted:
+    if not path.exists():
         return {
             "status": "UNRESOLVED",
             "repository": str(root),
