@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import unicodedata
 from pathlib import Path
@@ -46,7 +47,15 @@ _MANDATORY_CONTROL_SELECTORS = (
     ".gitattributes",
     ".gitmodules",
     "CLAUDE.md",
+    "**/CLAUDE.md",
     ".claude/**",
+    ".github/workflows/**",
+    ".gitlab-ci.yml",
+    "Jenkinsfile",
+    "azure-pipelines.yml",
+    "bitbucket-pipelines.yml",
+    ".circleci/**",
+    ".buildkite/**",
 )
 
 
@@ -255,13 +264,102 @@ def _helper_control_selectors(contract: dict[str, Any]) -> list[str]:
     return sorted(selectors)
 
 
+def _blob_text(root: Path, object_id: str, *, maximum: int = 2 * 1024 * 1024) -> str:
+    size = _git(root, "cat-file", "-s", object_id)
+    if size.returncode != 0:
+        raise AuthoritySetError(f"unable to inspect control-surface blob {object_id}")
+    try:
+        count = int(size.stdout.strip())
+    except ValueError as exc:
+        raise AuthoritySetError(f"invalid control-surface blob size for {object_id}") from exc
+    if count < 0 or count > maximum:
+        raise AuthoritySetError(f"control-surface blob {object_id} exceeds maximum supported size")
+    cp = _git(root, "cat-file", "blob", object_id, text=False)
+    if cp.returncode != 0:
+        raise AuthoritySetError(f"unable to read control-surface blob {object_id}")
+    payload = bytes(cp.stdout)
+    if len(payload) != count:
+        raise AuthoritySetError(f"control-surface blob {object_id} changed size during read")
+    try:
+        return payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AuthoritySetError("control-surface JSON must be UTF-8") from exc
+
+
+def _verification_control_selectors(
+    root: Path,
+    tree: dict[str, dict[str, str]],
+) -> list[str]:
+    entry = tree.get(".claude-auto/verification.json")
+    if entry is None:
+        return []
+    if entry["mode"] == "120000" or entry["type"] != "blob":
+        raise AuthoritySetError(".claude-auto/verification.json must be a regular committed blob")
+    try:
+        obj = json.loads(_blob_text(root, entry["object"]))
+    except json.JSONDecodeError as exc:
+        raise AuthoritySetError(f"invalid committed verification contract JSON: {exc.msg}") from exc
+    commands = obj.get("commands") if isinstance(obj, dict) else None
+    if not isinstance(commands, dict):
+        return []
+
+    selectors: set[str] = set()
+
+    def inspect_command(command: str, *, depth: int = 0) -> None:
+        if depth > 3:
+            return
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            return
+        if not tokens:
+            return
+
+        # Shell -c wrappers carry a second command language inside one argv item.
+        exe = Path(tokens[0]).name
+        if exe in {"bash", "sh", "zsh", "dash"} and "-c" in tokens:
+            try:
+                index = tokens.index("-c")
+                nested = tokens[index + 1]
+            except (ValueError, IndexError):
+                nested = ""
+            if nested:
+                inspect_command(nested, depth=depth + 1)
+
+        for token in tokens:
+            if not token or token.startswith("-") or token in {"&&", "||", ";", "|"}:
+                continue
+            # Strip the common command-prefix spelling while keeping all
+            # repository-relative path semantics package-owned.
+            candidate = token[2:] if token.startswith("./") else token
+            if candidate.startswith("/") or candidate.startswith("~"):
+                continue
+            try:
+                normalised = normalise_repo_selector(candidate)
+            except GovernanceContractError:
+                continue
+            if normalised in tree and tree[normalised]["type"] == "blob":
+                selectors.add(normalised)
+
+    for rows in commands.values():
+        if not isinstance(rows, list):
+            continue
+        for command in rows:
+            if isinstance(command, str) and command.strip():
+                inspect_command(command.strip())
+
+    return sorted(selectors)
+
+
 def _resolve_control_surfaces(
+    root: Path,
     contract: dict[str, Any],
     tree: dict[str, dict[str, str]],
 ) -> list[dict[str, str]]:
     selectors = set(_MANDATORY_CONTROL_SELECTORS)
     selectors.update(contract.get("control_surfaces", []))
     selectors.update(_helper_control_selectors(contract))
+    selectors.update(_verification_control_selectors(root, tree))
     records: dict[str, dict[str, str]] = {}
     for selector in sorted(selectors):
         for entry in _resolve_selector(selector, tree, required=False):
@@ -377,7 +475,7 @@ def build_authority_snapshot(root: Path, ref: str = "HEAD") -> dict[str, Any] | 
         sets = _build_contract_sets(contract, tree)
         if legacy:
             _assert_legacy_compatible(legacy, sets)
-        controls = _resolve_control_surfaces(contract, tree)
+        controls = _resolve_control_surfaces(root, contract, tree)
         task_source_digest = _digest(contract["tasks"])
         governance_blob = contract["_git"]["blob"]
         source_mode = "contract+legacy" if legacy else "contract"
