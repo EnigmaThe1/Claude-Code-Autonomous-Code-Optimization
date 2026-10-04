@@ -558,8 +558,16 @@ def test_source_symlink_and_gitlink_are_rejected(monkeypatch):
     with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
         monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
         root = _repo(Path(td) / "repo")
-        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
-        _run(root, "git", "update-index", "--add", "--cacheinfo", f"160000,{head},nested")
+        nested = root / "nested"
+        nested.mkdir()
+        _run(nested, "git", "init", "-q")
+        _run(nested, "git", "config", "user.name", "Nested")
+        _run(nested, "git", "config", "user.email", "nested@example.invalid")
+        (nested / "task.json").write_text(json.dumps([_task("T1")]))
+        _run(nested, "git", "add", "task.json")
+        _run(nested, "git", "commit", "-qm", "nested")
+        nested_head = _run(nested, "git", "rev-parse", "HEAD").stdout.strip()
+        _run(root, "git", "update-index", "--add", "--cacheinfo", f"160000,{nested_head},nested")
         _run(root, "git", "commit", "-qm", "gitlink")
         _write_governance(root, _contract([_json_source("s", "nested")]))
         with pytest.raises(TaskSourceError, match="gitlink"):
