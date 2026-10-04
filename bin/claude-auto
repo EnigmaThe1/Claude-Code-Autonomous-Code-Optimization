@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SELF_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+ROOT="$(cd "$SELF_DIR/.." && pwd)"
+
+# Do not let process-scoped Git config injection leak into the long-running
+# autonomous supervisor. Keep ordinary Git auth/transport variables intact.
+while IFS='=' read -r name _; do
+  case "$name" in
+    GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_KEY_[0-9]*|GIT_CONFIG_VALUE_[0-9]*)
+      unset "$name"
+      ;;
+  esac
+done < <(env)
+
+export PYTHONDONTWRITEBYTECODE=1
+exec python3 -B "$ROOT/lib/claude_auto.py" "$@"

@@ -1,0 +1,111 @@
+name: Release candidate qualification
+
+on:
+  push:
+    branches:
+      - "release/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate release branch identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(cat VERSION)"
+          if [[ "$GITHUB_REF_NAME" == release/* ]]; then
+            test "${GITHUB_REF_NAME#release/}" = "$VERSION"
+          fi
+          test "$VERSION" = "1.0.0-rc1"
+      - name: Install qualification prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap shellcheck unzip
+          python -m pip install --disable-pip-version-check pytest pytest-cov ruff
+      - name: Source qualification
+        env:
+          PYTHONPATH: lib
+        run: |
+          set -euo pipefail
+          sha256sum -c MANIFEST.sha256
+          bash -n install.sh
+          bash -n uninstall.sh
+          bash -n bin/claude-auto
+          python -m compileall -q lib hooks tests
+          ruff check lib hooks tests --select E9,F63,F7,F82
+          shellcheck -x install.sh uninstall.sh bin/claude-auto
+          python -m pytest -q
+          python -m pytest -q --cov=lib --cov=hooks --cov-report=term
+      - name: Build deterministic archive
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, stat, zipfile
+          root=Path.cwd(); version=(root/"VERSION").read_text().strip()
+          top=f"claude-code-autonomous-code-optimization-{version}"
+          out=Path("/tmp")/f"{top}.zip"
+          entries=[]
+          for line in (root/"MANIFEST.sha256").read_text().splitlines():
+              if line.strip():
+                  _digest, rel=line.split(None,1); entries.append(rel.strip())
+          rels=sorted(set(entries+["MANIFEST.sha256"]))
+          with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as zf:
+              for rel in rels:
+                  p=root/rel
+                  info=zipfile.ZipInfo(f"{top}/{rel}",date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3
+                  info.external_attr=(stat.S_IFREG|stat.S_IMODE(p.stat().st_mode))<<16
+                  zf.writestr(info,p.read_bytes())
+          print("sha256="+hashlib.sha256(out.read_bytes()).hexdigest())
+          with zipfile.ZipFile(out) as zf:
+              for rel in ("bin/claude-auto","install.sh","uninstall.sh"):
+                  if ((zf.getinfo(f"{top}/{rel}").external_attr>>16)&0o111)==0:
+                      raise SystemExit(f"{rel} lost executable archive mode")
+          Path("/tmp/archive-path").write_text(str(out))
+          PY
+      - name: Qualify extracted archive
+        run: |
+          set -euo pipefail
+          ZIP="$(cat /tmp/archive-path)"
+          rm -rf /tmp/claude-auto-release && mkdir -p /tmp/claude-auto-release
+          unzip -q "$ZIP" -d /tmp/claude-auto-release
+          PKG="/tmp/claude-auto-release/claude-code-autonomous-code-optimization-$(cat VERSION)"
+          cd "$PKG"
+          sha256sum -c MANIFEST.sha256
+          PYTHONPATH=lib python -m pytest -q
+      - name: Transactional installer smoke
+        run: |
+          set -euo pipefail
+          ZIP="$(cat /tmp/archive-path)"
+          TEST_HOME="$(mktemp -d)"
+          rm -rf /tmp/claude-auto-install && mkdir -p /tmp/claude-auto-install
+          unzip -q "$ZIP" -d /tmp/claude-auto-install
+          PKG="/tmp/claude-auto-install/claude-code-autonomous-code-optimization-$(cat VERSION)"
+          export HOME="$TEST_HOME"
+          export CLAUDE_AUTONOMY_HOME="$TEST_HOME/.local/share/claude-autonomy"
+          export CLAUDE_AUTONOMY_BIN="$TEST_HOME/.local/bin"
+          mkdir -p "$CLAUDE_AUTONOMY_BIN"
+          cd "$PKG"
+          ./install.sh --no-plugins
+          test "$("$CLAUDE_AUTONOMY_BIN/claude-auto" --version)" = "claude-auto 1.0.0-rc1"
+          "$CLAUDE_AUTONOMY_HOME/uninstall.sh"
+      - name: Upload qualified archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-code-autonomous-code-optimization-${{ github.sha }}
+          path: /tmp/claude-code-autonomous-code-optimization-*.zip
+          if-no-files-found: error

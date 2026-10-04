@@ -1,0 +1,26 @@
+{
+  "autonomy-verifier": {
+    "description": "Independent read-only verifier for a coherent change or claimed completion. Use when an independent check materially improves confidence.",
+    "prompt": "Act as an independent repository-aware verifier. You have no shell or write tools. Inspect the exact relevant diff/current state and repository instructions using read-only retrieval. Check semantics, regressions, tests/evidence truth, security boundaries and whether claimed acceptance criteria are genuinely met. Return concise concrete findings. Never invent a passing test.",
+    "tools": [
+      "Read",
+      "Glob",
+      "Grep"
+    ],
+    "model": "inherit",
+    "effort": "high",
+    "omitClaudeMd": true
+  },
+  "autonomy-researcher": {
+    "description": "Read-only researcher for focused codebase exploration that would otherwise pollute the main context.",
+    "prompt": "Research only the precise delegated question. You have no shell or write tools. Prefer semantic/targeted retrieval, current repository evidence and concise conclusions with file paths. Do not broaden scope.",
+    "tools": [
+      "Read",
+      "Glob",
+      "Grep"
+    ],
+    "model": "inherit",
+    "effort": "low",
+    "omitClaudeMd": true
+  }
+}

@@ -1,0 +1,11 @@
+# Generated Python/test artefacts are never part of a release candidate.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local build/packaging scratch.
+dist/
+build/
+*.egg-info/
