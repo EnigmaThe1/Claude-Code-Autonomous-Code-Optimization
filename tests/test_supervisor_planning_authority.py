@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 import claude_auto as ca
 import planning_repair as pr
 from planning_repair import configure_planning_repair
@@ -317,3 +319,29 @@ def test_worker_cannot_mutate_git_trust_promotion_or_planning_policy(monkeypatch
         )
         assert rc == 2
         assert "top-level shell" in capsys.readouterr().err
+
+
+def test_operator_authority_rejects_tty_caller_inside_live_supervisor_tree(monkeypatch):
+    import operator_authority as oa
+
+    class FakeTTY:
+        def isatty(self):
+            return True
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("CLAUDE_AUTO_HEADLESS", raising=False)
+        monkeypatch.setattr(oa.sys, "stdin", FakeTTY())
+        monkeypatch.setattr(oa.sys, "stdout", FakeTTY())
+        monkeypatch.setattr(
+            oa,
+            "load_json",
+            lambda *_a, **_k: {"supervisor_pid": 4242, "supervisor_start_token": "live"},
+        )
+        monkeypatch.setattr(oa, "supervisor_is_live", lambda _state: True)
+        monkeypatch.setattr(oa, "process_descends_from", lambda _pid, ancestor: ancestor == 4242)
+
+        with pytest.raises(ValueError, match="supervisor process tree"):
+            oa.require_top_level_operator(root, "test authority change")
