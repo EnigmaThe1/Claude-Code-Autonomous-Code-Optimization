@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import importlib.util
 import subprocess
 import tempfile
@@ -23,7 +24,7 @@ def _repo() -> Path:
     return d
 
 
-def test_unattended_profile_removes_package_restrictions():
+def test_unattended_profile_removes_operational_restrictions_but_keeps_semantic_guard():
     d = _repo()
     sd = Path(tempfile.mkdtemp())
     settings = ca.make_settings(
@@ -36,8 +37,9 @@ def test_unattended_profile_removes_package_restrictions():
     assert settings["permissions"]["deny"] == []
     assert settings["permissions"]["blockReadsOutsideWorkingDirectories"] is False
     rendered = str(settings.get("hooks", {}))
-    assert "write_boundary_guard.py" not in rendered
+    assert "write_boundary_guard.py" in rendered
     assert "docker_guard.py" not in rendered
+    assert settings["env"]["CLAUDE_AUTO_SEMANTIC_ONLY_WRITE_GUARD"] == "1"
     assert ca.permission_mode_for_profile("auto", "unattended") == "bypassPermissions"
 
 
@@ -430,3 +432,75 @@ def test_rendered_background_permission_commands_are_repo_bound():
     rendered = ca.render_permission_request(request)
     assert "--repo '/tmp/repo with space'" in rendered
     assert f"--id {request['id']}" in rendered
+
+
+def _write_guard_decision(guard: Path, event: dict, env: dict[str, str]) -> str:
+    cp = subprocess.run(
+        [str(guard)],
+        input=json.dumps(event),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=True,
+    )
+    obj = json.loads(cp.stdout)
+    return obj["hookSpecificOutput"]["permissionDecision"]
+
+
+def test_semantic_only_write_guard_allows_host_scope_but_denies_governance_paths():
+    repo = _repo()
+    state = Path(tempfile.mkdtemp())
+    governance = state / "governance"
+    governance.mkdir()
+    (governance / "snapshot.json").write_text(json.dumps({
+        "schema_version": 1,
+        "protected_paths": ["PLAN.md"],
+        "snapshot_sha256": "0" * 64,
+    }))
+    (repo / "PLAN.md").write_text("protected\n")
+    outside_dir = Path(tempfile.mkdtemp())
+    outside = outside_dir / "allowed.txt"
+    guard = ROOT / "hooks" / "write_boundary_guard.py"
+
+    env = dict(os.environ)
+    env.update({
+        "CLAUDE_AUTO_REPO_ROOT": str(repo),
+        "CLAUDE_AUTONOMY_STATE_DIR": str(state),
+        "CLAUDE_AUTO_SEMANTIC_ONLY_WRITE_GUARD": "1",
+        "CLAUDE_AUTO_PROTECTED_REPO_PATHS": json.dumps([str((repo / "PLAN.md").resolve())]),
+    })
+
+    assert _write_guard_decision(
+        guard,
+        {"tool_name": "Write", "tool_input": {"file_path": str(outside)}},
+        env,
+    ) == "allow"
+    assert _write_guard_decision(
+        guard,
+        {"tool_name": "Write", "tool_input": {"file_path": str(repo / "PLAN.md")}},
+        env,
+    ) == "deny"
+    assert _write_guard_decision(
+        guard,
+        {"tool_name": "Bash", "tool_input": {"command": f"printf ok > {outside}"}},
+        env,
+    ) == "allow"
+    assert _write_guard_decision(
+        guard,
+        {"tool_name": "Bash", "tool_input": {"command": "printf bad > PLAN.md"}},
+        env,
+    ) == "deny"
+
+
+def test_isolated_full_also_keeps_semantic_write_guard():
+    repo = _repo()
+    sd = Path(tempfile.mkdtemp())
+    settings = ca.make_settings(
+        sd,
+        "external",
+        "isolated-full",
+        {"repo_root": str(repo), "languages": [], "container_files": []},
+    )
+    assert settings["sandbox"]["enabled"] is False
+    assert settings["env"]["CLAUDE_AUTO_SEMANTIC_ONLY_WRITE_GUARD"] == "1"
+    assert "write_boundary_guard.py" in str(settings.get("hooks", {}))
