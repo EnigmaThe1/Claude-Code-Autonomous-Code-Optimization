@@ -39,3 +39,10 @@ jobs:
           python -m pytest -q tests/test_environment_resilience.py
           python -m pytest -q tests/test_environment_blocker_hardening.py
           python -m pytest -q tests/test_profile_switch.py
+
+      - name: Full source regression suite
+        env:
+          PYTHONPATH: lib
+        run: |
+          python -m pytest -q
+          python -m pytest -q --cov=lib --cov=hooks --cov-report=term
