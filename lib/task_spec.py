@@ -53,6 +53,7 @@ _MANDATORY_PROTECTED_ANCHORS = (
     ".mcp.json",
     ".gitattributes",
     ".gitmodules",
+    ".git/config",
     "CLAUDE.md",
 )
 
@@ -131,6 +132,8 @@ def _validate_task_id(value: Any, *, where: str) -> str:
 
 
 def _selector_hits_protected(selector: str, protected_paths: set[str]) -> str | None:
+    if selector == ".git" or selector.startswith(".git/"):
+        return ".git/"
     if selector == ".claude-auto" or selector.startswith(".claude-auto/"):
         return ".claude-auto/"
     if selector == ".claude" or selector.startswith(".claude/"):
