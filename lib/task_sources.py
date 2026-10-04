@@ -480,6 +480,10 @@ def resolve_task_sources(
     }
 
     if persist:
+        # Keep the durable state lifecycle identical to ordinary Claude Auto
+        # activation. Import lazily to avoid a module cycle at import time.
+        from repo_runtime import activate
+        activate(root)
         path = _resolved_path(root)
         ensure_private_dir(path.parent)
         persisted = dict(result)
