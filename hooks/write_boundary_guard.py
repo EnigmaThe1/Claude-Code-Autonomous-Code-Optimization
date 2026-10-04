@@ -70,6 +70,31 @@ def _approved_target(target: Path) -> bool:
     return resolved in _approved_paths()
 
 
+def _protected_paths() -> set[Path]:
+    raw = os.environ.get("CLAUDE_AUTO_PROTECTED_REPO_PATHS", "[]")
+    try:
+        values = json.loads(raw)
+    except Exception:
+        return set()
+    out: set[Path] = set()
+    if isinstance(values, list):
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            try:
+                out.add(Path(value).expanduser().resolve(strict=False))
+            except (OSError, RuntimeError, ValueError):
+                continue
+    return out
+
+
+def _protected_target(target: Path) -> bool:
+    try:
+        return target.resolve(strict=False) in _protected_paths()
+    except (OSError, RuntimeError, ValueError):
+        return True
+
+
 def _outside(root: Path, target: Path) -> bool:
     try:
         target.relative_to(root)
@@ -332,6 +357,8 @@ def _guard_bash(
             target = _resolve_target(root, cwd, raw, effective_vars)
             if target is None:
                 return "deny", f"Claude Auto could not safely resolve Bash write target: {raw}"
+            if _protected_target(target):
+                return "deny", f"Bash mutation of a protected repository path is denied: {target}"
             if _outside(root, target) and not _approved_target(target):
                 return "deny", f"Bash mutation outside the selected repository root is denied: {target}"
 
@@ -364,6 +391,9 @@ def main() -> int:
             decision("deny", "Claude Auto write-boundary guard could not identify the mutation path.")
             return 0
         root, target = _root_and_target(root_raw, str(raw))
+        if _protected_target(target):
+            decision("deny", f"Direct mutation of a protected repository path is denied: {target}")
+            return 0
         if _outside(root, target) and not _approved_target(target):
             decision("deny", f"Direct mutation outside the selected repository root is denied: {target}")
             return 0
