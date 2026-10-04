@@ -255,6 +255,13 @@ def build_parser(version: str) -> argparse.ArgumentParser:
     gq = gsp.add_parser("status", help="Show the exact resolved AuthoritySet snapshot")
     gq.add_argument("--repo")
 
+    q = sp.add_parser("tasks", help="Inspect or resolve repository-owned TaskSpec sources")
+    tsp = q.add_subparsers(dest="tasks_command", required=True)
+    tq = tsp.add_parser("status", help="Show persisted TaskSourceSet state without executing adapters")
+    tq.add_argument("--repo")
+    tq = tsp.add_parser("resolve", help="Resolve exact committed TaskSpecs; adapters run only in the bounded P2 sandbox")
+    tq.add_argument("--repo")
+
     q = sp.add_parser("profile", help="Inspect or request a human-controlled hot profile switch")
     psp = q.add_subparsers(dest="profile_command", required=True)
     pq = psp.add_parser("status", help="Show the active profile and any pending switch")
