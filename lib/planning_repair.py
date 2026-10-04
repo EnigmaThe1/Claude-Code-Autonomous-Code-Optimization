@@ -739,6 +739,11 @@ def abort_planning_repair(root: Path) -> dict[str, Any]:
 
 def planning_repair_action(args: Any, *, find_repo_root) -> int:
     try:
+        action = getattr(args, "planning_repair_command", None)
+        if action in ["configure","begin","architect","verify","refresh-base","promote","abort"] and os.environ.get("CLAUDECODE") == "1":
+            raise ValueError(
+                "this authority-changing command must be run by the operator/supervisor from a top-level shell"
+            )
         root = find_repo_root(getattr(args, "repo", None))
         action = getattr(args, "planning_repair_command", None)
         if action == "status":
