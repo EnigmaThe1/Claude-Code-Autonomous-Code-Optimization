@@ -48,9 +48,19 @@ A token-aware container guard rejects dangerous host-control forms while allowin
 
 Planning, simulation, red-team, correctness, security and model-qualification roles are more restricted than the mutating worker and use repository mutation evidence checks.
 
-## Recovery
+## Git trust and recovery
 
 Cleanup and promotion helpers are narrow and prove locality, Git ancestry, content identity and work-in-progress preservation before mutation.
+
+Broker-owned Git operations do not trust inherited process-scoped `GIT_CONFIG_*` values for WIP/promotion semantics. Claude Auto rebuilds a private Git view with a package-owned excludes file, hooks disabled, fsmonitor disabled and recursive submodule behaviour disabled. An operator may register an external excludes source, but its contents are copied into private package state so later source-file edits cannot silently change broker truth.
+
+Remote promotion requires an exact expected remote base and verifies the final remote SHA. A lost client response after a successful server-side push is reconciled against durable remote truth rather than replayed blindly.
+
+## Planning authority
+
+When repository-owned planning is configured, the tracked canonical plan is protected from ordinary Balanced/Strict worker writes. Authority-changing `git-trust`, promotion-policy and planning-repair CLI actions refuse invocation from inside an active Claude worker. A repair candidate must be independently verified at its exact SHA before the canonical-plan promotion broker accepts it.
+
+Unattended remains explicit unrestricted host authority; for untrusted repositories use an outer disposable VM/container.
 
 ## Untrusted repositories
 
