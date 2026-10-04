@@ -411,7 +411,13 @@ def run_planning_repair_architect(root: Path, args: Any) -> dict[str, Any]:
     if staged.returncode == 0:
         _restore_architect_worktree(worktree, before_head)
         raise ValueError("planning repair architect produced no canonical plan change")
-    commit = _git(worktree, "commit", "-m", "Repair canonical implementation plan")
+    commit = _git(
+        worktree,
+        "-c", "user.name=Claude Code Autonomous Optimization",
+        "-c", "user.email=claude-auto@localhost.invalid",
+        "-c", "commit.gpgSign=false",
+        "commit", "-m", "Repair canonical implementation plan",
+    )
     if commit.returncode != 0:
         _restore_architect_worktree(worktree, before_head)
         detail = (commit.stderr or commit.stdout or "git commit failed").strip()
