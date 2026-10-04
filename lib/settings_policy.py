@@ -366,6 +366,10 @@ def make_settings(
                     deny.append(rule)
         if protected_abs:
             template["env"]["CLAUDE_AUTO_PROTECTED_REPO_PATHS"] = json.dumps(protected_abs)
+        if profile["isolated_full"] or unrestricted:
+            # Preserve semantic planning/task/control authority even when the
+            # operator deliberately grants broad host/runtime write authority.
+            template["env"]["CLAUDE_AUTO_SEMANTIC_ONLY_WRITE_GUARD"] = "1"
         if unrestricted:
             # Explicit unrestricted/Unattended authority intentionally spans the
             # host filesystem. additionalDirectories grants file access without
@@ -522,9 +526,10 @@ def make_settings(
             package_root() / "hooks" / "read_scope_guard.py",
             matcher="Read|Grep|Glob",
         )
-    if repo_root and autonomy_profile != "isolated-full" and not unrestricted:
-        # Fence direct file tools and the common statically-identifiable Bash
-        # write paths before Claude's sandbox/Auto fallback is considered.
+    if repo_root:
+        # Semantic repository authority is independent of runtime autonomy.
+        # Balanced/Strict also enforce the normal host/repository boundary;
+        # Isolated Full/Unattended invoke the same hook in semantic-only mode.
         _append_command_hook(
             template,
             "PreToolUse",
