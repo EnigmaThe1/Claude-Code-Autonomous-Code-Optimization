@@ -246,24 +246,31 @@ def _bwrap_base(
             args += ["--tmpfs", str(candidate)]
 
     if read_allowlist_only:
-        # Adapter sources with read_external=[] get a substantially narrower
-        # filesystem view than ordinary repository verification. Keep only the
-        # essential system runtime trees exposed by the initial read-only root;
-        # mask common configuration/data/mount roots completely.
-        for candidate in (
-            Path("/etc"),
-            Path("/var"),
-            Path("/opt"),
-            Path("/srv"),
-            Path("/mnt"),
-            Path("/media"),
-            Path("/boot"),
-            Path("/sys"),
-            Path("/workspace"),
-        ):
-            if candidate.exists() and candidate not in mask_points:
-                mask_points.append(candidate)
-                args += ["--tmpfs", str(candidate)]
+        # Adapter sources with read_external=[] are default-deny at the host
+        # filesystem level. Keep only essential runtime trees from the initial
+        # read-only root. Every other top-level directory is replaced with an
+        # empty tmpfs; root-level regular files are overlaid with /dev/null.
+        # Unknown symlink/special-file layouts fail closed instead of guessing.
+        allowed_top = {"usr", "bin", "lib", "lib64", "sbin", "proc", "dev"}
+        try:
+            top_level = list(Path("/").iterdir())
+        except OSError:
+            return None
+        for candidate in top_level:
+            if candidate.name in allowed_top or candidate in mask_points:
+                continue
+            try:
+                if candidate.is_symlink():
+                    return None
+                if candidate.is_dir():
+                    mask_points.append(candidate)
+                    args += ["--tmpfs", str(candidate)]
+                elif candidate.is_file():
+                    args += ["--ro-bind", "/dev/null", str(candidate)]
+                else:
+                    return None
+            except OSError:
+                return None
 
     # Homes outside conventional /home are masked explicitly too.
     if real_home.exists() and not any(_path_is_within(real_home, p) for p in mask_points):
