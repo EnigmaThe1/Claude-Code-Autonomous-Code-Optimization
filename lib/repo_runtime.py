@@ -161,12 +161,10 @@ def activate(root: Path, dry_run: bool = False) -> Path:
         state["governance_snapshot_generation"] = int(
             state.get("governance_snapshot_generation", 0) or 0
         ) + 1
+        # A resolved TaskSourceSet is bound to the exact AuthoritySet snapshot.
+        # P2 resolution will repopulate this with the effective merged digest.
+        state["task_source_sha256"] = None
     state["governance_snapshot_sha256"] = current_governance
-    state["task_source_sha256"] = (
-        authority_snapshot.get("task_source_contract_digest")
-        if isinstance(authority_snapshot, dict)
-        else None
-    )
     state["governance_blocker"] = None
     json_dump(sd / "state.json", state)
     prof_dict = asdict(prof)
