@@ -155,7 +155,7 @@ def _readonly_toolchain_paths(root: Path) -> list[Path]:
     return out
 
 
-def _sandbox_settings(root: Path, temp_home: Path) -> dict[str, Any]:
+def _sandbox_settings(root: Path, temp_home: Path, *, read_only_root: bool = False) -> dict[str, Any]:
     root = root.resolve()
     real_home = Path.home().resolve()
     deny_read = [
@@ -163,10 +163,12 @@ def _sandbox_settings(root: Path, temp_home: Path) -> dict[str, Any]:
         str(root / ".git"),
     ]
     allow_read = [str(root), *(str(p) for p in _readonly_toolchain_paths(root))]
-    allow_write = [str(root), str(temp_home), str(temp_home / "tmp")]
-    deny_write = [
-        str(root / ".git"),
-    ]
+    allow_write = [str(temp_home), str(temp_home / "tmp")]
+    if not read_only_root:
+        allow_write.insert(0, str(root))
+    deny_write = [str(root / ".git")]
+    if read_only_root:
+        deny_write.insert(0, str(root))
     return {
         "network": {
             "allowedDomains": [],
@@ -193,7 +195,7 @@ def _path_is_within(path: Path, parent: Path) -> bool:
         return False
 
 
-def _bwrap_base(root: Path) -> list[str] | None:
+def _bwrap_base(root: Path, *, read_only_root: bool = False, cwd: Path | None = None) -> list[str] | None:
     """Build a Linux bubblewrap boundary that hides user homes and network."""
     if sys.platform != "linux":
         return None
@@ -241,7 +243,7 @@ def _bwrap_base(root: Path) -> list[str] | None:
     # If the selected repository lives under a masked tree (common for /home and
     # pytest /tmp repos), recreate only its destination path before binding it.
     recreate_target(root)
-    args += ["--bind", str(root), str(root)]
+    args += ["--ro-bind" if read_only_root else "--bind", str(root), str(root)]
 
     # Restore only narrowly-scoped non-secret dependency/toolchain directories
     # beneath a masked home, and restore them read-only.
@@ -257,7 +259,10 @@ def _bwrap_base(root: Path) -> list[str] | None:
 
     # Fresh minimal kernel/device views.  The new network namespace has no host
     # interfaces/routes; no host /run sockets survive the tmpfs mask above.
-    args += ["--proc", "/proc", "--dev", "/dev", "--chdir", str(root)]
+    workdir = (cwd or root).resolve()
+    if not _path_is_within(workdir, root):
+        return None
+    args += ["--proc", "/proc", "--dev", "/dev", "--chdir", str(workdir)]
     return args
 
 
@@ -267,8 +272,10 @@ def _run_bwrap(
     *,
     env: dict[str, str],
     timeout: int | None,
+    read_only_root: bool = False,
+    cwd: Path | None = None,
 ) -> dict[str, Any] | None:
-    base = _bwrap_base(root)
+    base = _bwrap_base(root, read_only_root=read_only_root, cwd=cwd)
     if base is None:
         return None
 
@@ -293,7 +300,7 @@ def _run_bwrap(
     sandbox_env["TMPDIR"] = "/tmp"
     result = _run_process(
         [*base, "--dir", "/tmp/claude-auto-home", "--", *inner],
-        cwd=root,
+        cwd=(cwd or root),
         env=sandbox_env,
         timeout=timeout,
     )
@@ -357,6 +364,8 @@ def run_repository_command(
     timeout: int | None = None,
     trust_repo_scripts: bool = False,
     unrestricted_host: bool = False,
+    read_only_root: bool = False,
+    working_directory: Path | None = None,
 ) -> dict[str, Any]:
     """Run repository-controlled code under an explicit execution boundary.
 
@@ -370,6 +379,11 @@ def run_repository_command(
     environment.  This never restores the supervisor's provider/cloud secrets.
     """
     root = root.resolve()
+    workdir = (working_directory or root).resolve()
+    if not _path_is_within(workdir, root):
+        raise ValueError("working_directory must remain within the repository execution root")
+    if read_only_root and unrestricted_host:
+        raise ValueError("read_only_root cannot be combined with unrestricted host execution")
     with tempfile.TemporaryDirectory(prefix="claude-auto-exec-") as td:
         temp_home = Path(td)
         (temp_home / "tmp").mkdir(parents=True, exist_ok=True)
@@ -388,7 +402,7 @@ def run_repository_command(
         assert inner is not None
 
         if unrestricted_host:
-            result = _run_process(inner, cwd=root, env=dict(os.environ), timeout=timeout)
+            result = _run_process(inner, cwd=workdir, env=dict(os.environ), timeout=timeout)
             result.update({
                 "execution_boundary": "unattended-host",
                 "sandboxed": False,
@@ -398,12 +412,12 @@ def run_repository_command(
 
         srt = shutil.which("srt")
         if srt:
-            settings = _sandbox_settings(root, temp_home)
+            settings = _sandbox_settings(root, temp_home, read_only_root=read_only_root)
             settings_path = temp_home / "srt-settings.json"
             settings_path.write_text(json.dumps(settings, indent=2) + "\n")
             result = _run_process(
                 [srt, "--settings", str(settings_path), *inner],
-                cwd=root,
+                cwd=workdir,
                 env=env,
                 timeout=timeout,
             )
@@ -417,7 +431,14 @@ def run_repository_command(
         # Linux can enforce the same essential boundary directly with bubblewrap,
         # which is also the primitive used by Sandbox Runtime on Linux.  This
         # avoids turning a missing npm-level srt wrapper into vacuous verification.
-        bwrap_result = _run_bwrap(root, inner, env=env, timeout=timeout)
+        bwrap_result = _run_bwrap(
+            root,
+            inner,
+            env=env,
+            timeout=timeout,
+            read_only_root=read_only_root,
+            cwd=workdir,
+        )
         if bwrap_result is not None:
             if bwrap_result.get("execution_boundary") != "unavailable":
                 return bwrap_result
@@ -426,10 +447,10 @@ def run_repository_command(
             # trusted-repository override means "fall back to scrubbed host
             # execution when isolation cannot be established", not merely when
             # the binary is absent.
-            if not trust_repo_scripts:
+            if not trust_repo_scripts or read_only_root:
                 return bwrap_result
 
-        if not trust_repo_scripts:
+        if not trust_repo_scripts or read_only_root:
             return {
                 "returncode": 125,
                 "stdout": "",
@@ -447,7 +468,7 @@ def run_repository_command(
                 "environment_scrubbed": True,
             }
 
-        result = _run_process(inner, cwd=root, env=env, timeout=timeout)
+        result = _run_process(inner, cwd=workdir, env=env, timeout=timeout)
         result.update({
             "execution_boundary": "trusted-host",
             "sandboxed": False,
