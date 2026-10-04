@@ -26,6 +26,7 @@ from state_store import json_dump
 
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "hooks" / "planning_repair_guard.py"
+WRITE_GUARD = ROOT / "hooks" / "write_boundary_guard.py"
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -266,3 +267,44 @@ def test_refresh_base_recovers_stale_in_progress_marker_and_retries(monkeypatch)
         result = refresh_planning_repair_base(root)
         assert result["status"] == "rebased"
         assert result["base_sha"] == new_base
+
+
+def test_product_write_guard_denies_bash_and_direct_mutation_of_canonical_plan(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        configure_planning_repair(root, canonical_plan="IMPLEMENTATION_PLAN.md")
+        settings = make_settings(
+            pr.repo_state_dir(root),
+            "external",
+            "balanced",
+            {"repo_root": str(root), "languages": [], "container_files": []},
+        )
+        env = os.environ.copy()
+        env.update(settings["env"])
+
+        direct = subprocess.run(
+            [os.sys.executable, str(WRITE_GUARD)],
+            input=json.dumps({
+                "tool_name": "Edit",
+                "tool_input": {"file_path": str(root / "IMPLEMENTATION_PLAN.md")},
+            }),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        assert json.loads(direct.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+        bash = subprocess.run(
+            [os.sys.executable, str(WRITE_GUARD)],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "printf 'changed\\n' > IMPLEMENTATION_PLAN.md"},
+            }),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        assert json.loads(bash.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
