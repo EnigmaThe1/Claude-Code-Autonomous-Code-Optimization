@@ -432,3 +432,10 @@ def authority_status(root: Path) -> dict[str, Any]:
         "status": "READY",
         "snapshot": snapshot,
     }
+
+
+def governance_action(args: Any, *, find_repo_root) -> int:
+    root = find_repo_root(getattr(args, "repo", None))
+    result = authority_status(root)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 2 if result.get("status") == "BLOCKED" else 0
