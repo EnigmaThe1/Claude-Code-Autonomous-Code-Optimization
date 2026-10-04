@@ -309,6 +309,28 @@ def make_settings(
         additional = permissions.setdefault("additionalDirectories", [])
         if repo_root not in additional:
             additional.append(repo_root)
+
+        # A configured repository-owned canonical plan is mutable only through
+        # the dedicated planning-repair workflow.  Normal Balanced/Strict workers
+        # receive both direct-tool denies and a Bash path guard for the exact file.
+        repair_policy = load_json(state_dir / "planning-repair" / "policy.json", {})
+        canonical_plan = repair_policy.get("canonical_plan") if isinstance(repair_policy, dict) else None
+        if isinstance(canonical_plan, str) and canonical_plan.strip() and not unrestricted:
+            try:
+                protected = (Path(repo_root) / canonical_plan).resolve(strict=False)
+                protected.relative_to(Path(repo_root))
+            except (OSError, RuntimeError, ValueError):
+                protected = None
+            if protected is not None:
+                template["env"]["CLAUDE_AUTO_PROTECTED_REPO_PATHS"] = json.dumps([str(protected)])
+                rel = Path(canonical_plan).as_posix()
+                for rule in (
+                    f"Edit(./{rel})",
+                    f"Write(./{rel})",
+                    f"NotebookEdit(./{rel})",
+                ):
+                    if rule not in deny:
+                        deny.append(rule)
         if unrestricted:
             # Explicit unrestricted/Unattended authority intentionally spans the
             # host filesystem. additionalDirectories grants file access without
