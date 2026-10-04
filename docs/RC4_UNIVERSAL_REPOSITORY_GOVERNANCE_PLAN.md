@@ -726,6 +726,114 @@ A validator is never allowed to mutate source and then call the mutation “vali
 
 A generator/reconciler may mutate only declared generated paths inside a dedicated worktree.
 
+## 20.1 Governance is semantic authority, not a permission profile
+
+Task/planning governance must remain enforced in every execution profile.
+
+- Balanced may reduce prompts but cannot widen task or planning authority.
+- Strict may further narrow runtime permissions.
+- Unattended removes ordinary human approval friction, but it must **not** disable planning authority, task ownership, exact-SHA verification or promotion gates.
+- Isolated Full may broaden runtime execution inside its outer isolation boundary, but accepted product history is still constrained by the same Authority Set and TaskSpec.
+
+Profiles control *how operations execute*. Governance controls *which product/planning state is authorised*. The two concerns must not be conflated.
+
+## 20.2 Named authority domains for large monorepos
+
+Some monorepos contain several genuinely independent planning domains rather than one global plan.
+
+RC4 schema should therefore allow a repository to define either:
+
+- one default Authority Set; or
+- multiple named Authority Sets/domains.
+
+A task may reference one or more authority-domain IDs. Repair and attestation are scoped to the affected domain(s), while the repository-level governance contract remains common.
+
+Example conceptual structure:
+
+```json
+{
+  "planning_authority": {
+    "sets": [
+      {"id": "platform", "members": []},
+      {"id": "service-a", "members": []},
+      {"id": "service-b", "members": []}
+    ]
+  }
+}
+```
+
+The one-file and ordinary multi-file cases remain shorthand for one default set.
+
+Cross-domain dependencies are allowed only when they resolve unambiguously. A repair must not gain permission to change unrelated domains merely because they share the same Git root.
+
+## 20.3 Repository control surfaces require stronger treatment
+
+The following files can change the behaviour of the harness or verification environment and therefore must not be treated as ordinary product files merely because they live inside the repository:
+
+- `.claude-auto/governance.json`;
+- `.claude-auto/verification.json`;
+- task-adapter source/configuration;
+- planning validator/reconciler definitions;
+- Claude project settings/hooks/agents/skills used by the selected session;
+- Git control files such as `.gitattributes`, `.gitmodules` and repository-local config that changes checkout/filter/submodule semantics.
+
+RC4 must classify these as **control surfaces**.
+
+Rules:
+
+- control-surface mutation cannot silently take effect inside an already-authorised task;
+- a change invalidates the relevant governance/verification/session snapshot;
+- weakening a verification contract cannot make the same candidate pass;
+- repository hooks or filters are never trusted promotion/commit authority;
+- package-owned commits should disable repository Git hooks and signing requirements where appropriate;
+- trusted inspection should avoid external diff/text-conversion execution and use plumbing/structured Git output where possible;
+- a task that legitimately needs to modify a control surface must go through an explicit control-surface repair/change path and fresh independent verification.
+
+This prevents a task from first weakening its own guard/verification configuration and then using the weakened policy.
+
+## 20.4 Out-of-band repository changes
+
+The supervisor must treat unexpected repository changes as a first-class concurrency event.
+
+If HEAD, index, tracked WIP, Authority Set, TaskSpec source or control-surface identity changes outside the current supervisor:
+
+- pause mutation;
+- classify whether the change is a known descendant produced by the supervisor;
+- invalidate stale task/planning/verification snapshots when identity changed;
+- recompute overlap with the active task;
+- resume only after exact reconciliation.
+
+Ancestry alone is insufficient: an out-of-band descendant commit may still change planning or task authority.
+
+## 20.5 Adapter and validator capabilities
+
+Repository-supplied adapters/validators are read-only and networkless by default.
+
+If a legitimate source lives behind a network/API/database boundary, the adapter may **request** capabilities in its declaration, but the declaration cannot grant them.
+
+The package/operator policy decides whether to allow:
+
+- specific network domains;
+- loopback services;
+- a specific read-only external path;
+- a specific credential broker.
+
+Granted capability identity is included in the adapter snapshot. Changing requested capabilities invalidates the snapshot.
+
+Adapters must never receive arbitrary write authority merely because their data source is external.
+
+## 20.6 Claude Code platform boundary assumptions
+
+RC4 must explicitly test the Claude Code version it qualifies against instead of assuming sandbox behaviour.
+
+Current platform behaviour distinguishes:
+
+- shell commands/processes, which are inside the OS sandbox when enabled;
+- built-in file tools and hooks, which are outside that shell sandbox and therefore require package-level permission/hook enforcement;
+- native session resume by session ID or name.
+
+RC4 P0 must pin a minimum Claude Code version whose tested setting-source, strict-sandbox and resume semantics satisfy the governance model. If the platform behaviour changes, `claude-auto doctor` must detect the unsupported version rather than silently weakening the boundary.
+
 ## 21. Large-repository requirements
 
 RC4 must avoid per-tool-call full-repository rescans.
@@ -830,7 +938,17 @@ RC4 is not qualified until automated tests cover at least:
 51. exact named/session-ID resume under new RC4 policy;
 52. imported legacy task state reconciles or fails closed;
 53. 1,000-task multi-ledger stress fixture;
-54. 100,000-path matcher/resolution stress fixture.
+54. 100,000-path matcher/resolution stress fixture;
+55. Unattended profile still enforces task/planning governance;
+56. multiple named authority domains in one monorepo;
+57. task spanning two declared authority domains;
+58. unrelated authority domain cannot be modified by a scoped repair;
+59. task attempts to weaken governance/verification contract before commit;
+60. task changes Claude/Git control-surface files and forces revalidation;
+61. out-of-band descendant commit changes task authority;
+62. adapter requests undeclared network/credential capability;
+63. ignored/untracked scratch cannot be promoted with `git add -f`;
+64. repository Git hooks/filter/textconv cannot alter broker truth.
 
 ## 24. Shadow-validation requirement against a complex real-world structure
 
