@@ -54,12 +54,13 @@ fi
 
 PARENT="$(dirname "$DEST")"
 BASE="$(basename "$DEST")"
-STAGE="$PARENT/.${BASE}.stage.$$"
-BACKUP="$PARENT/.${BASE}.rollback.$$"
+STAGE="$PARENT/.${BASE}.stage.$"
+BACKUP="$PARENT/.${BASE}.rollback.$"
+SMOKE_STATE="$PARENT/.${BASE}.smoke-state.$"
 HAD_DEST=0
 SWAPPED=0
 LINK_CREATED=0
-rm -rf "$STAGE" "$BACKUP"
+rm -rf "$STAGE" "$BACKUP" "$SMOKE_STATE"
 mkdir -p "$STAGE"
 chmod 700 "$STAGE"
 
@@ -77,7 +78,7 @@ rollback() {
     fi
   fi
   [[ "$LINK_CREATED" -eq 1 ]] && rm -f "$LINK"
-  rm -rf "$STAGE" "$BACKUP"
+  rm -rf "$STAGE" "$BACKUP" "$SMOKE_STATE"
   exit "$rc"
 }
 trap rollback EXIT
@@ -127,7 +128,12 @@ os.chmod(stage_marker, 0o600)
 PY
 
 # Candidate must be self-consistent before the live install is moved at all.
+# Smoke tests receive isolated external state so candidate validation can never
+# create/mutate the future live DEST before the transactional swap.
+mkdir -p "$SMOKE_STATE"
+chmod 700 "$SMOKE_STATE"
 (
+  export CLAUDE_AUTONOMY_HOME="$SMOKE_STATE"
   cd "$STAGE"
   python3 - <<'PY'
 from pathlib import Path
@@ -413,6 +419,7 @@ with tempfile.TemporaryDirectory() as td:
 PY
   test "$(./bin/claude-auto --version)" = "claude-auto $(cat VERSION)"
 )
+rm -rf "$SMOKE_STATE"
 
 if [[ "$HAD_DEST" -eq 1 ]]; then
   mv "$DEST" "$BACKUP"
