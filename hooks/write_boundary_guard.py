@@ -112,6 +112,36 @@ def _protected_paths() -> set[Path]:
     return out
 
 
+def _planning_policy_invalid() -> bool:
+    state_raw = os.environ.get("CLAUDE_AUTONOMY_STATE_DIR")
+    root_raw = os.environ.get("CLAUDE_AUTO_REPO_ROOT")
+    if not state_raw or not root_raw:
+        return False
+    try:
+        policy_path = (
+            Path(state_raw).expanduser().resolve()
+            / "planning-repair"
+            / "policy.json"
+        )
+        if not policy_path.exists():
+            return False
+        policy = json.loads(policy_path.read_text())
+        if not isinstance(policy, dict):
+            return True
+        canonical = policy.get("canonical_plan")
+        if not isinstance(canonical, str) or not canonical.strip():
+            return True
+        rel = Path(canonical)
+        if rel.is_absolute() or ".." in rel.parts or rel == Path("."):
+            return True
+        root = Path(root_raw).expanduser().resolve()
+        target = (root / rel).resolve(strict=False)
+        target.relative_to(root)
+        return False
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        return True
+
+
 def _protected_target(target: Path) -> bool:
     try:
         return target.resolve(strict=False) in _protected_paths()
@@ -297,6 +327,8 @@ def _guard_bash(
         return "deny", "Claude Auto Bash write-boundary guard could not parse the command safely."
 
     root = Path(root_raw).expanduser().resolve()
+    if _planning_policy_invalid():
+        return "deny", "Claude Auto durable planning policy is invalid; repository mutation is blocked fail-closed."
     cwd = (initial_cwd or root).resolve()
     variables: dict[str, str | None] = dict(inherited_vars or {})
     variables.setdefault("PWD", str(cwd))
@@ -406,6 +438,9 @@ def main() -> int:
 
         if tool not in {"Write", "Edit", "NotebookEdit"}:
             decision("allow", "Tool is not a direct file mutation tool.")
+            return 0
+        if _planning_policy_invalid():
+            decision("deny", "Claude Auto durable planning policy is invalid; repository mutation is blocked fail-closed.")
             return 0
         raw = ti.get("file_path") or ti.get("notebook_path")
         if not root_raw:
