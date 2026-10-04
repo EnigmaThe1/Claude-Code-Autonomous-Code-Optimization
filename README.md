@@ -1,6 +1,6 @@
 # Claude Code Autonomous Code Optimization
 
-**Version 1.0.0-rc1**
+**Version 1.0.0-rc2**
 
 Claude Code Autonomous Code Optimization is a user-level control and optimisation layer for Claude Code. It is designed for long-running software-engineering work where Claude should keep implementing, testing, diagnosing and repairing until the requested objective is complete or a genuine external blocker is reached.
 
@@ -23,7 +23,11 @@ Repository: https://github.com/EnigmaThe1/Claude-Code-Autonomous-Code-Optimizati
 - provider/model qualification, fallback and retry handling;
 - repository-state, environment and toolchain continuity across resumes;
 - compact telemetry and durable checkpoints;
-- narrow recovery helpers for Git/workspace failure cases.
+- narrow recovery helpers for Git/workspace failure cases;
+- deterministic package-owned Git WIP/promotion context, including trusted excludes reconstruction;
+- exact-SHA verifier attestations for protected promotion;
+- optional remote-aware, idempotent promotion with exact expected-base protection;
+- optional repository-owned canonical-plan authority with dedicated repair worktrees and independent verification.
 
 The governing principle is: **the user's objective is authoritative; the implementation plan is a repairable route to that objective.**
 
@@ -43,6 +47,19 @@ During implementation:
 - unrelated product features or scope expansion are not authorised merely because they might be useful.
 
 Completion is accepted only after the whole plan and implementation survive deterministic verification plus independent review gates.
+
+### Repository-owned canonical plans
+
+Projects that keep their authoritative implementation plan inside Git can opt into stronger plan authority:
+
+```bash
+claude-auto planning-repair configure --repo . --plan IMPLEMENTATION_PLAN.md
+claude-auto run --repo . --plan IMPLEMENTATION_PLAN.md
+```
+
+Once configured, that exact tracked plan is the single planning authority. Normal Balanced/Strict workers cannot edit it directly. If implementation evidence exposes a material plan defect, the supervisor automatically uses a dedicated planning worktree, a one-plan Planning Repair Architect, an independent exact-SHA Planning Verifier, protected fast-forward promotion, and then rebuilds/revalidates the executable external plan from the promoted canonical file.
+
+If the repair requires a genuine unresolved product/semantic decision, automation stops rather than changing the objective.
 
 See [Planning and repair](docs/PLANNING_AND_REPAIR.md).
 
@@ -137,6 +154,26 @@ claude-auto permissions history
 
 Constrained grants remain resource-bound and decisions are audited.
 
+## Trusted Git and protected promotion
+
+Promotion/WIP decisions use a package-owned Git view. Inherited inline `GIT_CONFIG_*` injection is removed; a trusted excludes file can be registered by the operator and is copied into private package state so later edits cannot change broker truth. Git hooks and fsmonitor are disabled for broker-owned Git operations, while ordinary authentication/transport configuration remains available.
+
+```bash
+claude-auto git-trust status --repo .
+claude-auto git-trust set-excludes --repo . --path ~/.config/claude-auto/git-excludes
+claude-auto git-trust clear-excludes --repo .
+```
+
+Local promotion remains available, and remote promotion adds exact expected-base checking plus lost-response reconciliation:
+
+```bash
+claude-auto promote-ff --repo . --sha TARGET_SHA
+claude-auto promote-ff --repo . --sha TARGET_SHA \
+  --remote origin --remote-branch main --expected-remote-sha BASE_SHA
+```
+
+When the target changes a configured canonical plan, the broker automatically requires the exact repository-planning attestation even if the caller omits an attestation option.
+
 ## Durable state
 
 Runtime state lives outside target repositories:
@@ -170,7 +207,7 @@ See [Model routing](docs/MODEL_ROUTING.md).
 
 `main` represents the latest accepted and qualified public state. Each candidate is developed on `release/<version>`, qualified there, then merged or fast-forwarded into `main`. Accepted release branches remain fixed as recovery/comparison references and version tags are immutable.
 
-The first public baseline is **1.0.0-rc1**.
+The first public baseline is **1.0.0-rc1**. **1.0.0-rc2** is the next candidate and adds trusted Git reconstruction, protected/idempotent promotion and repository-owned planning repair.
 
 ## Project status
 
