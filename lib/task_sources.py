@@ -423,6 +423,16 @@ def resolve_task_sources(
     persist: bool = True,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
+    if persist:
+        # Synchronise the ordinary schema-9 lifecycle before deriving any task
+        # authority. This keeps later task persistence attached to the same
+        # external-state generation as the AuthoritySet snapshot.
+        from repo_runtime import activate
+        try:
+            activate(root)
+        except (AuthoritySetError, GovernanceContractError, OSError) as exc:
+            raise TaskSourceError(f"unable to activate repository governance before task resolution: {exc}") from exc
+
     try:
         snapshot = build_authority_snapshot(root)
         contract = load_governance_contract(root)
@@ -530,10 +540,6 @@ def resolve_task_sources(
     }
 
     if persist:
-        # Keep the durable state lifecycle identical to ordinary Claude Auto
-        # activation. Import lazily to avoid a module cycle at import time.
-        from repo_runtime import activate
-        activate(root)
         path = _resolved_path(root)
         ensure_private_dir(path.parent)
         persisted = dict(result)
@@ -544,6 +550,24 @@ def resolve_task_sources(
         if isinstance(state, dict):
             state["task_source_sha256"] = task_source_set_sha256
             json_dump(state_path, state)
+
+        try:
+            persisted_snapshot = build_authority_snapshot(root)
+        except AuthoritySetError as exc:
+            _clear_persisted(root)
+            raise TaskSourceError(
+                f"repository authority changed while persisting task resolution: {exc}"
+            ) from exc
+        if (
+            not isinstance(persisted_snapshot, dict)
+            or persisted_snapshot.get("snapshot_sha256") != snapshot.get("snapshot_sha256")
+            or persisted_snapshot.get("product_head") != snapshot.get("product_head")
+            or persisted_snapshot.get("task_source_contract_digest") != snapshot.get("task_source_contract_digest")
+        ):
+            _clear_persisted(root)
+            raise TaskSourceError(
+                "repository authority changed while persisting task resolution; durable result was discarded"
+            )
     return result
 
 
