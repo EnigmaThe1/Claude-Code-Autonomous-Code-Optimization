@@ -396,7 +396,7 @@ def _bounded_execution_output(
     max_output_bytes: int | None,
 ) -> dict[str, Any]:
     if not max_output_bytes:
-        return _bounded_execution_output(result, max_output_bytes)
+        return result
     stdout = str(result.get("stdout") or "")
     stderr = str(result.get("stderr") or "")
     total = len(stdout.encode("utf-8", errors="replace")) + len(
@@ -426,6 +426,7 @@ def run_repository_command(
     read_only_root: bool = False,
     working_directory: Path | None = None,
     hidden_paths: list[Path] | None = None,
+    max_output_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Run repository-controlled code under an explicit execution boundary.
 
@@ -540,4 +541,4 @@ def run_repository_command(
             "sandboxed": False,
             "environment_scrubbed": True,
         })
-        return result
+        return _bounded_execution_output(result, max_output_bytes)
