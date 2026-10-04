@@ -205,7 +205,22 @@ def _planning_policy_invalid() -> bool:
 
 def _protected_target(target: Path) -> bool:
     try:
-        return target.resolve(strict=False) in _protected_paths()
+        resolved = target.resolve(strict=False)
+        for protected in _protected_paths():
+            protected = protected.resolve(strict=False)
+            if resolved == protected:
+                return True
+            try:
+                resolved.relative_to(protected)
+                return True
+            except ValueError:
+                pass
+            try:
+                protected.relative_to(resolved)
+                return True
+            except ValueError:
+                pass
+        return False
     except (OSError, RuntimeError, ValueError):
         return True
 
