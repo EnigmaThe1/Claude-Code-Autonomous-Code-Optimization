@@ -416,3 +416,31 @@ def test_default_broker_view_overrides_global_excludes_with_empty_package_file(m
         env = trusted_git_env(root)
         assert env["GIT_CONFIG_COUNT"] == "5"
         assert _visible_untracked(root) == {"real-untracked.txt"}
+
+
+def test_remote_promotion_does_not_execute_pre_push_hook(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        base_dir = Path(td)
+        remote = base_dir / "remote.git"
+        _run("git", "init", "--bare", "-q", str(remote))
+        root = _repo(base_dir / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _run("git", "-C", str(root), "remote", "add", "origin", str(remote))
+        _run("git", "-C", str(root), "push", "-q", "-u", "origin", "main")
+        base = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+
+        hook = root / ".git" / "hooks" / "pre-push"
+        hook.write_text("#!/bin/sh\nexit 91\n")
+        hook.chmod(0o755)
+
+        target = _commit(root, "target.txt", "target\n")
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+        result = promote_fast_forward(
+            root,
+            target,
+            remote="origin",
+            remote_branch="main",
+            expected_remote=base,
+        )
+        assert result["status"] == "promoted-remote"
+        assert result["remote_head"] == target
