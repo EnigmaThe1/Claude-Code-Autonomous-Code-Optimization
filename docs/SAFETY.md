@@ -64,7 +64,11 @@ RC4 repositories may declare `.claude-auto/governance.json`. The v1 contract is 
 
 Authority and control-surface working-tree divergence fails closed. Symlink authority members and ordinary traversal through gitlinks/submodules are rejected. The read-only `claude-auto governance status --repo ...` command explains the currently resolved snapshot or blocker.
 
-RC4-P1 deliberately does not execute multi-file/multi-domain planning authority yet. Such authority can be inspected and protected, but autonomous execution is blocked until the later TaskSource and multi-file repair phases provide a matching execution model.
+RC4-P2 can additionally resolve repository-owned structured TaskSpecs from exact committed JSON, JSONL, TOML, static declarations or bounded custom adapters. Task-source files and adapter inputs are control surfaces. Uncommitted divergence fails closed rather than changing task authority.
+
+Custom adapters do not run against the live checkout. Claude Auto materialises only declared exact-commit blobs into an ephemeral view, hides the real repository, requires a read-only/no-network sandbox with no host fallback, and runs the adapter twice. Only identical normalised output is accepted. Adapter declarations may request capabilities, but P2 grants no network or external-read capability.
+
+TaskSpec resolution is still **not task execution authority**. P2 does not activate a task or grant worker write paths; execution envelopes and task worktrees are later RC4 phases.
 
 Authority-changing `git-trust`, promotion-policy and planning-repair CLI actions continue to refuse invocation from inside an active Claude worker. Legacy one-file repair candidates remain independently verified at their exact SHA before promotion. Bound multi-requirement attestations for the general RC4 promotion model are introduced in a later RC4 phase.
 
