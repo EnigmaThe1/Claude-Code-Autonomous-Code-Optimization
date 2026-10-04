@@ -39,7 +39,7 @@ jobs:
           module_prefix = "claude_auto_" + "r" + "c"
           old_repo = "EnigmaThe1/" + "Tem" + "p2"
           old_branch_prefix = "claude/" + "r" + "c"
-          pre_public_version = re.compile(r"\\b0\\.[0-9]+\\.[0-9]+-rc[0-9]+\\b", re.I)
+          pre_public_version = re.compile(r"\b0\.[0-9]+\.[0-9]+-rc[0-9]+\b", re.I)
           historical = re.compile(
               rf"(?:{test_prefix}[0-9]+_|{module_prefix}[0-9]+|{re.escape(old_repo)}|{re.escape(old_branch_prefix)})",
               re.I,
