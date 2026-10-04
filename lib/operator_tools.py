@@ -21,9 +21,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
+from execution import run_repository_command
 from process_runner import run
 from protocols import extract_result_json
 from provider_config import (
@@ -179,14 +181,40 @@ def doctor(args: argparse.Namespace | None = None) -> int:
     if sys.platform.startswith("linux"):
         has_bwrap = bool(shutil.which("bwrap"))
         has_srt = bool(shutil.which("srt"))
+        boundary_ok = False
+        boundary_detail = "missing: install @anthropic-ai/sandbox-runtime or bubblewrap"
+        if has_srt or has_bwrap:
+            try:
+                with tempfile.TemporaryDirectory(prefix="claude-auto-doctor-sandbox-") as td:
+                    probe = run_repository_command(
+                        Path(td),
+                        ["/bin/true"],
+                        timeout=15,
+                        trust_repo_scripts=False,
+                        unrestricted_host=False,
+                        read_only_root=True,
+                        read_allowlist_only=True,
+                        max_output_bytes=32_768,
+                    )
+                boundary_ok = (
+                    int(probe.get("returncode", 1)) == 0
+                    and bool(probe.get("sandboxed", False))
+                )
+                boundary_detail = (
+                    str(probe.get("execution_boundary") or "unknown")
+                    if boundary_ok
+                    else (
+                        str(probe.get("stderr") or probe.get("stdout") or "sandbox probe failed")
+                        .strip()
+                        .replace("\n", " ")[:500]
+                    )
+                )
+            except Exception as exc:
+                boundary_detail = f"sandbox probe failed: {exc}"
         checks.append((
             "Supervisor repository-code sandbox",
-            bool(has_srt or has_bwrap),
-            (
-                "srt" if has_srt else
-                "bubblewrap fallback" if has_bwrap else
-                "missing: install @anthropic-ai/sandbox-runtime or bubblewrap"
-            ),
+            boundary_ok,
+            boundary_detail,
         ))
         if not has_bwrap:
             warnings.append("bubblewrap/bwrap not found: Claude's native Linux sandbox and Claude Auto's bubblewrap supervisor fallback may be unavailable; an installed srt wrapper also requires its Linux sandbox prerequisites.")
