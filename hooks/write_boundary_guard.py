@@ -101,29 +101,76 @@ def _protected_paths() -> set[Path]:
             except (OSError, RuntimeError, ValueError):
                 continue
 
-    # Durable planning authority must take effect immediately after configuration,
-    # even if the active Claude settings file was generated before that policy.
-    # The state directory is package-owned external state, not repository text.
+    # Durable governance must remain effective even when a Claude settings file
+    # predates a freshly activated snapshot. External state is package-owned.
     state_raw = os.environ.get("CLAUDE_AUTONOMY_STATE_DIR")
     root_raw = os.environ.get("CLAUDE_AUTO_REPO_ROOT")
     if state_raw and root_raw:
         try:
-            policy_path = (
-                Path(state_raw).expanduser().resolve()
-                / "planning-repair"
-                / "policy.json"
-            )
-            policy = json.loads(policy_path.read_text())
-            canonical = policy.get("canonical_plan") if isinstance(policy, dict) else None
-            if isinstance(canonical, str) and canonical.strip():
-                root = Path(root_raw).expanduser().resolve()
-                target = (root / canonical).resolve(strict=False)
-                target.relative_to(root)
-                out.add(target)
+            state_dir = Path(state_raw).expanduser().resolve()
+            root = Path(root_raw).expanduser().resolve()
+            snapshot_path = state_dir / "governance" / "snapshot.json"
+            if snapshot_path.exists():
+                snapshot = json.loads(snapshot_path.read_text())
+                values = snapshot.get("protected_paths") if isinstance(snapshot, dict) else None
+                if isinstance(values, list):
+                    for raw_path in values:
+                        if not isinstance(raw_path, str) or not raw_path.strip():
+                            continue
+                        rel = Path(raw_path)
+                        if rel.is_absolute() or ".." in rel.parts or rel == Path("."):
+                            continue
+                        target = (root / rel).resolve(strict=False)
+                        target.relative_to(root)
+                        out.add(target)
+
+            # RC3 compatibility for a legacy policy that has not yet been
+            # normalised into an RC4 governance snapshot.
+            policy_path = state_dir / "planning-repair" / "policy.json"
+            if policy_path.exists():
+                policy = json.loads(policy_path.read_text())
+                canonical = policy.get("canonical_plan") if isinstance(policy, dict) else None
+                if isinstance(canonical, str) and canonical.strip():
+                    target = (root / canonical).resolve(strict=False)
+                    target.relative_to(root)
+                    out.add(target)
         except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
-            # An unreadable/malformed optional policy cannot broaden authority.
+            # Invalid durable governance is handled by the fail-closed check below.
             pass
     return out
+
+
+
+def _governance_snapshot_invalid() -> bool:
+    state_raw = os.environ.get("CLAUDE_AUTONOMY_STATE_DIR")
+    root_raw = os.environ.get("CLAUDE_AUTO_REPO_ROOT")
+    if not state_raw or not root_raw:
+        return False
+    path = Path(state_raw).expanduser().resolve() / "governance" / "snapshot.json"
+    if not path.exists():
+        return False
+    try:
+        snapshot = json.loads(path.read_text())
+        if not isinstance(snapshot, dict):
+            return True
+        values = snapshot.get("protected_paths")
+        if not isinstance(values, list):
+            return True
+        root = Path(root_raw).expanduser().resolve()
+        for raw in values:
+            if not isinstance(raw, str) or not raw.strip():
+                return True
+            rel = Path(raw)
+            if rel.is_absolute() or ".." in rel.parts or rel == Path("."):
+                return True
+            target = (root / rel).resolve(strict=False)
+            target.relative_to(root)
+        digest = snapshot.get("snapshot_sha256")
+        if not isinstance(digest, str) or len(digest) != 64:
+            return True
+        return False
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        return True
 
 
 def _planning_policy_invalid() -> bool:
@@ -341,6 +388,8 @@ def _guard_bash(
         return "deny", "Claude Auto Bash write-boundary guard could not parse the command safely."
 
     root = Path(root_raw).expanduser().resolve()
+    if _governance_snapshot_invalid():
+        return "deny", "Claude Auto durable governance snapshot is invalid; repository mutation is blocked fail-closed."
     if _planning_policy_invalid():
         return "deny", "Claude Auto durable planning policy is invalid; repository mutation is blocked fail-closed."
     cwd = (initial_cwd or root).resolve()
@@ -452,6 +501,9 @@ def main() -> int:
 
         if tool not in {"Write", "Edit", "NotebookEdit"}:
             decision("allow", "Tool is not a direct file mutation tool.")
+            return 0
+        if _governance_snapshot_invalid():
+            decision("deny", "Claude Auto durable governance snapshot is invalid; repository mutation is blocked fail-closed.")
             return 0
         if _planning_policy_invalid():
             decision("deny", "Claude Auto durable planning policy is invalid; repository mutation is blocked fail-closed.")
