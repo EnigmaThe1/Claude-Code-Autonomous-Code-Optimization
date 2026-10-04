@@ -1815,10 +1815,11 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
             )
             state["status"] = "REVALIDATING_PLAN"
             json_dump(sd / "state.json", state)
-            plan, plan_rc = ensure_plan_validated(
+            plan, plan_rc, source_text, source_hash, state = _revalidate_authoritative_plan(
                 args=args, root=root, sd=sd, prof=prof, state=state, objective=objective,
-                source_kind=source_kind, source_ref=source_ref, source_text=source_text, source_hash=source_hash,
-                env=main_env, provider_detail=main_provider, force_reason=reason,
+                source_kind=source_kind, source_ref=source_ref, source_text=source_text,
+                source_hash=source_hash, env=main_env, provider_detail=main_provider,
+                reason=reason,
             )
             if plan_rc != 0 or not plan:
                 return plan_rc or 6
@@ -1845,10 +1846,11 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
                 return 3
             if review_status == "REVISE_PLAN":
                 reason = "Local remediation simulation/red-team exposed plan-level impact: " + json.dumps(assessments, separators=(",", ":"))[:5000]
-                plan, plan_rc = ensure_plan_validated(
+                plan, plan_rc, source_text, source_hash, state = _revalidate_authoritative_plan(
                     args=args, root=root, sd=sd, prof=prof, state=state, objective=objective,
-                    source_kind=source_kind, source_ref=source_ref, source_text=source_text, source_hash=source_hash,
-                    env=main_env, provider_detail=main_provider, force_reason=reason,
+                    source_kind=source_kind, source_ref=source_ref, source_text=source_text,
+                    source_hash=source_hash, env=main_env, provider_detail=main_provider,
+                    reason=reason,
                 )
                 if plan_rc != 0 or not plan:
                     return plan_rc or 6
@@ -1881,10 +1883,11 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
                 return 3
             if review_status == "REVISE_PLAN":
                 reason = "Phase-boundary simulation/red-team found plan-level issues: " + json.dumps(assessments, separators=(",", ":"))[:5000]
-                plan, plan_rc = ensure_plan_validated(
+                plan, plan_rc, source_text, source_hash, state = _revalidate_authoritative_plan(
                     args=args, root=root, sd=sd, prof=prof, state=state, objective=objective,
-                    source_kind=source_kind, source_ref=source_ref, source_text=source_text, source_hash=source_hash,
-                    env=main_env, provider_detail=main_provider, force_reason=reason,
+                    source_kind=source_kind, source_ref=source_ref, source_text=source_text,
+                    source_hash=source_hash, env=main_env, provider_detail=main_provider,
+                    reason=reason,
                 )
                 if plan_rc != 0 or not plan:
                     return plan_rc or 6
@@ -1931,10 +1934,11 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
                 return 3
             if final_review == "REVISE_PLAN":
                 reason = "Final whole-system simulation/red-team found plan-level defects: " + json.dumps(assessments, separators=(",", ":"))[:5000]
-                plan, plan_rc = ensure_plan_validated(
+                plan, plan_rc, source_text, source_hash, state = _revalidate_authoritative_plan(
                     args=args, root=root, sd=sd, prof=prof, state=state, objective=objective,
-                    source_kind=source_kind, source_ref=source_ref, source_text=source_text, source_hash=source_hash,
-                    env=main_env, provider_detail=main_provider, force_reason=reason,
+                    source_kind=source_kind, source_ref=source_ref, source_text=source_text,
+                    source_hash=source_hash, env=main_env, provider_detail=main_provider,
+                    reason=reason,
                 )
                 if plan_rc != 0 or not plan:
                     return plan_rc or 6
