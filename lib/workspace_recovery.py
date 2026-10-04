@@ -8,7 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from environment_policy import sanitised_subprocess_env
+from git_trust import trusted_git_env
+from promotion_policy import require_exact_attestation
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -16,7 +17,7 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         ["git", "-C", str(root), *args],
         text=True,
         capture_output=True,
-        env=sanitised_subprocess_env(),
+        env=trusted_git_env(root),
     )
 
 
@@ -210,28 +211,31 @@ def _dirty_paths(root: Path) -> set[str]:
     return out
 
 
-def promote_fast_forward(root: Path, target_commit: str) -> dict[str, Any]:
-    """Fast-forward the current branch while preserving pre-existing local WIP."""
-    root = root.expanduser().resolve()
-    branch_cp = _git(root, "branch", "--show-current")
-    if branch_cp.returncode != 0 or not branch_cp.stdout.strip():
-        raise ValueError("promotion requires a named current branch")
-    branch = branch_cp.stdout.strip()
+def _remote_head(root: Path, remote: str, branch: str) -> str | None:
+    cp = _git(root, "ls-remote", "--heads", remote, f"refs/heads/{branch}")
+    if cp.returncode != 0:
+        detail = (cp.stderr or cp.stdout or "git ls-remote failed").strip()
+        raise ValueError(f"unable to read remote branch {remote}/{branch}: {detail[:1200]}")
+    rows = [line.split() for line in cp.stdout.splitlines() if line.strip()]
+    rows = [row for row in rows if len(row) >= 2 and row[1] == f"refs/heads/{branch}"]
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise ValueError("remote branch lookup returned ambiguous results")
+    return rows[0][0].lower()
 
-    head_cp = _git(root, "rev-parse", "--verify", "HEAD^{commit}")
-    target_cp = _git(root, "rev-parse", "--verify", f"{target_commit}^{{commit}}")
-    if head_cp.returncode != 0 or target_cp.returncode != 0:
-        raise ValueError("HEAD and target must be valid local commits")
-    before_head = head_cp.stdout.strip()
-    target = target_cp.stdout.strip()
-    if target == before_head:
-        return {
-            "status": "already-promoted",
-            "branch": branch,
-            "before_head": before_head,
-            "head": target,
-            "cleaned_residue": [],
-        }
+
+def _promote_local_exact(
+    root: Path,
+    *,
+    branch: str,
+    before_head: str,
+    target: str,
+    before_wip: dict[str, Any],
+    before_untracked: set[str],
+) -> list[str]:
+    if before_head == target:
+        return []
 
     ancestor = _git(root, "merge-base", "--is-ancestor", before_head, target)
     if ancestor.returncode != 0:
@@ -246,8 +250,6 @@ def promote_fast_forward(root: Path, target_commit: str) -> dict[str, Any]:
             + ", ".join(overlap[:40])
         )
 
-    before_wip = _local_wip_signature(root)
-    before_untracked = _visible_untracked(root)
     cp = _git(root, "merge", "--ff-only", target)
     if cp.returncode != 0:
         now_head = _git(root, "rev-parse", "HEAD").stdout.strip()
@@ -276,20 +278,178 @@ def promote_fast_forward(root: Path, target_commit: str) -> dict[str, Any]:
         raise ValueError("fast-forward returned success but HEAD is not the exact target commit")
     if _local_wip_signature(root) != before_wip:
         raise ValueError("fast-forward moved HEAD but did not preserve pre-existing local WIP exactly")
+    return []
+
+
+def promote_fast_forward(
+    root: Path,
+    target_commit: str,
+    *,
+    attestation_contract: str | None = None,
+    remote: str | None = None,
+    remote_branch: str | None = None,
+    expected_remote: str | None = None,
+) -> dict[str, Any]:
+    """Promote one exact descendant commit while preserving local WIP.
+
+    Local-only promotion remains available for ordinary repositories.  When a
+    promotion policy or explicit attestation contract is configured, the exact
+    target SHA must have a durable VERIFIED attestation before any mutation.
+
+    Remote mode adds an optimistic transaction: the remote branch must still be
+    the caller's exact expected base (or already equal the target after a lost
+    response), the local branch is advanced without disturbing WIP, an exact
+    force-with-lease push is issued, and final local/remote identity is verified.
+    """
+    root = root.expanduser().resolve()
+    branch_cp = _git(root, "branch", "--show-current")
+    if branch_cp.returncode != 0 or not branch_cp.stdout.strip():
+        raise ValueError("promotion requires a named current branch")
+    branch = branch_cp.stdout.strip()
+
+    head_cp = _git(root, "rev-parse", "--verify", "HEAD^{commit}")
+    target_cp = _git(root, "rev-parse", "--verify", f"{target_commit}^{{commit}}")
+    if head_cp.returncode != 0 or target_cp.returncode != 0:
+        raise ValueError("HEAD and target must be valid local commits")
+    before_head = head_cp.stdout.strip().lower()
+    target = target_cp.stdout.strip().lower()
+
+    attestation = require_exact_attestation(
+        root,
+        target,
+        contract=attestation_contract,
+    )
+
+    before_wip = _local_wip_signature(root)
+    before_untracked = _visible_untracked(root)
+
+    if not remote:
+        if target == before_head:
+            return {
+                "status": "already-promoted",
+                "branch": branch,
+                "before_head": before_head,
+                "head": target,
+                "cleaned_residue": [],
+                "attestation": attestation,
+            }
+        _promote_local_exact(
+            root,
+            branch=branch,
+            before_head=before_head,
+            target=target,
+            before_wip=before_wip,
+            before_untracked=before_untracked,
+        )
+        return {
+            "status": "promoted",
+            "branch": branch,
+            "before_head": before_head,
+            "head": target,
+            "cleaned_residue": [],
+            "attestation": attestation,
+        }
+
+    remote_branch = remote_branch or branch
+    if not expected_remote:
+        raise ValueError("remote promotion requires --expected-remote-sha")
+    expected_cp = _git(root, "rev-parse", "--verify", f"{expected_remote}^{{commit}}")
+    if expected_cp.returncode != 0:
+        raise ValueError("expected remote base must be a valid local commit")
+    expected = expected_cp.stdout.strip().lower()
+
+    fetch = _git(
+        root,
+        "fetch",
+        "--no-tags",
+        "--recurse-submodules=no",
+        remote,
+        f"refs/heads/{remote_branch}",
+    )
+    if fetch.returncode != 0:
+        detail = (fetch.stderr or fetch.stdout or "git fetch failed").strip()
+        raise ValueError(f"unable to refresh remote branch: {detail[:1600]}")
+
+    remote_before = _remote_head(root, remote, remote_branch)
+    if remote_before is None:
+        raise ValueError("remote promotion requires an existing remote branch")
+    if remote_before not in {expected, target}:
+        raise ValueError(
+            f"remote branch moved unexpectedly: expected {expected}, found {remote_before}"
+        )
+
+    desc = _git(root, "merge-base", "--is-ancestor", expected, target)
+    if desc.returncode != 0:
+        raise ValueError("target commit is not a descendant of the expected remote base")
+
+    if before_head not in {expected, target}:
+        raise ValueError(
+            "local HEAD must equal the expected remote base or the exact target in remote mode"
+        )
+
+    _promote_local_exact(
+        root,
+        branch=branch,
+        before_head=before_head,
+        target=target,
+        before_wip=before_wip,
+        before_untracked=before_untracked,
+    )
+
+    recovered_after_push_error = False
+    if remote_before != target:
+        push = _git(
+            root,
+            "push",
+            "--porcelain",
+            f"--force-with-lease=refs/heads/{remote_branch}:{expected}",
+            remote,
+            f"{target}:refs/heads/{remote_branch}",
+        )
+        if push.returncode != 0:
+            # The server may have accepted the update while the transport/report
+            # failed. Reconcile durable remote truth before declaring failure.
+            observed = _remote_head(root, remote, remote_branch)
+            if observed != target:
+                detail = (push.stderr or push.stdout or "git push failed").strip()
+                raise ValueError(f"remote promotion failed: {detail[:1600]}")
+            recovered_after_push_error = True
+
+    local_after = _git(root, "rev-parse", "HEAD").stdout.strip().lower()
+    remote_after = _remote_head(root, remote, remote_branch)
+    if local_after != target or remote_after != target:
+        raise ValueError("promotion completed without exact local/remote target identity")
+    if _local_wip_signature(root) != before_wip:
+        raise ValueError("remote promotion did not preserve pre-existing local WIP exactly")
 
     return {
-        "status": "promoted",
+        "status": "already-remote" if remote_before == target else (
+            "promoted-remote-reconciled" if recovered_after_push_error else "promoted-remote"
+        ),
         "branch": branch,
+        "remote": remote,
+        "remote_branch": remote_branch,
+        "expected_remote": expected,
+        "remote_before": remote_before,
         "before_head": before_head,
-        "head": after_head,
+        "head": local_after,
+        "remote_head": remote_after,
         "cleaned_residue": [],
+        "attestation": attestation,
     }
 
 
 def promote_ff_action(args: Any, *, find_repo_root) -> int:
     try:
         root = find_repo_root(getattr(args, "repo", None))
-        result = promote_fast_forward(root, args.sha)
+        result = promote_fast_forward(
+            root,
+            args.sha,
+            attestation_contract=getattr(args, "attestation_contract", None),
+            remote=getattr(args, "remote", None),
+            remote_branch=getattr(args, "remote_branch", None),
+            expected_remote=getattr(args, "expected_remote_sha", None),
+        )
     except (OSError, ValueError) as exc:
         print(f"REFUSED: {exc}", file=os.sys.stderr)
         return 2
