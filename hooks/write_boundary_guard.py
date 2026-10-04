@@ -71,12 +71,13 @@ def _approved_target(target: Path) -> bool:
 
 
 def _protected_paths() -> set[Path]:
+    out: set[Path] = set()
+
     raw = os.environ.get("CLAUDE_AUTO_PROTECTED_REPO_PATHS", "[]")
     try:
         values = json.loads(raw)
     except Exception:
-        return set()
-    out: set[Path] = set()
+        values = []
     if isinstance(values, list):
         for value in values:
             if not isinstance(value, str):
@@ -85,6 +86,29 @@ def _protected_paths() -> set[Path]:
                 out.add(Path(value).expanduser().resolve(strict=False))
             except (OSError, RuntimeError, ValueError):
                 continue
+
+    # Durable planning authority must take effect immediately after configuration,
+    # even if the active Claude settings file was generated before that policy.
+    # The state directory is package-owned external state, not repository text.
+    state_raw = os.environ.get("CLAUDE_AUTONOMY_STATE_DIR")
+    root_raw = os.environ.get("CLAUDE_AUTO_REPO_ROOT")
+    if state_raw and root_raw:
+        try:
+            policy_path = (
+                Path(state_raw).expanduser().resolve()
+                / "planning-repair"
+                / "policy.json"
+            )
+            policy = json.loads(policy_path.read_text())
+            canonical = policy.get("canonical_plan") if isinstance(policy, dict) else None
+            if isinstance(canonical, str) and canonical.strip():
+                root = Path(root_raw).expanduser().resolve()
+                target = (root / canonical).resolve(strict=False)
+                target.relative_to(root)
+                out.add(target)
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+            # An unreadable/malformed optional policy cannot broaden authority.
+            pass
     return out
 
 
