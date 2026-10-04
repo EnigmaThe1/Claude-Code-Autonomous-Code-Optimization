@@ -28,7 +28,7 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == release/* ]]; then
             test "${GITHUB_REF_NAME#release/}" = "$VERSION"
           fi
-                - name: Install qualification prerequisites
+      - name: Install qualification prerequisites
         run: |
           set -euo pipefail
           sudo apt-get update -qq
