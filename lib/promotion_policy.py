@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from repo_identity import repo_state_dir
+from operator_authority import require_top_level_operator
 from runtime_paths import ensure_private_dir, utcnow
 from state_store import json_dump, load_json
 
@@ -148,11 +149,9 @@ def promotion_status(root: Path, target_sha: str | None = None) -> dict[str, Any
 def promotion_policy_action(args: Any, *, find_repo_root) -> int:
     try:
         action = getattr(args, "promotion_command", None)
-        if action in ["require-contract","clear-contract"] and os.environ.get("CLAUDECODE") == "1":
-            raise ValueError(
-                "this authority-changing command must be run by the operator/supervisor from a top-level shell"
-            )
         root = find_repo_root(getattr(args, "repo", None))
+        if action in ["require-contract","clear-contract"]:
+            require_top_level_operator(root, "Promotion policy change")
         action = getattr(args, "promotion_command", None)
         if action == "status":
             result = promotion_status(root, getattr(args, "sha", None))
