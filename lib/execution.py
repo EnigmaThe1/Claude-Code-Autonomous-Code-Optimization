@@ -176,7 +176,7 @@ def _sandbox_settings(
         str(root / ".git"),
         *(str(path.resolve()) for path in (hidden_paths or [])),
     ]
-    allow_read = [str(root), *system_runtime_reads]
+    allow_read = [str(root), str(temp_home), str(temp_home / "tmp"), *system_runtime_reads]
     if not read_allowlist_only:
         allow_read.extend(str(p) for p in _readonly_toolchain_paths(root))
     allow_write = [str(temp_home), str(temp_home / "tmp")]
