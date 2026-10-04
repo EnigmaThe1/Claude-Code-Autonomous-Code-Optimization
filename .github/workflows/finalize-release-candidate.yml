@@ -8,6 +8,7 @@ on:
       - ".release-finalize"
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -66,3 +67,17 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Finalize $VERSION qualification sequence $SEQUENCE"
           git push --force-with-lease="refs/heads/$GITHUB_REF_NAME:$GITHUB_SHA" origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+      - name: Dispatch final CI and release qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FINAL_SHA="$(git rev-parse HEAD)"
+          REMOTE_SHA="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | awk '{print $1}')"
+          if [[ "$REMOTE_SHA" != "$FINAL_SHA" ]]; then
+            echo "::error title=Final branch advanced::Expected remote $GITHUB_REF_NAME at $FINAL_SHA, found $REMOTE_SHA."
+            exit 1
+          fi
+          gh workflow run ci.yml --ref "$GITHUB_REF_NAME"
+          gh workflow run release-candidate.yml --ref "$GITHUB_REF_NAME"

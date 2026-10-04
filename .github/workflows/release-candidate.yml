@@ -34,12 +34,10 @@ jobs:
               exit 1
             fi
           fi
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            test -f .release-qualify || { echo "::error title=Qualification trigger missing::.release-qualify is required."; exit 1; }
-            grep -Fxq "version=$VERSION" .release-qualify || { echo "::error title=Qualification trigger/version mismatch::.release-qualify must contain version=$VERSION."; exit 1; }
-            EXPECTED_SOURCE="$(git rev-parse HEAD^)"
-            grep -Fxq "source_sha=$EXPECTED_SOURCE" .release-qualify || { echo "::error title=Qualification source mismatch::.release-qualify must attest immediate parent $EXPECTED_SOURCE."; exit 1; }
-          fi
+          test -f .release-qualify || { echo "::error title=Qualification trigger missing::.release-qualify is required for both push and manual qualification."; exit 1; }
+          grep -Fxq "version=$VERSION" .release-qualify || { echo "::error title=Qualification trigger/version mismatch::.release-qualify must contain version=$VERSION."; exit 1; }
+          EXPECTED_SOURCE="$(git rev-parse HEAD^)"
+          grep -Fxq "source_sha=$EXPECTED_SOURCE" .release-qualify || { echo "::error title=Qualification source mismatch::.release-qualify must attest immediate parent $EXPECTED_SOURCE."; exit 1; }
       - name: Install qualification prerequisites
         run: |
           set -euo pipefail
