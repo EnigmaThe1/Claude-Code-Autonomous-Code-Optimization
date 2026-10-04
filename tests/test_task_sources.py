@@ -334,6 +334,7 @@ def test_adapter_runs_twice_on_materialised_view_and_hides_live_repo(monkeypatch
         def fake_runner(view, argv, **kwargs):
             calls.append((view, argv, kwargs))
             assert kwargs["read_only_root"] is True
+            assert kwargs["read_allowlist_only"] is True
             assert root in kwargs["hidden_paths"]
             assert (view / "data/input.txt").read_text() == "committed\n"
             return {
@@ -487,7 +488,13 @@ def test_read_only_execution_recipe_masks_live_repo_and_mounts_view_read_only(mo
         view.mkdir()
         live.mkdir()
         monkeypatch.setattr("execution.shutil.which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
-        args = _bwrap_base(view, read_only_root=True, cwd=view, hidden_paths=[live])
+        args = _bwrap_base(
+            view,
+            read_only_root=True,
+            cwd=view,
+            hidden_paths=[live],
+            read_allowlist_only=True,
+        )
         assert args is not None
         joined = "\n".join(args)
         assert f"--ro-bind\n{view}\n{view}" in joined
@@ -495,11 +502,24 @@ def test_read_only_execution_recipe_masks_live_repo_and_mounts_view_read_only(mo
         # whole, then recreates/binds only the adapter view, so the live sibling
         # is hidden without needing a redundant nested tmpfs mount.
         assert "--tmpfs\n/tmp" in joined
+        for external_root in ("/etc", "/var", "/opt"):
+            if Path(external_root).exists():
+                assert f"--tmpfs\n{external_root}" in joined
         assert f"--bind\n{live}\n{live}" not in joined
         assert f"--ro-bind\n{live}\n{live}" not in joined
-        settings = _sandbox_settings(view, base / "home", read_only_root=True, hidden_paths=[live])
+        settings = _sandbox_settings(
+            view,
+            base / "home",
+            read_only_root=True,
+            hidden_paths=[live],
+            read_allowlist_only=True,
+        )
+        assert "/" in settings["filesystem"]["denyRead"]
+        assert str(view) in settings["filesystem"]["allowRead"]
         assert str(view) in settings["filesystem"]["denyWrite"]
         assert str(live) in settings["filesystem"]["denyRead"]
+        assert settings["network"]["allowedDomains"] == []
+        assert settings["network"]["allowLocalBinding"] is False
 
 
 def test_malformed_builtin_sources_fail_closed(monkeypatch):
