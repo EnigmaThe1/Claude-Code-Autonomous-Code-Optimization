@@ -308,3 +308,37 @@ def test_product_write_guard_denies_bash_and_direct_mutation_of_canonical_plan(m
             check=True,
         )
         assert json.loads(bash.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_stale_generated_settings_still_obey_new_durable_plan_policy(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+
+        # Simulate settings generated before repository-owned planning was enabled.
+        stale = make_settings(
+            pr.repo_state_dir(root),
+            "external",
+            "balanced",
+            {"repo_root": str(root), "languages": [], "container_files": []},
+        )
+        assert "CLAUDE_AUTO_PROTECTED_REPO_PATHS" not in stale["env"]
+
+        configure_planning_repair(root, canonical_plan="IMPLEMENTATION_PLAN.md")
+        env = os.environ.copy()
+        env.update(stale["env"])
+
+        cp = subprocess.run(
+            [os.sys.executable, str(WRITE_GUARD)],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "printf 'changed\\n' > IMPLEMENTATION_PLAN.md"},
+            }),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        output = json.loads(cp.stdout)["hookSpecificOutput"]
+        assert output["permissionDecision"] == "deny"
+        assert "protected repository path" in output["permissionDecisionReason"]
