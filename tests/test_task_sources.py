@@ -521,6 +521,15 @@ def test_read_only_execution_recipe_masks_live_repo_and_mounts_view_read_only(mo
         assert settings["network"]["allowedDomains"] == []
         assert settings["network"]["allowLocalBinding"] is False
 
+        allowed_top = {"usr", "bin", "lib", "lib64", "sbin", "proc", "dev"}
+        for candidate in Path("/").iterdir():
+            if candidate.name in allowed_top or candidate.is_symlink():
+                continue
+            if candidate.is_dir():
+                assert f"--tmpfs\n{candidate}" in joined
+            elif candidate.is_file():
+                assert f"--ro-bind\n/dev/null\n{candidate}" in joined
+
 
 def test_malformed_builtin_sources_fail_closed(monkeypatch):
     fixtures = [
