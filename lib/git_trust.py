@@ -116,13 +116,6 @@ def _write_package_excludes(root: Path, payload: bytes) -> Path:
     return target
 
 
-def _ensure_package_excludes(root: Path) -> Path:
-    target = _package_excludes_path(root)
-    if not target.exists():
-        return _write_package_excludes(root, b"")
-    return validate_trusted_excludes_file(root, target)
-
-
 def configure_trusted_excludes(root: Path, raw: str | Path) -> dict[str, Any]:
     root = root.expanduser().resolve()
     source = validate_trusted_excludes_file(root, raw)
@@ -151,7 +144,10 @@ def clear_trusted_excludes(root: Path) -> dict[str, Any]:
         path.unlink()
     except FileNotFoundError:
         pass
-    _write_package_excludes(root, b"")
+    try:
+        _package_excludes_path(root).unlink()
+    except FileNotFoundError:
+        pass
     return {"status": "cleared", "previous": previous if isinstance(previous, dict) else {}}
 
 
@@ -173,7 +169,9 @@ def trusted_git_config(root: Path) -> list[tuple[str, str]]:
     if isinstance(raw, str) and raw.strip():
         path = validate_trusted_excludes_file(root, raw)
     else:
-        path = _ensure_package_excludes(root)
+        # Deterministic empty excludes without creating repository state merely
+        # because a broker read/status/smoke operation was invoked.
+        path = Path(os.devnull)
     return [
         ("core.excludesFile", str(path)),
         ("core.hooksPath", os.devnull),
