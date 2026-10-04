@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from control_plane import _run_control_model, run_readonly_plan_agent
+from operator_authority import require_top_level_operator
 from git_trust import trusted_git_env
 from promotion_policy import (
     REPOSITORY_PLANNING_REPAIR_CONTRACT,
@@ -749,11 +750,9 @@ def abort_planning_repair(root: Path) -> dict[str, Any]:
 def planning_repair_action(args: Any, *, find_repo_root) -> int:
     try:
         action = getattr(args, "planning_repair_command", None)
-        if action in ["configure","begin","architect","verify","refresh-base","promote","abort"] and os.environ.get("CLAUDECODE") == "1":
-            raise ValueError(
-                "this authority-changing command must be run by the operator/supervisor from a top-level shell"
-            )
         root = find_repo_root(getattr(args, "repo", None))
+        if action in ["configure","begin","architect","verify","refresh-base","promote","abort"]:
+            require_top_level_operator(root, "Repository planning authority change")
         action = getattr(args, "planning_repair_command", None)
         if action == "status":
             result = planning_repair_status(root)
