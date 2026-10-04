@@ -785,3 +785,30 @@ def test_adapter_output_order_normalises_deterministically(monkeypatch):
 
         result = resolve_task_sources(root, runner=reordered, persist=False)
         assert [item["task"]["id"] for item in result["tasks"]] == ["A", "B"]
+
+
+def test_repository_change_during_adapter_resolution_invalidates_result(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "live")
+        _prepare_adapter_repo(root)
+        _write_governance(root, _contract([_adapter_source()]))
+        calls = {"n": 0}
+
+        def runner(view, argv, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                (root / "README.md").write_text("concurrent change\n")
+                _run(root, "git", "add", "README.md")
+                _run(root, "git", "commit", "-qm", "concurrent advance")
+            return {
+                "returncode": 0,
+                "stdout": json.dumps([_task("T1")]),
+                "stderr": "",
+                "execution_boundary": "test-sandbox",
+                "sandboxed": True,
+                "environment_scrubbed": True,
+            }
+
+        with pytest.raises(TaskSourceError, match="authority changed during task resolution"):
+            resolve_task_sources(root, runner=runner, persist=False)
