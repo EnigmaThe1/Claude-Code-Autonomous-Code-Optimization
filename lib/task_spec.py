@@ -265,9 +265,14 @@ def validate_task_graph(
     strict_dependencies: bool,
 ) -> list[str]:
     ids = [record["task"]["id"] for record in records]
-    if len(set(ids)) != len(ids):
-        duplicates = sorted({item for item in ids if ids.count(item) > 1})
-        raise TaskSpecError("duplicate TaskSpec id(s): " + ", ".join(duplicates))
+    seen_ids: set[str] = set()
+    duplicates: set[str] = set()
+    for task_id in ids:
+        if task_id in seen_ids:
+            duplicates.add(task_id)
+        seen_ids.add(task_id)
+    if duplicates:
+        raise TaskSpecError("duplicate TaskSpec id(s): " + ", ".join(sorted(duplicates)))
 
     known = set(ids)
     external: set[str] = set()
