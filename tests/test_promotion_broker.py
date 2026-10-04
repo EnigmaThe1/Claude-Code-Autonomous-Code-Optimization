@@ -239,3 +239,80 @@ def test_remote_promotion_refuses_remote_that_moved_to_unexpected_commit(monkeyp
                 remote_branch="main",
                 expected_remote=base,
             )
+
+
+def test_remote_push_lost_response_reconciles_remote_truth(monkeypatch):
+    import workspace_recovery as wr
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        base_dir = Path(td)
+        remote = base_dir / "remote.git"
+        _run("git", "init", "--bare", "-q", str(remote))
+        root = _repo(base_dir / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _run("git", "-C", str(root), "remote", "add", "origin", str(remote))
+        _run("git", "-C", str(root), "push", "-q", "-u", "origin", "main")
+        base = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+
+        target = _commit(root, "target.txt", "target\n")
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+        configure_promotion_policy(root, "planning-repair")
+        record_promotion_attestation(
+            root,
+            target_sha=target,
+            contract="planning-repair",
+            verifier="independent-test-verifier",
+            evidence_sha256=_evidence("lost-response"),
+        )
+
+        original_git = wr._git
+
+        def flaky_git(repo: Path, *args: str):
+            if args and args[0] == "push":
+                successful = original_git(repo, *args)
+                assert successful.returncode == 0, successful.stderr
+                return subprocess.CompletedProcess(
+                    ["git", *args],
+                    1,
+                    successful.stdout,
+                    "simulated transport response loss after server accepted push",
+                )
+            return original_git(repo, *args)
+
+        monkeypatch.setattr(wr, "_git", flaky_git)
+        result = wr.promote_fast_forward(
+            root,
+            target,
+            remote="origin",
+            remote_branch="main",
+            expected_remote=base,
+        )
+        assert result["status"] == "promoted-remote-reconciled"
+        assert result["head"] == target
+        assert result["remote_head"] == target
+
+
+def test_promotion_uses_same_trusted_excludes_view_and_preserves_real_wip(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        base_dir = Path(td)
+        root = _repo(base_dir / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        excludes = base_dir / "trusted-excludes"
+        excludes.write_text(".bashrc\n.mcp.json\n")
+        excludes.chmod(0o600)
+        configure_trusted_excludes(root, excludes)
+
+        base = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+        target = _commit(root, "target.txt", "target\n")
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+
+        (root / ".bashrc").write_text("sandbox stub\n")
+        (root / ".mcp.json").write_text("{}\n")
+        (root / "real-untracked.txt").write_text("real work\n")
+
+        result = promote_fast_forward(root, target)
+        assert result["status"] == "promoted"
+        assert (root / "real-untracked.txt").read_text() == "real work\n"
+        assert (root / ".bashrc").exists()
+        assert (root / ".mcp.json").exists()
+        assert _visible_untracked(root) == {"real-untracked.txt"}
