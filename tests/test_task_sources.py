@@ -785,6 +785,9 @@ def test_persisted_status_becomes_stale_after_committed_source_change(monkeypatc
         activate(root)
         durable = json.loads((repo_state_dir(root) / "state.json").read_text())
         assert durable["task_source_sha256"] is None
+        assert task_source_status(root)["status"] == "STALE"
+        with pytest.raises(TaskSourceError, match="not bound to the current durable state"):
+            load_resolved_task_source_set(root)
 
 
 def test_tasks_cli_surface_parses_status_and_resolve():
