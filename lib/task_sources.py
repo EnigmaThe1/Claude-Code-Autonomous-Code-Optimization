@@ -601,6 +601,7 @@ def load_resolved_task_source_set(
     root: Path,
     *,
     require_current: bool = True,
+    require_state_binding: bool = True,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     path = _resolved_path(root)
@@ -649,7 +650,9 @@ def load_resolved_task_source_set(
         )
 
     state = load_json(repo_state_dir(root) / "state.json", {})
-    if not isinstance(state, dict) or state.get("task_source_sha256") != recorded:
+    if require_state_binding and (
+        not isinstance(state, dict) or state.get("task_source_sha256") != recorded
+    ):
         raise TaskSourceError(
             "persisted TaskSourceSet is not bound to the current durable state generation"
         )
@@ -692,7 +695,11 @@ def task_source_status(root: Path) -> dict[str, Any]:
         }
 
     try:
-        verified = load_resolved_task_source_set(root, require_current=False)
+        verified = load_resolved_task_source_set(
+            root,
+            require_current=False,
+            require_state_binding=False,
+        )
     except TaskSourceError as exc:
         return {
             "status": "BLOCKED",
@@ -701,10 +708,13 @@ def task_source_status(root: Path) -> dict[str, Any]:
         }
 
     digest = verified["task_source_set_sha256"]
+    state = load_json(repo_state_dir(root) / "state.json", {})
     current = (
         verified.get("authority_snapshot_sha256") == snapshot["snapshot_sha256"]
         and verified.get("product_head") == snapshot["product_head"]
         and verified.get("task_source_contract_digest") == snapshot["task_source_contract_digest"]
+        and isinstance(state, dict)
+        and state.get("task_source_sha256") == digest
     )
     return {
         "status": "READY" if current else "STALE",
