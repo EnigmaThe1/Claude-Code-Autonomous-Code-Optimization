@@ -457,6 +457,21 @@ def resolve_task_sources(
         if len(merged) > MAX_TASKS:
             raise TaskSourceError("merged TaskSourceSet exceeds maximum task count")
 
+    # Re-read exact authority after all source/adapter work. A concurrent commit,
+    # governance edit or control-surface change must invalidate the resolution
+    # rather than allowing an old snapshot to be reported/persisted as READY.
+    try:
+        final_snapshot = build_authority_snapshot(root)
+    except AuthoritySetError as exc:
+        raise TaskSourceError(f"repository authority changed during task resolution: {exc}") from exc
+    if (
+        not isinstance(final_snapshot, dict)
+        or final_snapshot.get("snapshot_sha256") != snapshot.get("snapshot_sha256")
+        or final_snapshot.get("product_head") != snapshot.get("product_head")
+        or final_snapshot.get("task_source_contract_digest") != snapshot.get("task_source_contract_digest")
+    ):
+        raise TaskSourceError("repository authority changed during task resolution; retry from the new exact snapshot")
+
     merged.sort(key=lambda item: item["task"]["id"])
     try:
         external_dependencies = validate_task_graph(
