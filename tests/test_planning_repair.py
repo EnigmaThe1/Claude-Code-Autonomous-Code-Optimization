@@ -342,3 +342,44 @@ def test_stale_generated_settings_still_obey_new_durable_plan_policy(monkeypatch
         output = json.loads(cp.stdout)["hookSpecificOutput"]
         assert output["permissionDecision"] == "deny"
         assert "protected repository path" in output["permissionDecisionReason"]
+
+
+def test_architect_commit_does_not_require_user_git_identity_or_signing(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td, tempfile.TemporaryDirectory() as home_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        monkeypatch.setenv("HOME", home_td)
+        _git(root, "config", "--unset", "user.email", check=False)
+        _git(root, "config", "--unset", "user.name", check=False)
+        _git(root, "config", "commit.gpgSign", "true")
+        hooks = root / ".git" / "hooks"
+        hooks.mkdir(exist_ok=True)
+        pre_commit = hooks / "pre-commit"
+        pre_commit.write_text("#!/bin/sh\nexit 99\n")
+        pre_commit.chmod(0o755)
+
+        configure_planning_repair(root, canonical_plan="IMPLEMENTATION_PLAN.md")
+        begin_planning_repair(root, reason="missing verification step")
+        monkeypatch.setattr(pr, "provider_from_args", lambda _args: (os.environ.copy(), {"provider": "native"}))
+
+        def fake_control_model(**kwargs):
+            worktree = kwargs["root"]
+            plan = worktree / "IMPLEMENTATION_PLAN.md"
+            plan.write_text(plan.read_text() + "\n2. Verify.\n")
+            cp = subprocess.CompletedProcess(["claude"], 0, "", "")
+            text = (
+                'PLANNING_REPAIR_ARCHITECT: '
+                '{"verdict":"READY","classification":"PLAN_PRESERVING","summary":"verified repair"}'
+            )
+            return cp, text, "architect-session", {}, "SUCCESS", "ok", {}, [], 0.1
+
+        monkeypatch.setattr(pr, "_run_control_model", fake_control_model)
+        result = run_planning_repair_architect(
+            root,
+            SimpleNamespace(reason="repair", model=None, max_budget_usd=None, max_turns=20, timeout=0),
+        )
+        assert result["status"] == "candidate"
+        active = load_active_repair(root)
+        worktree = Path(active["worktree"])
+        author = _git(worktree, "show", "-s", "--format=%an <%ae>", active["candidate_sha"]).stdout.strip()
+        assert author == "Claude Code Autonomous Optimization <claude-auto@localhost.invalid>"
