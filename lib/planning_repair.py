@@ -452,9 +452,8 @@ def verify_planning_repair(root: Path, args: Any) -> dict[str, Any]:
     _require_scope(worktree, base, candidate, plan_rel)
 
     sd = repo_state_dir(root)
-    readonly = sd / "settings-readonly.json"
-    if not readonly.exists():
-        json_dump(readonly, make_readonly_settings(sd, worktree))
+    readonly = _repair_dir(root) / "settings-verifier-readonly.json"
+    json_dump(readonly, make_readonly_settings(sd, worktree))
     state = load_json(sd / "state.json", {})
     objective = str(state.get("objective") or "Preserve the repository's existing implementation objective and acceptance criteria.")
     diff = _git(worktree, "diff", "--no-ext-diff", "--binary", base, candidate, "--", plan_rel)
@@ -510,6 +509,7 @@ def verify_planning_repair(root: Path, args: Any) -> dict[str, Any]:
         max_turns=int(getattr(args, "max_turns", 35) or 35),
         verify_repo=True,
         max_budget_usd=getattr(args, "max_budget_usd", None),
+        settings_path=readonly,
     )
     protocol = parse_json_protocol(result_text, "PLANNING_REPAIR_VERIFY")
     if not protocol:
