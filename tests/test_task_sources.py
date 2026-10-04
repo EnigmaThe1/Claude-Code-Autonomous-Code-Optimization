@@ -140,6 +140,7 @@ owned_paths = ["src/T3/**"]
 evidence_paths = ["evidence/T3/**"]
 runtime_scratch_paths = [".cache/T3/**"]
 verification = ["test"]
+commit_subject = ""
 metadata = {}
 """
         _commit_file(root, "tasks/c.toml", toml, "toml tasks")
