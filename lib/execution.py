@@ -161,6 +161,7 @@ def _sandbox_settings(
     *,
     read_only_root: bool = False,
     hidden_paths: list[Path] | None = None,
+    max_output_bytes: int | None = None,
 ) -> dict[str, Any]:
     root = root.resolve()
     real_home = Path.home().resolve()
@@ -390,6 +391,31 @@ def _run_process(
         }
 
 
+def _bounded_execution_output(
+    result: dict[str, Any],
+    max_output_bytes: int | None,
+) -> dict[str, Any]:
+    if not max_output_bytes:
+        return _bounded_execution_output(result, max_output_bytes)
+    stdout = str(result.get("stdout") or "")
+    stderr = str(result.get("stderr") or "")
+    total = len(stdout.encode("utf-8", errors="replace")) + len(
+        stderr.encode("utf-8", errors="replace")
+    )
+    if total <= max_output_bytes:
+        return result
+    limit_chars = max(1024, max_output_bytes // 4)
+    bounded = dict(result)
+    bounded["returncode"] = 125
+    bounded["stdout"] = stdout[:limit_chars]
+    bounded["stderr"] = (
+        stderr[:limit_chars]
+        + f"\n[CLAUDE_AUTO_OUTPUT_LIMIT_EXCEEDED bytes={total} limit={max_output_bytes}]\n"
+    )
+    bounded["output_limit_exceeded"] = True
+    return bounded
+
+
 def run_repository_command(
     root: Path,
     command: str | list[str],
@@ -442,7 +468,7 @@ def run_repository_command(
                 "sandboxed": False,
                 "environment_scrubbed": False,
             })
-            return result
+            return _bounded_execution_output(result, max_output_bytes)
 
         srt = shutil.which("srt")
         if srt:
@@ -465,7 +491,7 @@ def run_repository_command(
                 "sandboxed": True,
                 "environment_scrubbed": True,
             })
-            return result
+            return _bounded_execution_output(result, max_output_bytes)
 
         # Linux can enforce the same essential boundary directly with bubblewrap,
         # which is also the primitive used by Sandbox Runtime on Linux.  This
@@ -481,14 +507,14 @@ def run_repository_command(
         )
         if bwrap_result is not None:
             if bwrap_result.get("execution_boundary") != "unavailable":
-                return bwrap_result
+                return _bounded_execution_output(bwrap_result, max_output_bytes)
             # An installed bubblewrap binary can still be unusable because the
             # host disables the required namespace operations.  The explicit
             # trusted-repository override means "fall back to scrubbed host
             # execution when isolation cannot be established", not merely when
             # the binary is absent.
             if not trust_repo_scripts or read_only_root:
-                return bwrap_result
+                return _bounded_execution_output(bwrap_result, max_output_bytes)
 
         if not trust_repo_scripts or read_only_root:
             return {
