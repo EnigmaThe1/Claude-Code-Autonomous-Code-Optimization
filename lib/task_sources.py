@@ -477,13 +477,30 @@ def resolve_task_sources(
     ]
     merged_tasks_sha256 = _digest(merged_authority)
 
+    # Runtime execution details prove *how* an adapter was isolated, but are not
+    # semantic repository authority. Keep them for audit without making the
+    # TaskSourceSet digest depend on whether one host used srt or bubblewrap.
+    canonical_sources: list[dict[str, Any]] = []
+    runtime_evidence: list[dict[str, Any]] = []
+    for evidence in source_evidence:
+        canonical_sources.append({
+            key: value
+            for key, value in evidence.items()
+            if key != "determinism_runs"
+        })
+        if "determinism_runs" in evidence:
+            runtime_evidence.append({
+                "id": evidence["id"],
+                "determinism_runs": evidence["determinism_runs"],
+            })
+
     canonical_set = {
         "schema_version": 1,
         "authority_snapshot_sha256": snapshot["snapshot_sha256"],
         "product_head": snapshot["product_head"],
         "task_source_contract_digest": snapshot["task_source_contract_digest"],
         "strict_dependencies": bool(contract["tasks"]["strict_dependencies"]),
-        "sources": source_evidence,
+        "sources": canonical_sources,
         "tasks": merged_authority,
         "external_dependencies": external_dependencies,
         "merged_tasks_sha256": merged_tasks_sha256,
@@ -492,6 +509,7 @@ def resolve_task_sources(
     result = {
         "status": "READY",
         **canonical_set,
+        "adapter_runtime_evidence": runtime_evidence,
         "task_source_set_sha256": task_source_set_sha256,
     }
 
