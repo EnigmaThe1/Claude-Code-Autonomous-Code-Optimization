@@ -131,6 +131,7 @@ def run_readonly_plan_agent(
     max_turns: int = 35,
     verify_repo: bool = False,
     max_budget_usd: float | None = None,
+    settings_path: Path | None = None,
     runner=run,
 ) -> tuple[str, dict[str, Any]]:
     """Run a fresh hard-read-only planning/control context and prove it did not mutate the repo."""
@@ -138,7 +139,7 @@ def run_readonly_plan_agent(
     cmd = [
         "claude",
         "--restricted",
-        "--settings", str(sd / "settings-readonly.json"),
+        "--settings", str(settings_path or (sd / "settings-readonly.json")),
         "--setting-sources", "",
         "--add-dir", str(sd),
         "--tools", "Read,Glob,Grep",
