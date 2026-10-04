@@ -376,6 +376,7 @@ def _guard_bash(
     *,
     initial_cwd: Path | None = None,
     inherited_vars: dict[str, str | None] | None = None,
+    semantic_only: bool | None = None,
 ) -> tuple[str, str]:
     if not command:
         return "deny", "Claude Auto Bash write-boundary guard received an empty command."
@@ -388,6 +389,8 @@ def _guard_bash(
         return "deny", "Claude Auto Bash write-boundary guard could not parse the command safely."
 
     root = Path(root_raw).expanduser().resolve()
+    if semantic_only is None:
+        semantic_only = os.environ.get("CLAUDE_AUTO_SEMANTIC_ONLY_WRITE_GUARD") == "1"
     if _governance_snapshot_invalid():
         return "deny", "Claude Auto durable governance snapshot is invalid; repository mutation is blocked fail-closed."
     if _planning_policy_invalid():
@@ -446,7 +449,7 @@ def _guard_bash(
             target = _resolve_target(root, cwd, raw_target, effective_vars)
             if target is None:
                 return "deny", f"Claude Auto could not safely resolve {cmd} target: {raw_target}"
-            if _outside(root, target):
+            if _outside(root, target) and not semantic_only:
                 return "deny", f"{cmd} outside the selected repository root is denied: {target}"
             if cmd == "pushd":
                 directory_stack.append(cwd)
@@ -468,6 +471,7 @@ def _guard_bash(
                         root_raw,
                         initial_cwd=cwd,
                         inherited_vars=effective_vars,
+                        semantic_only=semantic_only,
                     )
 
         for raw in _segment_write_targets(seg, cmd_idx):
@@ -478,10 +482,19 @@ def _guard_bash(
                 return "deny", f"Claude Auto could not safely resolve Bash write target: {raw}"
             if _protected_target(target):
                 return "deny", f"Bash mutation of a protected repository path is denied: {target}"
-            if _outside(root, target) and not _approved_target(target):
+            if (
+                _outside(root, target)
+                and not semantic_only
+                and not _approved_target(target)
+            ):
                 return "deny", f"Bash mutation outside the selected repository root is denied: {target}"
 
-    return "allow", "No statically identifiable Bash write target escapes the selected repository root."
+    return (
+        "allow",
+        "No statically identifiable Bash write target violates semantic repository authority."
+        if semantic_only
+        else "No statically identifiable Bash write target escapes the selected repository root.",
+    )
 
 
 def main() -> int:
@@ -491,11 +504,17 @@ def main() -> int:
         ti = event.get("tool_input") or {}
         root_raw = os.environ.get("CLAUDE_AUTO_REPO_ROOT")
 
+        semantic_only = os.environ.get("CLAUDE_AUTO_SEMANTIC_ONLY_WRITE_GUARD") == "1"
+
         if tool == "Bash":
             if not root_raw:
                 decision("deny", "Claude Auto Bash write-boundary guard has no repository root; failing closed.")
                 return 0
-            value, reason = _guard_bash(str(ti.get("command") or ""), root_raw)
+            value, reason = _guard_bash(
+                str(ti.get("command") or ""),
+                root_raw,
+                semantic_only=semantic_only,
+            )
             decision(value, reason)
             return 0
 
@@ -519,10 +538,19 @@ def main() -> int:
         if _protected_target(target):
             decision("deny", f"Direct mutation of a protected repository path is denied: {target}")
             return 0
-        if _outside(root, target) and not _approved_target(target):
+        if (
+            _outside(root, target)
+            and not semantic_only
+            and not _approved_target(target)
+        ):
             decision("deny", f"Direct mutation outside the selected repository root is denied: {target}")
             return 0
-        decision("allow", "Direct mutation is inside the selected repository root.")
+        decision(
+            "allow",
+            "Direct mutation does not violate semantic repository authority."
+            if semantic_only
+            else "Direct mutation is inside the selected repository root.",
+        )
         return 0
     except Exception as exc:
         decision("deny", f"Claude Auto write-boundary guard failed closed: {type(exc).__name__}")
