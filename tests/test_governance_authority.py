@@ -390,3 +390,63 @@ def test_oversized_governance_contract_is_rejected(monkeypatch):
         _run(root, "git", "commit", "-qm", "oversized governance")
         with pytest.raises(GovernanceContractError, match="maximum supported size"):
             load_governance_contract(root)
+
+
+def test_control_surface_wip_divergence_blocks_snapshot(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("plan\n")
+        control = root / ".claude-auto" / "verification.json"
+        control.parent.mkdir(parents=True)
+        control.write_text('{"commands":["one"]}\n')
+        _run(root, "git", "add", "PLAN.md", ".claude-auto/verification.json")
+        _run(root, "git", "commit", "-qm", "authority inputs")
+        _write_contract(root, _contract([_set("default", [_member("PLAN.md")])]))
+        control.write_text('{"commands":["unaccepted"]}\n')
+        with pytest.raises(AuthoritySetError, match="working tree differs"):
+            build_authority_snapshot(root)
+
+
+def test_role_mutability_and_helper_contract_changes_invalidate_snapshot(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("plan\n")
+        tools = root / "tools"
+        tools.mkdir()
+        (tools / "check.py").write_text("raise SystemExit(0)\n")
+        _run(root, "git", "add", "PLAN.md", "tools/check.py")
+        _run(root, "git", "commit", "-qm", "authority inputs")
+
+        helper = {
+            "id": "validate-plan",
+            "argv": ["python3", "tools/check.py"],
+            "cwd": ".",
+            "inputs": ["PLAN.md", "tools/check.py"],
+            "outputs": [],
+            "timeout_seconds": 30,
+            "capabilities": {"network": [], "read_external": []},
+        }
+        value = _contract([_set("default", [_member("PLAN.md")])])
+        value["planning_authority"]["sets"][0]["validators"] = [helper]
+        _write_contract(root, value)
+        first = build_authority_snapshot(root)
+        assert first is not None
+
+        changed = json.loads(json.dumps(value))
+        member = changed["planning_authority"]["sets"][0]["members"][0]
+        member["role"] = "contract"
+        member["repair"] = "immutable"
+        changed["planning_authority"]["sets"][0]["validators"][0]["timeout_seconds"] = 60
+        path = root / ".claude-auto" / "governance.json"
+        path.write_text(json.dumps(changed, indent=2) + "\n")
+        _run(root, "git", "add", ".claude-auto/governance.json")
+        _run(root, "git", "commit", "-qm", "change authority semantics")
+
+        second = build_authority_snapshot(root)
+        assert second is not None
+        assert second["sets"][0]["members"][0]["role"] == "contract"
+        assert second["sets"][0]["members"][0]["repair"] == "immutable"
+        assert first["sets"][0]["validator_digest"] != second["sets"][0]["validator_digest"]
+        assert first["snapshot_sha256"] != second["snapshot_sha256"]
