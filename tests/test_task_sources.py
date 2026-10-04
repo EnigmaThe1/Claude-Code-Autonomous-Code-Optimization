@@ -812,3 +812,26 @@ def test_repository_change_during_adapter_resolution_invalidates_result(monkeypa
 
         with pytest.raises(TaskSourceError, match="authority changed during task resolution"):
             resolve_task_sources(root, runner=runner, persist=False)
+
+
+def test_nonfinite_metadata_and_unicode_equivalent_verification_are_rejected():
+    bad = _task("T1", metadata={"value": float("nan")})
+    with pytest.raises(TaskSpecError, match="JSON-compatible"):
+        normalise_task_spec(
+            bad,
+            source_id="s",
+            source_authority_sets={"default"},
+            known_authority_sets={"default"},
+            protected_paths={"PLAN.md"},
+        )
+
+    duplicate_unicode = _task("T2")
+    duplicate_unicode["verification"] = ["caf\u00e9", "cafe\u0301"]
+    with pytest.raises(TaskSpecError, match="duplicate entry"):
+        normalise_task_spec(
+            duplicate_unicode,
+            source_id="s",
+            source_authority_sets={"default"},
+            known_authority_sets={"default"},
+            protected_paths={"PLAN.md"},
+        )
