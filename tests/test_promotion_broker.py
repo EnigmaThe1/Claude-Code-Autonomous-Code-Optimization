@@ -12,9 +12,11 @@ from git_trust import (
     trusted_git_env,
 )
 from promotion_policy import (
+    REPOSITORY_PLANNING_REPAIR_CONTRACT,
     configure_promotion_policy,
     record_promotion_attestation,
 )
+from planning_repair import configure_planning_repair
 from workspace_recovery import (
     _visible_untracked,
     promote_fast_forward,
@@ -316,3 +318,51 @@ def test_promotion_uses_same_trusted_excludes_view_and_preserves_real_wip(monkey
         assert (root / ".bashrc").exists()
         assert (root / ".mcp.json").exists()
         assert _visible_untracked(root) == {"real-untracked.txt"}
+
+
+def test_generic_promote_ff_cannot_bypass_canonical_plan_attestation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "IMPLEMENTATION_PLAN.md").write_text("# Plan\n\n1. Original.\n")
+        _run("git", "-C", str(root), "add", "IMPLEMENTATION_PLAN.md")
+        _run("git", "-C", str(root), "commit", "-qm", "add plan")
+        configure_planning_repair(root, canonical_plan="IMPLEMENTATION_PLAN.md")
+
+        base = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+        (root / "IMPLEMENTATION_PLAN.md").write_text("# Plan\n\n1. Repaired.\n")
+        _run("git", "-C", str(root), "add", "IMPLEMENTATION_PLAN.md")
+        _run("git", "-C", str(root), "commit", "-qm", "repair plan")
+        target = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+
+        with pytest.raises(ValueError, match="attestation required"):
+            promote_fast_forward(root, target)
+
+        record_promotion_attestation(
+            root,
+            target_sha=target,
+            contract=REPOSITORY_PLANNING_REPAIR_CONTRACT,
+            verifier="independent-planning-verifier",
+            evidence_sha256=_evidence("plan"),
+        )
+        result = promote_fast_forward(root, target)
+        assert result["status"] == "promoted"
+        assert result["attestation"]["contract"] == REPOSITORY_PLANNING_REPAIR_CONTRACT
+
+
+def test_non_plan_fast_forward_remains_available_without_planning_attestation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "IMPLEMENTATION_PLAN.md").write_text("# Plan\n")
+        _run("git", "-C", str(root), "add", "IMPLEMENTATION_PLAN.md")
+        _run("git", "-C", str(root), "commit", "-qm", "add plan")
+        configure_planning_repair(root, canonical_plan="IMPLEMENTATION_PLAN.md")
+
+        base = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+        target = _commit(root, "ordinary.txt", "ordinary\n")
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+        result = promote_fast_forward(root, target)
+        assert result["status"] == "promoted"
+        assert result["attestation"] is None
