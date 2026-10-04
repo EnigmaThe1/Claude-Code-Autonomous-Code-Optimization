@@ -250,6 +250,11 @@ def build_parser(version: str) -> argparse.ArgumentParser:
     pr = prsp.add_parser("abort", help="Remove the dedicated repair worktree/branch without touching product work")
     pr.add_argument("--repo")
 
+    q = sp.add_parser("governance", help="Inspect resolved repository planning authority")
+    gsp = q.add_subparsers(dest="governance_command", required=True)
+    gq = gsp.add_parser("status", help="Show the exact resolved AuthoritySet snapshot")
+    gq.add_argument("--repo")
+
     q = sp.add_parser("profile", help="Inspect or request a human-controlled hot profile switch")
     psp = q.add_subparsers(dest="profile_command", required=True)
     pq = psp.add_parser("status", help="Show the active profile and any pending switch")
