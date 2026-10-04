@@ -324,27 +324,48 @@ def make_settings(
         if repo_root not in additional:
             additional.append(repo_root)
 
-        # A configured repository-owned canonical plan is mutable only through
-        # the dedicated planning-repair workflow.  Normal Balanced/Strict workers
-        # receive both direct-tool denies and a Bash path guard for the exact file.
-        repair_policy = load_json(state_dir / "planning-repair" / "policy.json", {})
-        canonical_plan = repair_policy.get("canonical_plan") if isinstance(repair_policy, dict) else None
-        if isinstance(canonical_plan, str) and canonical_plan.strip() and not unrestricted:
+        # Repository semantic governance is independent of the runtime autonomy
+        # profile. In particular, Unattended may widen host/runtime authority but
+        # must never make planning/control authority writable by the product worker.
+        snapshot = load_json(state_dir / "governance" / "snapshot.json", {})
+        protected_rel: list[str] = []
+        if isinstance(snapshot, dict):
+            raw_paths = snapshot.get("protected_paths")
+            if isinstance(raw_paths, list):
+                protected_rel.extend(
+                    str(raw) for raw in raw_paths
+                    if isinstance(raw, str) and raw.strip()
+                )
+
+        # RC3 compatibility fallback: settings generated before the first RC4
+        # activation still protect the legacy one-file canonical plan.
+        if not protected_rel:
+            repair_policy = load_json(state_dir / "planning-repair" / "policy.json", {})
+            canonical_plan = repair_policy.get("canonical_plan") if isinstance(repair_policy, dict) else None
+            if isinstance(canonical_plan, str) and canonical_plan.strip():
+                protected_rel.append(canonical_plan)
+
+        protected_abs: list[str] = []
+        for raw in sorted(set(protected_rel)):
             try:
-                protected = (Path(repo_root) / canonical_plan).resolve(strict=False)
+                rel_path = Path(raw)
+                if rel_path.is_absolute() or ".." in rel_path.parts or rel_path == Path("."):
+                    continue
+                protected = (Path(repo_root) / rel_path).resolve(strict=False)
                 protected.relative_to(Path(repo_root))
             except (OSError, RuntimeError, ValueError):
-                protected = None
-            if protected is not None:
-                template["env"]["CLAUDE_AUTO_PROTECTED_REPO_PATHS"] = json.dumps([str(protected)])
-                rel = Path(canonical_plan).as_posix()
-                for rule in (
-                    f"Edit(./{rel})",
-                    f"Write(./{rel})",
-                    f"NotebookEdit(./{rel})",
-                ):
-                    if rule not in deny:
-                        deny.append(rule)
+                continue
+            protected_abs.append(str(protected))
+            rel = rel_path.as_posix()
+            for rule in (
+                f"Edit(./{rel})",
+                f"Write(./{rel})",
+                f"NotebookEdit(./{rel})",
+            ):
+                if rule not in deny:
+                    deny.append(rule)
+        if protected_abs:
+            template["env"]["CLAUDE_AUTO_PROTECTED_REPO_PATHS"] = json.dumps(protected_abs)
         if unrestricted:
             # Explicit unrestricted/Unattended authority intentionally spans the
             # host filesystem. additionalDirectories grants file access without
