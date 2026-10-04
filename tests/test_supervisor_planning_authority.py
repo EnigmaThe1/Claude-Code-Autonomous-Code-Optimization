@@ -279,3 +279,41 @@ def test_semantic_decision_blocks_instead_of_rewriting_external_plan(monkeypatch
         assert rc == 3
         assert final_state["status"] == "BLOCKED"
         assert "semantic/user decision" in final_state["blocker"]
+
+
+def test_worker_cannot_mutate_git_trust_promotion_or_planning_policy(monkeypatch, capsys):
+    import git_trust
+    import promotion_policy
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        monkeypatch.setenv("CLAUDECODE", "1")
+        excludes = Path(td) / "trusted-excludes"
+        excludes.write_text(".bashrc\n")
+        excludes.chmod(0o600)
+
+        finder = lambda _raw: root
+        rc = git_trust.git_trust_action(
+            argparse.Namespace(git_trust_command="set-excludes", repo=str(root), path=str(excludes)),
+            find_repo_root=finder,
+        )
+        assert rc == 2
+        rc = promotion_policy.promotion_policy_action(
+            argparse.Namespace(promotion_command="require-contract", repo=str(root), contract="x"),
+            find_repo_root=finder,
+        )
+        assert rc == 2
+        rc = pr.planning_repair_action(
+            argparse.Namespace(
+                planning_repair_command="configure",
+                repo=str(root),
+                plan="IMPLEMENTATION_PLAN.md",
+                product_branch=None,
+                remote=None,
+                remote_branch=None,
+            ),
+            find_repo_root=finder,
+        )
+        assert rc == 2
+        assert "top-level shell" in capsys.readouterr().err
