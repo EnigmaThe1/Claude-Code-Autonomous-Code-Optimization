@@ -23,6 +23,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from authority_set import build_authority_snapshot
 from environment_policy import sanitised_subprocess_env
 from process_runner import run
 from repo_identity import repo_state_dir, repository_identity
@@ -80,12 +81,27 @@ def activate(root: Path, dry_run: bool = False) -> Path:
     ensure_private_dir(sd)
     ensure_private_dir(sd / "logs")
     prune_runtime_history(sd)
+
+    # RC4 governance is resolved from exact Git-tree truth before any worker
+    # settings are generated. A malformed/ambiguous authority fails activation
+    # closed rather than producing a weaker settings file.
+    authority_snapshot = build_authority_snapshot(root)
+    governance_dir = ensure_private_dir(sd / "governance")
+    snapshot_path = governance_dir / "snapshot.json"
+    if authority_snapshot is not None:
+        json_dump(snapshot_path, authority_snapshot)
+    else:
+        try:
+            snapshot_path.unlink()
+        except FileNotFoundError:
+            pass
+
     json_dump(sd / "profile.json", asdict(prof))
     identity = repository_identity(root)
     state = load_json(sd / "state.json", {})
     if not state:
         state = {
-            "schema_version": 8,
+            "schema_version": 9,
             "created_at": utcnow(),
             "updated_at": utcnow(),
             "repo_root": str(root.resolve()),
@@ -106,18 +122,52 @@ def activate(root: Path, dry_run: bool = False) -> Path:
             "permission_decisions": [],
             "permission_requests": [],
             "active_permission_objective_hash": None,
+            "governance_snapshot_sha256": None,
+            "governance_snapshot_generation": 0,
+            "task_source_sha256": None,
+            "active_task_id": None,
+            "active_task_spec_sha256": None,
+            "active_execution_envelope_sha256": None,
+            "accepted_tasks": {},
+            "governance_blocker": None,
         }
     else:
         state["updated_at"] = utcnow()
         state["repo_root"] = str(root.resolve())
         state["repo_id"] = prof.repo_id
         state["repo_identity"] = identity
-        state["schema_version"] = max(int(state.get("schema_version", 1)), 8)
+        state["schema_version"] = max(int(state.get("schema_version", 1)), 9)
         state.setdefault("pending_permission_request", None)
         state.setdefault("permission_grants", [])
         state.setdefault("permission_decisions", [])
         state.setdefault("permission_requests", [])
         state.setdefault("active_permission_objective_hash", None)
+        state.setdefault("governance_snapshot_sha256", None)
+        state.setdefault("governance_snapshot_generation", 0)
+        state.setdefault("task_source_sha256", None)
+        state.setdefault("active_task_id", None)
+        state.setdefault("active_task_spec_sha256", None)
+        state.setdefault("active_execution_envelope_sha256", None)
+        state.setdefault("accepted_tasks", {})
+        state.setdefault("governance_blocker", None)
+
+    previous_governance = state.get("governance_snapshot_sha256")
+    current_governance = (
+        authority_snapshot.get("snapshot_sha256")
+        if isinstance(authority_snapshot, dict)
+        else None
+    )
+    if previous_governance != current_governance:
+        state["governance_snapshot_generation"] = int(
+            state.get("governance_snapshot_generation", 0) or 0
+        ) + 1
+    state["governance_snapshot_sha256"] = current_governance
+    state["task_source_sha256"] = (
+        authority_snapshot.get("task_source_contract_digest")
+        if isinstance(authority_snapshot, dict)
+        else None
+    )
+    state["governance_blocker"] = None
     json_dump(sd / "state.json", state)
     prof_dict = asdict(prof)
     # Balanced aliases preserve the previous filenames while explicit profile files
