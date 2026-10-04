@@ -383,3 +383,37 @@ def test_architect_commit_does_not_require_user_git_identity_or_signing(monkeypa
         worktree = Path(active["worktree"])
         author = _git(worktree, "show", "-s", "--format=%an <%ae>", active["candidate_sha"]).stdout.strip()
         assert author == "Claude Code Autonomous Optimization <claude-auto@localhost.invalid>"
+
+
+def test_corrupt_durable_planning_policy_blocks_repository_mutation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        state_dir = pr.repo_state_dir(root)
+        policy_dir = state_dir / "planning-repair"
+        policy_dir.mkdir(parents=True, exist_ok=True)
+        (policy_dir / "policy.json").write_text("{broken")
+
+        stale = make_settings(
+            state_dir,
+            "external",
+            "balanced",
+            {"repo_root": str(root), "languages": [], "container_files": []},
+        )
+        env = os.environ.copy()
+        env.update(stale["env"])
+
+        cp = subprocess.run(
+            [os.sys.executable, str(WRITE_GUARD)],
+            input=json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": "printf 'changed\\n' > app.txt"},
+            }),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        output = json.loads(cp.stdout)["hookSpecificOutput"]
+        assert output["permissionDecision"] == "deny"
+        assert "blocked fail-closed" in output["permissionDecisionReason"]
