@@ -855,3 +855,50 @@ def test_nonfinite_metadata_and_unicode_equivalent_verification_are_rejected():
             known_authority_sets={"default"},
             protected_paths={"PLAN.md"},
         )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda t: t.update({"authority_sets": []}), "must not be empty"),
+        (lambda t: t.update({"depends_on": ["D1", "D1"]}), "duplicate entry"),
+        (lambda t: t.update({"owned_paths": ["/absolute/path"]}), "must be relative"),
+        (lambda t: t.update({"owned_paths": ["PLAN.md"]}), "protected authority/control"),
+        (lambda t: t.update({"owned_paths": [".claude-auto/governance.json"]}), "protected authority/control"),
+        (lambda t: t.update({"runtime_scratch_paths": [".git/**"]}), "protected authority/control"),
+    ],
+)
+def test_additional_taskspec_authority_negative_paths(mutate, message):
+    task = _task("TNEG")
+    mutate(task)
+    with pytest.raises(TaskSpecError, match=message):
+        normalise_task_spec(
+            task,
+            source_id="s",
+            source_authority_sets={"default"},
+            known_authority_sets={"default"},
+            protected_paths={"PLAN.md", ".claude-auto/governance.json"},
+        )
+
+
+def test_adapter_external_read_capability_is_not_granted(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "live")
+        _prepare_adapter_repo(root)
+        source = _adapter_source(capabilities={"network": [], "read_external": ["/etc"]})
+        _write_governance(root, _contract([source]))
+        with pytest.raises(TaskSourceError, match="does not grant"):
+            resolve_task_sources(root, runner=lambda *_a, **_k: {}, persist=False)
+
+
+def test_task_resolution_does_not_mutate_target_repository(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _commit_file(root, "tasks/a.json", json.dumps([_task("T1")]), "source")
+        _write_governance(root, _contract([_json_source("a", "tasks/a.json")]))
+        before = _run(root, "git", "status", "--porcelain=v1").stdout
+        resolve_task_sources(root, persist=True)
+        after = _run(root, "git", "status", "--porcelain=v1").stdout
+        assert before == after == ""
