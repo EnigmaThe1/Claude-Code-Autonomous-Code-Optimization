@@ -16,7 +16,10 @@ The system has an always-on low-risk user layer and an explicit autonomous super
 - `provider_config.py` / `model_qualification.py`: routing and model capability qualification.
 - `verification.py` / `review_gates.py`: deterministic verification and completion reviews.
 - `environment_policy.py` / `toolchain_preflight.py`: resumable environment and dependency diagnostics.
-- `workspace_recovery.py`: narrow cleanup/promotion recovery helpers.
+- `workspace_recovery.py`: narrow local/remote promotion and workspace recovery broker.
+- `git_trust.py`: deterministic package-owned Git execution context.
+- `promotion_policy.py`: durable exact-SHA promotion-attestation policy.
+- `planning_repair.py`: repository-owned canonical-plan repair, verification, refresh and promotion.
 - `user_layer.py`: package-owned Claude user-layer installation.
 - `telemetry.py` / `protocols.py`: structured outcomes, redaction and budgets.
 
@@ -45,7 +48,7 @@ objective or plan
   -> simulation + red team
   -> selected profile
   -> implement / verify / diagnose / repair
-  -> plan repair when materially necessary
+  -> external-plan repair, or repository-owned canonical-plan repair when configured
   -> final whole-system review
   -> deterministic verification
   -> correctness/security review
@@ -56,7 +59,11 @@ Claude Code owns model/tool execution and native turn continuation. Claude Auto 
 
 ## Plan control
 
-Planning, simulation and red-team roles run in fresh read-only contexts. External state stores versioned plans and evidence. The original objective and acceptance criteria remain above the plan in the authority chain. See [PLANNING_AND_REPAIR.md](PLANNING_AND_REPAIR.md).
+Planning, simulation and red-team roles run in fresh read-only contexts. External state stores versioned executable plans and evidence. The original objective and acceptance criteria remain above the plan in the authority chain.
+
+For repositories that explicitly configure a tracked canonical plan, that file becomes the single planning authority. The normal worker is fenced from mutating it. Material plan defects are handled in a dedicated linked worktree by a one-plan architect, then an independent read-only verifier attests the exact candidate SHA. Only the attested SHA may be promoted; the external executable plan is regenerated from the promoted canonical source afterward.
+
+See [PLANNING_AND_REPAIR.md](PLANNING_AND_REPAIR.md).
 
 ## Profiles
 
@@ -67,6 +74,12 @@ Control/review roles remain read-only regardless of main-worker profile.
 ## Profile switching
 
 Interactive switching occurs at the user-prompt boundary and resumes the exact Claude session under rebuilt policy. Headless switching uses a durable request bound to the live supervisor identity and applies only at safe supervisor boundaries.
+
+## Git trust and promotion
+
+Broker-owned Git operations reconstruct a deterministic inline Git policy after scrubbing inherited inline injection. The broker always supplies its own private excludes file, disables hooks/fsmonitor and recursive submodule behaviour, and preserves ordinary authentication/transport configuration.
+
+Promotion can remain local or operate against a remote branch. Remote mode refreshes remote truth, requires an exact expected base, verifies ancestry, performs a lease-protected exact push and reconciles the remote after a transport/result failure before deciding whether the operation failed. Attestations bind protected promotion to an exact target SHA and contract.
 
 ## Durable state and evidence
 
