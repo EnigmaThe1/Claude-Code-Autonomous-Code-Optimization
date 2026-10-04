@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import textwrap
 from pathlib import Path
@@ -246,7 +247,9 @@ def _architect_settings(root: Path, worktree: Path, plan: Path) -> Path:
                 "matcher": "Edit|Write|NotebookEdit|Bash",
                 "hooks": [{
                     "type": "command",
-                    "command": f"python3 -B {package_root() / 'hooks' / 'planning_repair_guard.py'}",
+                    "command": "python3 -B " + shlex.quote(
+                        str(package_root() / "hooks" / "planning_repair_guard.py")
+                    ),
                     "timeout": 5,
                 }],
             }],
@@ -622,20 +625,29 @@ def refresh_planning_repair_base(root: Path) -> dict[str, Any]:
 
 
 def _cleanup_repair_worktree(root: Path, active: dict[str, Any]) -> None:
-    worktree = Path(str(active.get("worktree") or ""))
+    raw_worktree = str(active.get("worktree") or "")
     branch = str(active.get("repair_branch") or "")
-    if worktree:
-        cp = _git(root, "worktree", "remove", "--force", str(worktree))
-        if cp.returncode != 0 and worktree.exists():
-            raise ValueError("unable to remove dedicated planning repair worktree")
-    if branch:
-        cp = _git(root, "branch", "-D", branch)
-        if cp.returncode != 0:
-            # If the ref disappeared with an interrupted prior cleanup, continue
-            # only when Git confirms it is already absent.
-            exists = _git(root, "show-ref", "--verify", f"refs/heads/{branch}")
-            if exists.returncode == 0:
-                raise ValueError("unable to remove completed planning repair branch")
+    if not raw_worktree or not branch.startswith("claude-auto/planning-repair/"):
+        raise ValueError("refusing cleanup of unrecognised planning repair state")
+    worktree = Path(raw_worktree).expanduser().resolve()
+    allowed_parent = _repair_dir(root).resolve()
+    try:
+        worktree.relative_to(allowed_parent)
+    except ValueError as exc:
+        raise ValueError("refusing cleanup outside package-owned planning repair state") from exc
+    if worktree == allowed_parent:
+        raise ValueError("refusing cleanup of planning repair state root")
+
+    cp = _git(root, "worktree", "remove", "--force", str(worktree))
+    if cp.returncode != 0 and worktree.exists():
+        raise ValueError("unable to remove dedicated planning repair worktree")
+    cp = _git(root, "branch", "-D", branch)
+    if cp.returncode != 0:
+        # If the ref disappeared with an interrupted prior cleanup, continue
+        # only when Git confirms it is already absent.
+        exists = _git(root, "show-ref", "--verify", f"refs/heads/{branch}")
+        if exists.returncode == 0:
+            raise ValueError("unable to remove completed planning repair branch")
 
 
 def promote_planning_repair(root: Path) -> dict[str, Any]:
