@@ -218,6 +218,27 @@ def _validate_authority_set(value: Any, *, index: int) -> dict[str, Any]:
     }
 
 
+def _unique_strings(
+    value: Any,
+    *,
+    where: str,
+    maximum: int,
+    normalise_paths: bool = False,
+) -> list[str]:
+    items = _validate_string_list(value, where=where, maximum=maximum)
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in items:
+        item = normalise_repo_selector(raw) if normalise_paths else raw.strip()
+        if not item:
+            raise GovernanceContractError(f"{where} entries must be non-empty strings")
+        if item in seen:
+            raise GovernanceContractError(f"{where} contains duplicate entry {item!r}")
+        seen.add(item)
+        out.append(item)
+    return out
+
+
 def _validate_task_source(value: Any, *, index: int) -> dict[str, Any]:
     where = f"tasks.sources[{index}]"
     if not isinstance(value, dict):
@@ -225,14 +246,89 @@ def _validate_task_source(value: Any, *, index: int) -> dict[str, Any]:
     kind = value.get("kind")
     if kind not in _TASK_SOURCE_KINDS:
         raise GovernanceContractError(f"{where}.kind must be one of {sorted(_TASK_SOURCE_KINDS)}")
-    # P1 records task-source declarations but does not execute them. Preserve the
-    # complete inert JSON object in the snapshot so P2 can tighten/interpret the
-    # source protocol without silently losing security-relevant declaration data.
-    try:
-        canonical_json_bytes(value)
-    except (TypeError, ValueError) as exc:
-        raise GovernanceContractError(f"{where} must contain JSON-compatible data") from exc
-    return value
+
+    source_id = value.get("id")
+    if not isinstance(source_id, str) or not _SET_ID_RE.fullmatch(source_id):
+        raise GovernanceContractError(f"{where}.id must be a compact stable identifier")
+
+    if kind in {"json", "jsonl", "toml"}:
+        _expect_exact_keys(value, {"id", "kind", "authority_sets", "paths"}, where=where)
+        authority_sets = _unique_strings(
+            value["authority_sets"], where=f"{where}.authority_sets", maximum=MAX_AUTHORITY_SETS
+        )
+        if not authority_sets:
+            raise GovernanceContractError(f"{where}.authority_sets must not be empty")
+        paths = _unique_strings(
+            value["paths"], where=f"{where}.paths", maximum=MAX_HELPER_INPUTS, normalise_paths=True
+        )
+        if not paths:
+            raise GovernanceContractError(f"{where}.paths must not be empty")
+        return {
+            "id": source_id,
+            "kind": kind,
+            "authority_sets": authority_sets,
+            "paths": paths,
+        }
+
+    if kind == "static":
+        _expect_exact_keys(value, {"id", "kind", "authority_sets", "tasks"}, where=where)
+        authority_sets = _unique_strings(
+            value["authority_sets"], where=f"{where}.authority_sets", maximum=MAX_AUTHORITY_SETS
+        )
+        if not authority_sets:
+            raise GovernanceContractError(f"{where}.authority_sets must not be empty")
+        tasks = value["tasks"]
+        if not isinstance(tasks, list) or len(tasks) > MAX_AUTHORITY_MEMBERS:
+            raise GovernanceContractError(f"{where}.tasks must be a bounded list")
+        try:
+            canonical_json_bytes(tasks)
+        except (TypeError, ValueError) as exc:
+            raise GovernanceContractError(f"{where}.tasks must contain JSON-compatible data") from exc
+        return {
+            "id": source_id,
+            "kind": kind,
+            "authority_sets": authority_sets,
+            "tasks": tasks,
+        }
+
+    _expect_exact_keys(
+        value,
+        {"id", "kind", "authority_sets", "argv", "cwd", "inputs", "timeout_seconds", "capabilities"},
+        where=where,
+    )
+    authority_sets = _unique_strings(
+        value["authority_sets"], where=f"{where}.authority_sets", maximum=MAX_AUTHORITY_SETS
+    )
+    if not authority_sets:
+        raise GovernanceContractError(f"{where}.authority_sets must not be empty")
+    argv = _validate_string_list(value["argv"], where=f"{where}.argv", maximum=MAX_ARGV_ITEMS)
+    if not argv:
+        raise GovernanceContractError(f"{where}.argv must not be empty")
+    if any("\x00" in arg for arg in argv):
+        raise GovernanceContractError(f"{where}.argv must not contain NUL characters")
+    cwd = value["cwd"]
+    if not isinstance(cwd, str) or not cwd:
+        raise GovernanceContractError(f"{where}.cwd must be a non-empty string")
+    if cwd != ".":
+        cwd = normalise_repo_selector(cwd)
+    inputs = _unique_strings(
+        value["inputs"], where=f"{where}.inputs", maximum=MAX_HELPER_INPUTS, normalise_paths=True
+    )
+    if not inputs:
+        raise GovernanceContractError(f"{where}.inputs must not be empty")
+    timeout = value["timeout_seconds"]
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1 or timeout > 86_400:
+        raise GovernanceContractError(f"{where}.timeout_seconds must be an integer from 1 to 86400")
+    return {
+        "id": source_id,
+        "kind": kind,
+        "authority_sets": authority_sets,
+        "argv": argv,
+        "cwd": cwd,
+        "inputs": inputs,
+        "timeout_seconds": timeout,
+        "capabilities": _validate_capabilities(value["capabilities"], where=f"{where}.capabilities"),
+    }
 
 
 def validate_governance_contract(value: Any) -> dict[str, Any]:
@@ -268,6 +364,19 @@ def validate_governance_contract(value: Any) -> dict[str, Any]:
     if not isinstance(sources_raw, list) or len(sources_raw) > MAX_TASK_SOURCES:
         raise GovernanceContractError("tasks.sources must be a bounded list")
     sources = [_validate_task_source(item, index=i) for i, item in enumerate(sources_raw)]
+    seen_source_ids: set[str] = set()
+    known_set_ids = {item["id"] for item in sets}
+    for source in sources:
+        source_id = source["id"]
+        if source_id in seen_source_ids:
+            raise GovernanceContractError(f"duplicate task-source id: {source_id!r}")
+        seen_source_ids.add(source_id)
+        unknown_sets = sorted(set(source["authority_sets"]) - known_set_ids)
+        if unknown_sets:
+            raise GovernanceContractError(
+                f"task source {source_id!r} references unknown AuthoritySet(s): "
+                + ", ".join(unknown_sets)
+            )
     if tasks["execution_mode"] != "single-writer":
         raise GovernanceContractError("governance v1 supports only tasks.execution_mode='single-writer'")
     if not isinstance(tasks["strict_dependencies"], bool):
