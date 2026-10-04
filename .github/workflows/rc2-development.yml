@@ -1,0 +1,39 @@
+name: RC2 development verification
+
+on:
+  push:
+    branches:
+      - release/1.0.0-rc2
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap shellcheck
+          python -m pip install --disable-pip-version-check pytest pytest-cov ruff
+      - name: Syntax and static checks
+        run: |
+          python -m compileall -q lib hooks tests
+          ruff check lib hooks tests --select E9,F63,F7,F82
+          shellcheck -x install.sh uninstall.sh bin/claude-auto
+          test "$(./bin/claude-auto --version)" = "claude-auto 1.0.0-rc2"
+      - name: RC2 focused regressions
+        env:
+          PYTHONPATH: lib
+        run: |
+          python -m pytest -q tests/test_promotion_broker.py
+          python -m pytest -q tests/test_environment_resilience.py
+          python -m pytest -q tests/test_environment_blocker_hardening.py
+          python -m pytest -q tests/test_profile_switch.py
