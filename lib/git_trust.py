@@ -147,6 +147,11 @@ def git_trust_status(root: Path) -> dict[str, Any]:
 
 def git_trust_action(args: Any, *, find_repo_root) -> int:
     try:
+        action = getattr(args, "git_trust_command", None)
+        if action in ["set-excludes","clear-excludes"] and os.environ.get("CLAUDECODE") == "1":
+            raise ValueError(
+                "this authority-changing command must be run by the operator/supervisor from a top-level shell"
+            )
         root = find_repo_root(getattr(args, "repo", None))
         action = getattr(args, "git_trust_command", None)
         if action == "status":
