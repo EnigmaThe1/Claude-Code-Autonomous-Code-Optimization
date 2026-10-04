@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 import planning_repair as pr
 from planning_repair import (
