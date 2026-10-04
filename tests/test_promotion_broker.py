@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from git_trust import (
+    configure_trusted_excludes,
+    trusted_git_env,
+)
+from promotion_policy import (
+    configure_promotion_policy,
+    record_promotion_attestation,
+)
+from workspace_recovery import (
+    _visible_untracked,
+    promote_fast_forward,
+)
+
+
+def _run(*args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(args),
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=check,
+    )
+
+
+def _repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    _run("git", "init", "-q", "-b", "main", str(path))
+    _run("git", "-C", str(path), "config", "user.email", "test@example.invalid")
+    _run("git", "-C", str(path), "config", "user.name", "Test")
+    (path / "base.txt").write_text("base\n")
+    _run("git", "-C", str(path), "add", "base.txt")
+    _run("git", "-C", str(path), "commit", "-qm", "base")
+    return path
+
+
+def _commit(root: Path, name: str, content: str) -> str:
+    (root / name).write_text(content)
+    _run("git", "-C", str(root), "add", name)
+    _run("git", "-C", str(root), "commit", "-qm", f"add {name}")
+    return _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+
+
+def _evidence(label: str) -> str:
+    import hashlib
+    return hashlib.sha256(label.encode()).hexdigest()
+
+
+def test_trusted_git_reconstruction_discards_poison_and_rebuilds_only_package_config(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        excludes = Path(td) / "trusted-excludes"
+        excludes.write_text(".bashrc\n.mcp.json\n")
+        excludes.chmod(0o600)
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        configure_trusted_excludes(root, excludes)
+
+        env = trusted_git_env(root, {
+            "PATH": os.environ.get("PATH", "/usr/bin"),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.filemode",
+            "GIT_CONFIG_VALUE_0": "false",
+            "GIT_CONFIG_PARAMETERS": "'core.ignorecase=true'",
+            "GIT_SSH_COMMAND": "ssh test",
+        })
+
+        assert env["GIT_CONFIG_COUNT"] == "3"
+        pairs = {
+            env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
+            for i in range(int(env["GIT_CONFIG_COUNT"]))
+        }
+        assert pairs == {
+            "core.excludesFile": str(excludes.resolve()),
+            "fetch.recurseSubmodules": "false",
+            "submodule.recurse": "false",
+        }
+        assert env["GIT_SSH_COMMAND"] == "ssh test"
+        assert "core.filemode" not in pairs
+        assert "core.ignorecase" not in pairs
+
+
+def test_trusted_excludes_hide_only_harness_stubs_but_real_wip_remains_visible(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        base = Path(td)
+        root = _repo(base / "repo")
+        excludes = base / "trusted-excludes"
+        excludes.write_text(".bashrc\n.mcp.json\n")
+        excludes.chmod(0o600)
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        configure_trusted_excludes(root, excludes)
+
+        (root / ".bashrc").write_text("sandbox stub\n")
+        (root / ".mcp.json").write_text("{}\n")
+        (root / "real-untracked.txt").write_text("real work\n")
+
+        assert _visible_untracked(root) == {"real-untracked.txt"}
+
+
+def test_trusted_excludes_reject_repository_owned_policy_file(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        candidate = root / ".trusted-excludes"
+        candidate.write_text("*.tmp\n")
+        candidate.chmod(0o600)
+        with pytest.raises(ValueError, match="outside the repository"):
+            configure_trusted_excludes(root, candidate)
+
+
+def test_protected_local_promotion_requires_exact_target_attestation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        base = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+        target = _commit(root, "target.txt", "target\n")
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+
+        configure_promotion_policy(root, "planning-repair")
+        with pytest.raises(ValueError, match="attestation required"):
+            promote_fast_forward(root, target)
+
+        record_promotion_attestation(
+            root,
+            target_sha=target,
+            contract="planning-repair",
+            verifier="independent-test-verifier",
+            evidence_sha256=_evidence("target"),
+            summary="exact target verified",
+        )
+        result = promote_fast_forward(root, target)
+        assert result["status"] == "promoted"
+        assert result["head"] == target
+        assert result["attestation"]["target_sha"] == target
+
+
+def test_attestation_for_different_sha_cannot_authorise_target(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        base = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+        first = _commit(root, "one.txt", "one\n")
+        second = _commit(root, "two.txt", "two\n")
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+        configure_promotion_policy(root, "planning-repair")
+        record_promotion_attestation(
+            root,
+            target_sha=first,
+            contract="planning-repair",
+            verifier="independent-test-verifier",
+            evidence_sha256=_evidence("first"),
+        )
+        with pytest.raises(ValueError, match="attestation required"):
+            promote_fast_forward(root, second)
+
+
+def test_remote_promotion_checks_expected_base_and_is_idempotent(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        base_dir = Path(td)
+        remote = base_dir / "remote.git"
+        _run("git", "init", "--bare", "-q", str(remote))
+        root = _repo(base_dir / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _run("git", "-C", str(root), "remote", "add", "origin", str(remote))
+        _run("git", "-C", str(root), "push", "-q", "-u", "origin", "main")
+        base = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+
+        target = _commit(root, "target.txt", "target\n")
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+        configure_promotion_policy(root, "planning-repair")
+        record_promotion_attestation(
+            root,
+            target_sha=target,
+            contract="planning-repair",
+            verifier="independent-test-verifier",
+            evidence_sha256=_evidence("remote-target"),
+        )
+
+        result = promote_fast_forward(
+            root,
+            target,
+            remote="origin",
+            remote_branch="main",
+            expected_remote=base,
+        )
+        assert result["status"] == "promoted-remote"
+        assert result["head"] == target
+        assert result["remote_head"] == target
+
+        retry = promote_fast_forward(
+            root,
+            target,
+            remote="origin",
+            remote_branch="main",
+            expected_remote=base,
+        )
+        assert retry["status"] == "already-remote"
+        assert retry["remote_head"] == target
+
+
+def test_remote_promotion_refuses_remote_that_moved_to_unexpected_commit(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        base_dir = Path(td)
+        remote = base_dir / "remote.git"
+        _run("git", "init", "--bare", "-q", str(remote))
+        root = _repo(base_dir / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _run("git", "-C", str(root), "remote", "add", "origin", str(remote))
+        _run("git", "-C", str(root), "push", "-q", "-u", "origin", "main")
+        base = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+
+        target = _commit(root, "target.txt", "target\n")
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+        competing = _commit(root, "competing.txt", "competing\n")
+        _run("git", "-C", str(root), "push", "-q", "origin", f"{competing}:refs/heads/main")
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+
+        configure_promotion_policy(root, "planning-repair")
+        record_promotion_attestation(
+            root,
+            target_sha=target,
+            contract="planning-repair",
+            verifier="independent-test-verifier",
+            evidence_sha256=_evidence("target"),
+        )
+
+        with pytest.raises(ValueError, match="remote branch moved unexpectedly"):
+            promote_fast_forward(
+                root,
+                target,
+                remote="origin",
+                remote_branch="main",
+                expected_remote=base,
+            )
