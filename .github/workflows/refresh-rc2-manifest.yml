@@ -1,0 +1,65 @@
+name: Refresh RC2 package manifest
+
+on:
+  push:
+    branches:
+      - release/1.0.0-rc2
+    paths:
+      - ".github/workflows/refresh-rc2-manifest.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rebuild package manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          package_dirs = ("bin", "docs", "hooks", "lib", "templates", "tests")
+          package_files = (
+              ".gitignore", "CHANGELOG.md", "COMMANDS.md", "QUICKSTART.md",
+              "README.md", "SOURCES.md", "VERSION", "install.sh", "uninstall.sh",
+          )
+
+          paths = list(package_files)
+          for rel in package_files:
+              if not Path(rel).is_file():
+                  raise SystemExit(f"missing package file: {rel}")
+          for dirname in package_dirs:
+              base = Path(dirname)
+              if not base.is_dir():
+                  raise SystemExit(f"missing package directory: {dirname}")
+              for path in base.rglob("*"):
+                  if not path.is_file():
+                      continue
+                  if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"} or ".pytest_cache" in path.parts:
+                      continue
+                  paths.append(path.as_posix())
+
+          lines = [
+              f"{hashlib.sha256(Path(rel).read_bytes()).hexdigest()}  {rel}"
+              for rel in sorted(set(paths))
+          ]
+          Path("MANIFEST.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(f"manifest entries: {len(lines)}")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MANIFEST.sha256
+          if git diff --cached --quiet; then
+            echo "Manifest already current."
+            exit 0
+          fi
+          git commit -m "Refresh 1.0.0-rc2 package manifest"
+          git push origin HEAD:release/1.0.0-rc2
