@@ -262,3 +262,131 @@ def test_governance_snapshot_changes_when_authority_blob_changes(monkeypatch):
         after = build_authority_snapshot(root)
         assert before is not None and after is not None
         assert before["snapshot_sha256"] != after["snapshot_sha256"]
+
+
+def test_governance_contract_wip_divergence_blocks_activation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        value = _contract([_set("default", [_member("PLAN.md")])])
+        _write_contract(root, value)
+        value["tasks"]["strict_dependencies"] = False
+        (root / ".claude-auto" / "governance.json").write_text(json.dumps(value) + "\n")
+        with pytest.raises(GovernanceContractError, match="differs"):
+            load_governance_contract(root)
+        with pytest.raises(AuthoritySetError, match="differs"):
+            build_authority_snapshot(root)
+
+
+def test_case_and_unicode_collisions_are_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        (root / "Plan.md").write_text("one\n")
+        (root / "plan.md").write_text("two\n")
+        _run(root, "git", "add", "Plan.md", "plan.md")
+        _run(root, "git", "commit", "-qm", "case collision")
+        _write_contract(root, _contract([
+            _set("default", [_member("*.md")])
+        ]))
+        with pytest.raises(AuthoritySetError, match="colliding"):
+            build_authority_snapshot(root)
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        composed = "\u00e9.md"
+        decomposed = "e\u0301.md"
+        (root / composed).write_text("one\n")
+        (root / decomposed).write_text("two\n")
+        _run(root, "git", "add", composed, decomposed)
+        _run(root, "git", "commit", "-qm", "unicode collision")
+        _write_contract(root, _contract([
+            _set("default", [_member("*.md")])
+        ]))
+        with pytest.raises(AuthoritySetError, match="ambiguously|colliding"):
+            build_authority_snapshot(root)
+
+
+def test_gitlink_is_a_separate_authority_boundary(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+        _run(root, "git", "update-index", "--add", "--cacheinfo", f"160000,{head},nested")
+        _run(root, "git", "commit", "-qm", "gitlink")
+        _write_contract(root, _contract([
+            _set("default", [_member("nested")])
+        ]))
+        with pytest.raises(AuthoritySetError, match="gitlink"):
+            build_authority_snapshot(root)
+
+
+def test_equivalent_legacy_and_governance_authority_are_compatible(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        _write_contract(root, _contract([_set("default", [_member("PLAN.md")])]))
+        sd = repo_state_dir(root)
+        policy = sd / "planning-repair" / "policy.json"
+        policy.parent.mkdir(parents=True)
+        policy.write_text(json.dumps({"schema_version": 1, "canonical_plan": "PLAN.md"}))
+        snapshot = build_authority_snapshot(root)
+        assert snapshot is not None
+        assert snapshot["source_mode"] == "contract+legacy"
+
+
+def test_control_surface_blob_change_invalidates_snapshot(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("plan\n")
+        control = root / ".claude-auto" / "verification.json"
+        control.parent.mkdir(parents=True)
+        control.write_text('{"commands":["one"]}\n')
+        _run(root, "git", "add", "PLAN.md", ".claude-auto/verification.json")
+        _run(root, "git", "commit", "-qm", "authority inputs")
+        _write_contract(root, _contract([_set("default", [_member("PLAN.md")])]))
+        before = build_authority_snapshot(root)
+        control.write_text('{"commands":["two"]}\n')
+        _run(root, "git", "add", ".claude-auto/verification.json")
+        _run(root, "git", "commit", "-qm", "change verification")
+        after = build_authority_snapshot(root)
+        assert before is not None and after is not None
+        assert before["control_surface_digest"] != after["control_surface_digest"]
+        assert before["snapshot_sha256"] != after["snapshot_sha256"]
+
+
+def test_absolute_and_control_character_selectors_are_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _write_contract(root, _contract([_set("default", [_member("/PLAN.md")])]))
+        with pytest.raises(GovernanceContractError, match="relative"):
+            load_governance_contract(root)
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _write_contract(root, _contract([_set("default", [_member("bad\nname.md")])]))
+        with pytest.raises(GovernanceContractError, match="control"):
+            load_governance_contract(root)
+
+
+def test_oversized_governance_contract_is_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        path = root / ".claude-auto" / "governance.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(" " * (2 * 1024 * 1024 + 1))
+        _run(root, "git", "add", ".claude-auto/governance.json")
+        _run(root, "git", "commit", "-qm", "oversized governance")
+        with pytest.raises(GovernanceContractError, match="maximum supported size"):
+            load_governance_contract(root)
