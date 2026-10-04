@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from typing import Any
 
 from governance_contract import GovernanceContractError, canonical_json_bytes, normalise_repo_selector
@@ -104,7 +105,11 @@ def _unique_strings(
         if not isinstance(raw, str) or not raw.strip():
             raise TaskSpecError(f"{where} entries must be non-empty strings")
         try:
-            item = normalise_repo_selector(raw) if normalise_paths else raw.strip()
+            item = (
+                normalise_repo_selector(raw)
+                if normalise_paths
+                else unicodedata.normalize("NFC", raw.strip())
+            )
         except GovernanceContractError as exc:
             raise TaskSpecError(f"{where}: {exc}") from exc
         if item in seen:
