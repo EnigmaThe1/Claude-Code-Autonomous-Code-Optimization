@@ -288,6 +288,7 @@ def _run_adapter_once(
             read_only_root=True,
             working_directory=cwd,
             hidden_paths=[root],
+            max_output_bytes=MAX_ADAPTER_OUTPUT_BYTES,
         )
         after = {
             record["path"]: hashlib.sha256((view / record["path"]).read_bytes()).hexdigest()
