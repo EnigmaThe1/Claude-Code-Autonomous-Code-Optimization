@@ -960,7 +960,20 @@ print({task_json!r})
         _commit_file(root, "tools/export.py", script, "real adapter")
         _commit_file(root, "data/input.txt", "committed\n", "real adapter input")
         _write_governance(root, _contract([_adapter_source()]))
-        result = resolve_task_sources(root, persist=False)
+        before_status = _run(root, "git", "status", "--porcelain=v1").stdout
+        before_input = (root / "data/input.txt").read_text()
+        try:
+            result = resolve_task_sources(root, persist=False)
+        except TaskSourceError as exc:
+            # Some hosted kernels expose the bwrap binary but forbid the
+            # network namespace operations required for safe adapter isolation.
+            # That environment is unsupported for adapters and must fail closed;
+            # it must never fall back to direct host execution.
+            assert "sandbox unavailable" in str(exc) or "safe supervisor execution boundary" in str(exc)
+            assert (root / "data/input.txt").read_text() == before_input
+            assert _run(root, "git", "status", "--porcelain=v1").stdout == before_status
+            return
+
         assert result["status"] == "READY"
         assert [row["task"]["id"] for row in result["tasks"]] == ["TREAL"]
         assert result["adapter_runtime_evidence"]
@@ -968,3 +981,5 @@ print({task_json!r})
             row["sha256"] == result["sources"][0]["normalised_output_sha256"]
             for row in result["adapter_runtime_evidence"][0]["determinism_runs"]
         )
+        assert (root / "data/input.txt").read_text() == before_input
+        assert _run(root, "git", "status", "--porcelain=v1").stdout == before_status
