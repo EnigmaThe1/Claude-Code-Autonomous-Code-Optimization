@@ -318,7 +318,7 @@ def test_worker_cannot_mutate_git_trust_promotion_or_planning_policy(monkeypatch
             find_repo_root=finder,
         )
         assert rc == 2
-        assert "top-level shell" in capsys.readouterr().err
+        assert "active Claude worker" in capsys.readouterr().err
 
 
 def test_operator_authority_rejects_tty_caller_inside_live_supervisor_tree(monkeypatch):
