@@ -233,7 +233,17 @@ from cli_schema import (
 from environment_policy import apply_resume_environment, capture_resume_environment
 from git_trust import git_trust_action
 from promotion_policy import promotion_policy_action
-from planning_repair import planning_repair_action
+from planning_repair import (
+    abort_planning_repair,
+    begin_planning_repair,
+    load_active_repair,
+    load_planning_repair_policy,
+    planning_repair_action,
+    promote_planning_repair,
+    refresh_planning_repair_base,
+    run_planning_repair_architect,
+    verify_planning_repair,
+)
 from toolchain_preflight import probe_toolchain
 from workspace_recovery import cleanup_untracked_action, promote_ff_action
 from profile_switch import (
@@ -963,6 +973,271 @@ def _apply_pending_profile_switch(
     return True
 
 
+def _source_identity_hash(
+    source_kind: str,
+    source_ref: str | None,
+    objective: str,
+    source_text: str | None,
+) -> str:
+    return sha256_text(json.dumps({
+        "kind": source_kind,
+        "ref": source_ref,
+        "objective": objective,
+        "content": source_text,
+    }, sort_keys=True, separators=(",", ":")))
+
+
+def _repository_plan_policy_error(
+    root: Path,
+    *,
+    source_kind: str,
+    source_ref: str | None,
+) -> str | None:
+    policy = load_planning_repair_policy(root)
+    if not policy:
+        return None
+    canonical = str(policy.get("canonical_plan") or "").strip()
+    if not canonical:
+        return "Repository-owned planning policy is missing canonical_plan."
+    if source_kind != "supplied-plan":
+        return (
+            "Repository-owned planning is configured, so autonomous execution must "
+            f"use the canonical plan via --plan {canonical!r}; refusing a second planning authority."
+        )
+    supplied = Path(str(source_ref or "")).as_posix()
+    if supplied != Path(canonical).as_posix():
+        return (
+            "Repository-owned planning is configured for "
+            f"{canonical!r}, but this run supplied {supplied!r}; refusing divergent planning authorities."
+        )
+    return None
+
+
+def _repair_args(
+    args: argparse.Namespace,
+    *,
+    reason: str,
+    verifier: bool = False,
+) -> argparse.Namespace:
+    values = dict(vars(args))
+    values["reason"] = reason
+    values["timeout"] = int(getattr(args, "cycle_timeout", 0) or 0)
+    values["max_turns"] = min(
+        40 if not verifier else 35,
+        max(1, int(getattr(args, "max_turns", 40) or 40)),
+    )
+    if verifier:
+        values["model"] = getattr(args, "verifier_model", None) or getattr(args, "model", None)
+    return argparse.Namespace(**values)
+
+
+def _revalidate_authoritative_plan(
+    *,
+    args: argparse.Namespace,
+    root: Path,
+    sd: Path,
+    prof: dict[str, Any],
+    state: dict[str, Any],
+    objective: str,
+    source_kind: str,
+    source_ref: str | None,
+    source_text: str | None,
+    source_hash: str,
+    env: dict[str, str],
+    provider_detail: dict[str, Any],
+    reason: str,
+) -> tuple[dict[str, Any] | None, int, str | None, str, dict[str, Any]]:
+    """Repair the configured planning authority, then rebuild the executable plan.
+
+    With no repository-owned planning policy, this is the existing external-plan
+    path.  With a configured canonical plan, the repository file is repaired in
+    a dedicated worktree, independently verified at the exact candidate SHA and
+    promoted through the protected broker before Claude Auto rebuilds its
+    external executable task graph from the newly-promoted canonical source.
+    """
+    policy = load_planning_repair_policy(root)
+    if not policy:
+        plan, rc = ensure_plan_validated(
+            args=args, root=root, sd=sd, prof=prof, state=state, objective=objective,
+            source_kind=source_kind, source_ref=source_ref, source_text=source_text,
+            source_hash=source_hash, env=env, provider_detail=provider_detail,
+            force_reason=reason,
+        )
+        return plan, rc, source_text, source_hash, load_json(sd / "state.json", state)
+
+    policy_error = _repository_plan_policy_error(
+        root, source_kind=source_kind, source_ref=source_ref,
+    )
+    if policy_error:
+        state.update({"status": "BLOCKED", "plan_status": "BLOCKED", "blocker": policy_error})
+        json_dump(sd / "state.json", state)
+        return None, 3, source_text, source_hash, state
+
+    max_attempts = max(1, int(getattr(args, "max_plan_revisions", 3) or 3))
+    repair_reason = reason
+    last_finding = ""
+
+    for attempt in range(1, max_attempts + 1):
+        active = load_active_repair(root)
+        if not active:
+            active = begin_planning_repair(root, reason=repair_reason)
+
+        # Product work may have advanced while the repair was paused.  Refresh is
+        # idempotent, recognises already-absorbed bases and invalidates a verifier
+        # result whenever rebasing changes the candidate SHA.
+        refresh = refresh_planning_repair_base(root)
+        active = load_active_repair(root)
+
+        candidate = str(active.get("candidate_sha") or "")
+        verified = str(active.get("verified_sha") or "")
+
+        if not candidate:
+            architect_result = run_planning_repair_architect(
+                root,
+                _repair_args(args, reason=repair_reason, verifier=False),
+            )
+            active = load_active_repair(root)
+            candidate = str(active.get("candidate_sha") or "")
+            if architect_result.get("status") != "candidate" or not candidate:
+                classification = str(architect_result.get("classification") or "SEMANTIC_DECISION")
+                summary = str(architect_result.get("summary") or "Planning repair architect blocked.")
+                state.update({
+                    "status": "BLOCKED",
+                    "plan_status": "BLOCKED",
+                    "blocker": (
+                        "Repository-owned planning repair requires an unresolved semantic/user decision: "
+                        if classification == "SEMANTIC_DECISION"
+                        else "Repository-owned planning repair was blocked: "
+                    ) + summary,
+                    "repository_planning_repair": architect_result,
+                })
+                json_dump(sd / "state.json", state)
+                return None, 3, source_text, source_hash, state
+            verified = ""
+
+        if verified != candidate:
+            verify_result = verify_planning_repair(
+                root,
+                _repair_args(args, reason=repair_reason, verifier=True),
+            )
+            if verify_result.get("status") != "verified":
+                findings = verify_result.get("findings")
+                rendered = json.dumps(findings or [], separators=(",", ":"))[:3000]
+                last_finding = str(verify_result.get("summary") or "candidate rejected")
+                abort_planning_repair(root)
+                repair_reason = (
+                    f"{reason}\nIndependent Planning Verifier rejected attempt {attempt}: "
+                    f"{last_finding}. Findings: {rendered}"
+                )
+                continue
+
+        # Reconcile once more after verification.  If the product base advanced,
+        # candidate identity changes and exact-SHA verification must be repeated.
+        before_promote = load_active_repair(root)
+        verified_before = str(before_promote.get("verified_sha") or "")
+        refresh = refresh_planning_repair_base(root)
+        active = load_active_repair(root)
+        candidate = str(active.get("candidate_sha") or "")
+        verified = str(active.get("verified_sha") or "")
+        if not candidate or verified != candidate or candidate != verified_before:
+            repair_reason = (
+                f"{reason}\nProduct base advanced during planning verification; "
+                "the refreshed exact candidate must be independently verified again."
+            )
+            continue
+
+        try:
+            promotion = promote_planning_repair(root)
+        except ValueError as exc:
+            # A concurrent product/remote advance is recoverable by refreshing the
+            # dedicated repair branch and re-verifying the resulting exact SHA.
+            message = str(exc)
+            if any(token in message for token in (
+                "remote branch moved unexpectedly",
+                "local HEAD must equal the expected remote base",
+                "target commit is not a descendant",
+            )):
+                repair_reason = f"{reason}\nPromotion race detected and reconciled: {message}"
+                try:
+                    refresh_planning_repair_base(root)
+                except ValueError:
+                    pass
+                continue
+            raise
+
+        canonical = str(policy["canonical_plan"])
+        canonical_path = (root / canonical).resolve()
+        source_text = canonical_path.read_text()
+        source_hash = _source_identity_hash(
+            source_kind, source_ref, objective, source_text,
+        )
+        state = load_json(sd / "state.json", state)
+
+        # Plan-content identity changed.  Permission and verification evidence
+        # tied to the prior source generation must not silently survive.
+        if reset_permission_epoch(
+            state,
+            new_objective_hash=source_hash,
+            reason="repository-owned canonical plan was independently repaired and promoted",
+            unattended=getattr(args, "profile", None) == "unattended",
+        ):
+            args._permission_grants = active_permission_grants(state, source_hash)
+            args._permission_overrides = sorted(active_permission_overrides(state, source_hash))
+        state["verification_baseline"] = None
+        state["verification_baseline_objective_hash"] = None
+        state["repository_planning_repair"] = {
+            "attempt": attempt,
+            "promotion": promotion,
+            "source_hash": source_hash,
+            "completed_at": utcnow(),
+        }
+        json_dump(sd / "state.json", state)
+
+        plan, rc = ensure_plan_validated(
+            args=args, root=root, sd=sd, prof=prof, state=state, objective=objective,
+            source_kind=source_kind, source_ref=source_ref, source_text=source_text,
+            source_hash=source_hash, env=env, provider_detail=provider_detail,
+            force_reason=reason,
+        )
+        state = load_json(sd / "state.json", state)
+        if rc != 0 or not plan:
+            return plan, rc, source_text, source_hash, state
+
+        # The canonical-plan commit changed repository identity/evidence.  Rebuild
+        # the deterministic baseline before normal implementation resumes.
+        baseline_receipts = ensure_verification_baseline(
+            root, sd, prof, state, args, source_hash,
+        )
+        state = load_json(sd / "state.json", state)
+        baseline_integrity = _baseline_integrity_error(baseline_receipts)
+        if baseline_integrity:
+            state.update({
+                "status": "BLOCKED",
+                "last_result_status": "BLOCKED",
+                "blocker": baseline_integrity,
+                "last_verification_findings": [
+                    rec for rec in baseline_receipts
+                    if isinstance(rec, dict) and not rec.get("tracked_source_unchanged", True)
+                ],
+            })
+            json_dump(sd / "state.json", state)
+            return None, 3, source_text, source_hash, state
+        return plan, 0, source_text, source_hash, state
+
+    state = load_json(sd / "state.json", state)
+    state.update({
+        "status": "BLOCKED",
+        "plan_status": "BLOCKED",
+        "blocker": (
+            f"Repository-owned canonical plan did not obtain a promotable independently VERIFIED "
+            f"candidate after {max_attempts} attempts."
+            + (f" Last verifier finding: {last_finding}" if last_finding else "")
+        ),
+    })
+    json_dump(sd / "state.json", state)
+    return None, 6, source_text, source_hash, state
+
+
 def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
     refuse_nested_claude_launch()
     root = find_repo_root(args.repo)
@@ -1051,12 +1326,21 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
     if not objective:
         raise SystemExit("An objective is required on the first run: --objective TEXT, --objective-file FILE, or --plan FILE")
 
-    source_hash = sha256_text(json.dumps({
-        "kind": source_kind,
-        "ref": source_ref,
-        "objective": objective,
-        "content": source_text,
-    }, sort_keys=True, separators=(",", ":")))
+    source_hash = _source_identity_hash(source_kind, source_ref, objective, source_text)
+
+    planning_policy_error = _repository_plan_policy_error(
+        root, source_kind=source_kind, source_ref=source_ref,
+    )
+    if planning_policy_error:
+        state.update({
+            "status": "BLOCKED",
+            "plan_status": "BLOCKED",
+            "blocker": planning_policy_error,
+            "objective": objective,
+        })
+        json_dump(sd / "state.json", state)
+        print(planning_policy_error, file=sys.stderr)
+        return 3
 
     if reset_permission_epoch(
         state,
