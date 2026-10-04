@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -911,3 +912,59 @@ def test_task_resolution_does_not_mutate_target_repository(monkeypatch):
         resolve_task_sources(root, persist=True)
         after = _run(root, "git", "status", "--porcelain=v1").stdout
         assert before == after == ""
+
+
+@pytest.mark.skipif(
+    shutil.which("srt") is None and shutil.which("bwrap") is None,
+    reason="real adapter isolation boundary is not installed",
+)
+def test_real_adapter_boundary_blocks_live_repo_external_reads_writes_and_network(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "live")
+        live_plan = str((root / "PLAN.md").resolve())
+        task_json = json.dumps([_task("TREAL")])
+        script = f"""import json
+import pathlib
+import socket
+
+assert pathlib.Path("data/input.txt").read_text() == "committed\\n"
+
+try:
+    pathlib.Path("data/input.txt").write_text("tampered\\n")
+except OSError:
+    pass
+else:
+    raise SystemExit(41)
+
+try:
+    pathlib.Path("/etc/passwd").read_text()
+except OSError:
+    pass
+else:
+    raise SystemExit(42)
+
+if pathlib.Path({live_plan!r}).exists():
+    raise SystemExit(43)
+
+try:
+    sock = socket.create_connection(("1.1.1.1", 53), timeout=0.2)
+except OSError:
+    pass
+else:
+    sock.close()
+    raise SystemExit(44)
+
+print({task_json!r})
+"""
+        _commit_file(root, "tools/export.py", script, "real adapter")
+        _commit_file(root, "data/input.txt", "committed\n", "real adapter input")
+        _write_governance(root, _contract([_adapter_source()]))
+        result = resolve_task_sources(root, persist=False)
+        assert result["status"] == "READY"
+        assert [row["task"]["id"] for row in result["tasks"]] == ["TREAL"]
+        assert result["adapter_runtime_evidence"]
+        assert all(
+            row["sha256"] == result["sources"][0]["normalised_output_sha256"]
+            for row in result["adapter_runtime_evidence"][0]["determinism_runs"]
+        )
