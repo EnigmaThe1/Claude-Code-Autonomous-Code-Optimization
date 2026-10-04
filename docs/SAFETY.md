@@ -56,11 +56,19 @@ Broker-owned Git operations do not trust inherited process-scoped `GIT_CONFIG_*`
 
 Remote promotion requires an exact expected remote base and verifies the final remote SHA. A lost client response after a successful server-side push is reconciled against durable remote truth rather than replayed blindly.
 
-## Planning authority
+## Planning and repository authority
 
-When repository-owned planning is configured, the tracked canonical plan is protected from ordinary Balanced/Strict worker writes. Authority-changing `git-trust`, promotion-policy and planning-repair CLI actions refuse invocation from inside an active Claude worker. A repair candidate must be independently verified at its exact SHA before the canonical-plan promotion broker accepts it.
+Repository semantic authority is independent from runtime profile authority. When repository-owned planning is configured, its AuthoritySet members are protected from ordinary worker writes in **Balanced, Strict, Isolated Full and Unattended**. Unattended may widen host/runtime permission authority, but it does not grant a worker permission to rewrite planning authority or governance/control surfaces.
 
-Unattended remains explicit unrestricted host authority; for untrusted repositories use an outer disposable VM/container.
+RC4 repositories may declare `.claude-auto/governance.json`. The v1 contract is read from the exact committed Git tree, resolves one or more named AuthoritySets and records a deterministic package-owned snapshot. A legacy RC3 `planning-repair` policy is normalised into the same one-member `default` AuthoritySet representation when no repository contract exists.
+
+Authority and control-surface working-tree divergence fails closed. Symlink authority members and ordinary traversal through gitlinks/submodules are rejected. The read-only `claude-auto governance status --repo ...` command explains the currently resolved snapshot or blocker.
+
+RC4-P1 deliberately does not execute multi-file/multi-domain planning authority yet. Such authority can be inspected and protected, but autonomous execution is blocked until the later TaskSource and multi-file repair phases provide a matching execution model.
+
+Authority-changing `git-trust`, promotion-policy and planning-repair CLI actions continue to refuse invocation from inside an active Claude worker. Legacy one-file repair candidates remain independently verified at their exact SHA before promotion. Bound multi-requirement attestations for the general RC4 promotion model are introduced in a later RC4 phase.
+
+Unattended remains explicit unrestricted **host** authority; for untrusted repositories use an outer disposable VM/container.
 
 ## Untrusted repositories
 
