@@ -69,6 +69,21 @@ def _json_no_duplicates(text: str, *, where: str) -> Any:
 
 
 def _git_blob(root: Path, object_id: str) -> bytes:
+    size_cp = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-s", object_id],
+        text=True,
+        capture_output=True,
+        env=trusted_git_env(root),
+    )
+    if size_cp.returncode != 0:
+        raise TaskSourceError(f"unable to inspect committed task-source blob {object_id}")
+    try:
+        size = int(size_cp.stdout.strip())
+    except ValueError as exc:
+        raise TaskSourceError(f"invalid Git blob size for task source {object_id}") from exc
+    if size < 0 or size > MAX_SOURCE_BLOB_BYTES:
+        raise TaskSourceError(f"task-source blob {object_id} exceeds maximum supported size")
+
     cp = subprocess.run(
         ["git", "-C", str(root), "cat-file", "blob", object_id],
         capture_output=True,
@@ -77,8 +92,8 @@ def _git_blob(root: Path, object_id: str) -> bytes:
     if cp.returncode != 0:
         raise TaskSourceError(f"unable to read committed task-source blob {object_id}")
     payload = bytes(cp.stdout)
-    if len(payload) > MAX_SOURCE_BLOB_BYTES:
-        raise TaskSourceError(f"task-source blob {object_id} exceeds maximum supported size")
+    if len(payload) != size:
+        raise TaskSourceError(f"committed task-source blob {object_id} changed size during read")
     return payload
 
 
