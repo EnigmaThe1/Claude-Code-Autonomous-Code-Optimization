@@ -1008,3 +1008,18 @@ def test_persisted_task_source_set_tampering_fails_integrity_check(monkeypatch):
         status = task_source_status(root)
         assert status["status"] == "BLOCKED"
         assert "integrity check failed" in status["error"]
+
+
+def test_malformed_persisted_task_source_set_is_blocked_not_unresolved(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _commit_file(root, "tasks/a.json", json.dumps([_task("T1")]), "source")
+        _write_governance(root, _contract([_json_source("a", "tasks/a.json")]))
+        resolve_task_sources(root, persist=True)
+
+        path = repo_state_dir(root) / "tasks" / "task-source-set.json"
+        path.write_text("{not-json", encoding="utf-8")
+        status = task_source_status(root)
+        assert status["status"] == "BLOCKED"
+        assert "malformed" in status["error"]
