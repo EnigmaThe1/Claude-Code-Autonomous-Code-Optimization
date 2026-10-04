@@ -244,6 +244,7 @@ from cli_schema import (
     build_parser as _build_parser,
     show_profiles,
 )
+from authority_set import build_authority_snapshot, governance_action
 from environment_policy import apply_resume_environment, capture_resume_environment
 from git_trust import git_trust_action
 from promotion_policy import promotion_policy_action
@@ -1007,24 +1008,43 @@ def _repository_plan_policy_error(
     source_kind: str,
     source_ref: str | None,
 ) -> str | None:
-    policy = load_planning_repair_policy(root)
-    if not policy:
+    # P1 understands AuthoritySets but deliberately does not yet execute
+    # multi-file planning sources. Preserve the RC3 single-source path exactly;
+    # fail closed for a multi-file authority until P2/P5 provide the source/task
+    # normalisation and multi-file repair machinery.
+    snapshot = build_authority_snapshot(root)
+    if not snapshot:
         return None
-    canonical = str(policy.get("canonical_plan") or "").strip()
-    if not canonical:
-        return "Repository-owned planning policy is missing canonical_plan."
-    if source_kind != "supplied-plan":
-        return (
-            "Repository-owned planning is configured, so autonomous execution must "
-            f"use the canonical plan via --plan {canonical!r}; refusing a second planning authority."
-        )
-    supplied = Path(str(source_ref or "")).as_posix()
-    if supplied != Path(canonical).as_posix():
-        return (
-            "Repository-owned planning is configured for "
-            f"{canonical!r}, but this run supplied {supplied!r}; refusing divergent planning authorities."
-        )
-    return None
+    source_members = sorted({
+        member["path"]
+        for authority_set in snapshot.get("sets", [])
+        for member in authority_set.get("members", [])
+        if member.get("role") == "source"
+    })
+    all_members = [
+        member
+        for authority_set in snapshot.get("sets", [])
+        for member in authority_set.get("members", [])
+    ]
+    if len(source_members) == 1 and len(all_members) == 1:
+        canonical = source_members[0]
+        if source_kind != "supplied-plan":
+            return (
+                "Repository-owned planning is configured, so autonomous execution must "
+                f"use the canonical plan via --plan {canonical!r}; refusing a second planning authority."
+            )
+        supplied = Path(str(source_ref or "")).as_posix()
+        if supplied != Path(canonical).as_posix():
+            return (
+                "Repository-owned planning is configured for "
+                f"{canonical!r}, but this run supplied {supplied!r}; refusing divergent planning authorities."
+            )
+        return None
+    return (
+        "Repository governance resolves a multi-file/multi-domain AuthoritySet. "
+        "RC4-P1 can inspect and protect this authority read-only, but autonomous "
+        "execution adoption remains blocked until the TaskSource/multi-file planning phases are installed."
+    )
 
 
 def _repair_args(
@@ -2606,6 +2626,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "git-trust": return git_trust_action(args, find_repo_root=find_repo_root)
     if args.command == "promotion": return promotion_policy_action(args, find_repo_root=find_repo_root)
     if args.command == "planning-repair": return planning_repair_action(args, find_repo_root=find_repo_root)
+    if args.command == "governance": return governance_action(args, find_repo_root=find_repo_root)
     if args.command == "promote-ff": return promote_ff_action(args, find_repo_root=find_repo_root)
     if args.command == "cleanup-untracked": return cleanup_untracked_action(args, find_repo_root=find_repo_root)
     if args.command == "models":
