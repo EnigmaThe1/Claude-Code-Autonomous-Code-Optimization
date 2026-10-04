@@ -606,12 +606,29 @@ def task_source_action(args: Any, *, find_repo_root) -> int:
     try:
         if args.tasks_command == "status":
             result = task_source_status(root)
+            rendered = result
         elif args.tasks_command == "resolve":
             result = resolve_task_sources(root)
+            if result.get("status") == "READY":
+                external = result.get("external_dependencies", [])
+                rendered = {
+                    "status": "READY",
+                    "repository": str(root),
+                    "product_head": result.get("product_head"),
+                    "authority_snapshot_sha256": result.get("authority_snapshot_sha256"),
+                    "task_source_set_sha256": result.get("task_source_set_sha256"),
+                    "merged_tasks_sha256": result.get("merged_tasks_sha256"),
+                    "source_count": len(result.get("sources", [])),
+                    "task_count": len(result.get("tasks", [])),
+                    "external_dependency_count": len(external) if isinstance(external, list) else 0,
+                    "persisted_path": str(_resolved_path(root)),
+                }
+            else:
+                rendered = result
         else:
             raise TaskSourceError(f"unsupported tasks command: {args.tasks_command}")
     except (TaskSourceError, OSError) as exc:
         print(json.dumps({"status": "BLOCKED", "repository": str(root), "error": str(exc)}, indent=2))
         return 2
-    print(json.dumps(result, indent=2, sort_keys=True))
+    print(json.dumps(rendered, indent=2, sort_keys=True))
     return 2 if result.get("status") == "BLOCKED" else 0
