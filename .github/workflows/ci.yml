@@ -35,12 +35,14 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import re
-          prefix = "R" + "C"
           test_prefix = "test_" + "r" + "c"
           module_prefix = "claude_auto_" + "r" + "c"
-          old_version = "0.9.0-" + "r" + "c18"
+          old_repo = "EnigmaThe1/" + "Tem" + "p2"
+          old_branch_prefix = "claude/" + "r" + "c"
+          pre_public_version = re.compile(r"\\b0\\.[0-9]+\\.[0-9]+-rc[0-9]+\\b", re.I)
           historical = re.compile(
-              rf"(?:{prefix}[0-9]+|{test_prefix}[0-9]+_|{module_prefix}[0-9]+|{re.escape(old_version)})"
+              rf"(?:{test_prefix}[0-9]+_|{module_prefix}[0-9]+|{re.escape(old_repo)}|{re.escape(old_branch_prefix)})",
+              re.I,
           )
           hits = []
           for path in Path(".").rglob("*"):
@@ -54,7 +56,7 @@ jobs:
               except (UnicodeDecodeError, OSError):
                   continue
               for number, line in enumerate(text.splitlines(), 1):
-                  if historical.search(line):
+                  if historical.search(line) or pre_public_version.search(line):
                       hits.append(f"{path}:{number}: {line.strip()}")
           if hits:
               raise SystemExit("Historical pre-public release labels detected:\n" + "\n".join(hits))
