@@ -1,4 +1,4 @@
-# Quick start — 1.0.0-rc1
+# Quick start — 1.0.0-rc2
 
 ## Install
 
@@ -37,6 +37,15 @@ claude-auto run --plan IMPLEMENTATION_PLAN.md
 ```
 
 A supplied plan is reconciled, simulated and red-teamed before mutation, and may later be repaired when implementation evidence requires a better route to the same objective.
+
+If the repository's tracked plan itself is authoritative, configure it once:
+
+```bash
+claude-auto planning-repair configure --repo . --plan IMPLEMENTATION_PLAN.md
+claude-auto run --repo . --plan IMPLEMENTATION_PLAN.md
+```
+
+Material defects in that plan are then repaired through a dedicated worktree, independently verified at the exact candidate SHA and promoted before implementation continues.
 
 ## Interactive supervised session
 
@@ -96,6 +105,15 @@ claude-auto permissions approve --id REQUEST_ID --scope once
 claude-auto permissions approve --id REQUEST_ID --scope run
 claude-auto permissions approve --id REQUEST_ID --scope repository
 claude-auto permissions deny --id REQUEST_ID --reason "not approved"
+```
+
+## Trusted Git compatibility exclusions
+
+If your sandbox/tooling creates compatibility files that must be ignored consistently by the worker and promotion broker, register an operator-owned excludes source. Claude Auto copies it into private package state.
+
+```bash
+claude-auto git-trust set-excludes --repo . --path ~/.config/claude-auto/git-excludes
+claude-auto git-trust status --repo .
 ```
 
 ## Inspect/status
