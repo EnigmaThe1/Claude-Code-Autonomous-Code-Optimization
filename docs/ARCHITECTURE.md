@@ -10,6 +10,8 @@ The system has an always-on low-risk user layer and an explicit autonomous super
 
 - `claude_auto.py`: orchestration and autonomous run loop.
 - `planning_support.py` / `control_plane.py`: planning, simulation and review control.
+- `governance_contract.py` / `authority_set.py`: exact-Git repository authority and control-surface snapshots.
+- `task_spec.py` / `task_sources.py`: deterministic repository-owned TaskSpec normalisation, graph validation and bounded adapter resolution.
 - `execution.py` / `process_runner.py`: isolated repository-command execution and process supervision.
 - `state_store.py` / `repo_identity.py`: durable state, recovery, identity and writer leasing.
 - `settings_policy.py` / `permission_escalation.py` / `profile_switch.py`: execution policy, human authority and runtime profile transitions.
@@ -61,7 +63,11 @@ Claude Code owns model/tool execution and native turn continuation. Claude Auto 
 
 Planning, simulation and red-team roles run in fresh read-only contexts. External state stores versioned executable plans and evidence. The original objective and acceptance criteria remain above the plan in the authority chain.
 
-For repositories that explicitly configure a tracked canonical plan, that file becomes the single planning authority. The normal worker is fenced from mutating it. Material plan defects are handled in a dedicated linked worktree by a one-plan architect, then an independent read-only verifier attests the exact candidate SHA. Only the attested SHA may be promoted; the external executable plan is regenerated from the promoted canonical source afterward.
+RC4 represents one-file and multi-file planning through named AuthoritySets derived from exact committed Git objects. Legacy one-file planning remains a one-member `default` AuthoritySet. Authority members, governance and resolved control surfaces are fenced from ordinary worker mutation in every runtime profile, including Unattended.
+
+Structured repositories may additionally declare TaskSources. Built-in JSON/JSONL/TOML/static sources are parsed from exact blobs. Custom adapters receive only declared exact-commit inputs in an ephemeral read-only/no-network sandbox, run twice for normalised determinism, and cannot expand the source's AuthoritySet ceiling. The resulting package-owned TaskSourceSet is durable authority data, but P2 deliberately does not activate tasks or grant write scope.
+
+Legacy one-file material planning repair continues through the RC3 repair flow until RC4's later multi-file RepairEnvelope phase generalises it.
 
 See [PLANNING_AND_REPAIR.md](PLANNING_AND_REPAIR.md).
 
