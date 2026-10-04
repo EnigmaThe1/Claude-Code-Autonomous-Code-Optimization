@@ -350,9 +350,21 @@ def _assert_legacy_compatible(policy: dict[str, Any], sets: list[dict[str, Any]]
 
 def build_authority_snapshot(root: Path, ref: str = "HEAD") -> dict[str, Any] | None:
     root = root.expanduser().resolve()
-    commit = _rev(root, ref)
-    tree = _tree(root, commit)
     legacy = _legacy_policy(root)
+
+    # Preserve RC3 behaviour for an ordinary freshly-initialised/unborn Git
+    # repository. Repository governance is defined only by committed Git-tree
+    # truth; without a commit there cannot be a committed governance contract.
+    # A legacy policy, however, explicitly claims tracked planning authority and
+    # therefore must fail closed until that authority can be resolved.
+    try:
+        commit = _rev(root, ref)
+    except AuthoritySetError:
+        if not legacy:
+            return None
+        raise
+
+    tree = _tree(root, commit)
     try:
         contract = load_governance_contract(root, ref)
     except GovernanceContractError as exc:
