@@ -116,7 +116,18 @@ claude-auto promotion clear-contract --repo /path/to/repo
 claude-auto governance status --repo /path/to/repo
 ```
 
-This is read-only. It reports the exact committed AuthoritySet snapshot, protected control surfaces and snapshot digest, or a fail-closed blocker. A repository may opt into multi-file/multi-domain planning with `.claude-auto/governance.json`; RC4-P1 inspects and protects that authority but does not yet execute it.
+This is read-only. It reports the exact committed AuthoritySet snapshot, protected control surfaces and snapshot digest, or a fail-closed blocker. A repository may opt into multi-file/multi-domain planning with `.claude-auto/governance.json`.
+
+## Repository-owned TaskSpecs
+
+```bash
+claude-auto tasks status --repo /path/to/repo
+claude-auto tasks resolve --repo /path/to/repo
+```
+
+`tasks status` is read-only and never executes repository adapters. `tasks resolve` reads built-in JSON/JSONL/TOML/static task sources from the exact committed Git tree. A custom adapter receives only its declared exact-commit inputs in an ephemeral read-only snapshot, with the live repository hidden, network disabled and no host fallback; the adapter must produce the same normalised TaskSpecs in two independent runs.
+
+Successful P2 resolution persists a deterministic TaskSourceSet digest but does **not** select or activate a task. Task execution/enforcement begins in later RC4 phases.
 
 ## Repository-owned planning repair
 
