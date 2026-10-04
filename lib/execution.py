@@ -162,15 +162,24 @@ def _sandbox_settings(
     read_only_root: bool = False,
     hidden_paths: list[Path] | None = None,
     max_output_bytes: int | None = None,
+    read_allowlist_only: bool = False,
 ) -> dict[str, Any]:
     root = root.resolve()
     real_home = Path.home().resolve()
+    system_runtime_reads = [
+        str(path)
+        for path in (Path("/usr"), Path("/bin"), Path("/lib"), Path("/lib64"), Path("/sbin"))
+        if path.exists()
+    ]
     deny_read = [
+        *(["/"] if read_allowlist_only else []),
         str(real_home),
         str(root / ".git"),
         *(str(path.resolve()) for path in (hidden_paths or [])),
     ]
-    allow_read = [str(root), *(str(p) for p in _readonly_toolchain_paths(root))]
+    allow_read = [str(root), *system_runtime_reads]
+    if not read_allowlist_only:
+        allow_read.extend(str(p) for p in _readonly_toolchain_paths(root))
     allow_write = [str(temp_home), str(temp_home / "tmp")]
     if not read_only_root:
         allow_write.insert(0, str(root))
@@ -209,6 +218,7 @@ def _bwrap_base(
     read_only_root: bool = False,
     cwd: Path | None = None,
     hidden_paths: list[Path] | None = None,
+    read_allowlist_only: bool = False,
 ) -> list[str] | None:
     """Build a Linux bubblewrap boundary that hides user homes and network."""
     if sys.platform != "linux":
@@ -235,6 +245,26 @@ def _bwrap_base(
         if candidate.exists() and candidate not in mask_points:
             mask_points.append(candidate)
             args += ["--tmpfs", str(candidate)]
+
+    if read_allowlist_only:
+        # Adapter sources with read_external=[] get a substantially narrower
+        # filesystem view than ordinary repository verification. Keep only the
+        # essential system runtime trees exposed by the initial read-only root;
+        # mask common configuration/data/mount roots completely.
+        for candidate in (
+            Path("/etc"),
+            Path("/var"),
+            Path("/opt"),
+            Path("/srv"),
+            Path("/mnt"),
+            Path("/media"),
+            Path("/boot"),
+            Path("/sys"),
+            Path("/workspace"),
+        ):
+            if candidate.exists() and candidate not in mask_points:
+                mask_points.append(candidate)
+                args += ["--tmpfs", str(candidate)]
 
     # Homes outside conventional /home are masked explicitly too.
     if real_home.exists() and not any(_path_is_within(real_home, p) for p in mask_points):
@@ -275,9 +305,10 @@ def _bwrap_base(
 
     # Restore only narrowly-scoped non-secret dependency/toolchain directories
     # beneath a masked home, and restore them read-only.
-    for tool_path in _readonly_toolchain_paths(root):
-        recreate_target(tool_path)
-        args += ["--ro-bind", str(tool_path), str(tool_path)]
+    if not read_allowlist_only:
+        for tool_path in _readonly_toolchain_paths(root):
+            recreate_target(tool_path)
+            args += ["--ro-bind", str(tool_path), str(tool_path)]
 
     # Repository code may create normal build/test artefacts, but Git metadata is
     # read-only so a verification script cannot rewrite refs/index/config.
@@ -303,12 +334,14 @@ def _run_bwrap(
     read_only_root: bool = False,
     cwd: Path | None = None,
     hidden_paths: list[Path] | None = None,
+    read_allowlist_only: bool = False,
 ) -> dict[str, Any] | None:
     base = _bwrap_base(
         root,
         read_only_root=read_only_root,
         cwd=cwd,
         hidden_paths=hidden_paths,
+        read_allowlist_only=read_allowlist_only,
     )
     if base is None:
         return None
@@ -478,6 +511,7 @@ def run_repository_command(
                 temp_home,
                 read_only_root=read_only_root,
                 hidden_paths=hidden_paths,
+                read_allowlist_only=read_allowlist_only,
             )
             settings_path = temp_home / "srt-settings.json"
             settings_path.write_text(json.dumps(settings, indent=2) + "\n")
@@ -505,6 +539,7 @@ def run_repository_command(
             read_only_root=read_only_root,
             cwd=workdir,
             hidden_paths=hidden_paths,
+            read_allowlist_only=read_allowlist_only,
         )
         if bwrap_result is not None:
             if bwrap_result.get("execution_boundary") != "unavailable":
