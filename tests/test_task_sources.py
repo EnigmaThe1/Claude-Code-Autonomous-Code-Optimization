@@ -23,8 +23,10 @@ import pytest
 
 from authority_set import AuthoritySetError, build_authority_snapshot
 from execution import _bounded_execution_output, _bwrap_base, _sandbox_settings
+from cli_schema import build_parser as build_cli_parser
 from governance_contract import GovernanceContractError, load_governance_contract
 from repo_identity import repo_state_dir
+from repo_runtime import activate
 from task_sources import TaskSourceError, resolve_task_sources, task_source_status
 from task_spec import TaskSpecError, normalise_task_spec, validate_task_graph
 
@@ -694,3 +696,84 @@ def test_committed_source_blob_change_changes_task_source_set(monkeypatch):
         second = resolve_task_sources(root, persist=False)
         assert first["task_source_set_sha256"] != second["task_source_set_sha256"]
         assert first["merged_tasks_sha256"] != second["merged_tasks_sha256"]
+
+
+def test_adapter_runtime_boundary_does_not_change_authority_digest(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "live")
+        _prepare_adapter_repo(root)
+        _write_governance(root, _contract([_adapter_source()]))
+
+        def make_runner(boundary):
+            def runner(view, argv, **kwargs):
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps([_task("T1")]),
+                    "stderr": "",
+                    "execution_boundary": boundary,
+                    "sandboxed": True,
+                    "environment_scrubbed": True,
+                }
+            return runner
+
+        first = resolve_task_sources(root, runner=make_runner("srt"), persist=False)
+        second = resolve_task_sources(root, runner=make_runner("bubblewrap"), persist=False)
+        assert first["task_source_set_sha256"] == second["task_source_set_sha256"]
+        assert first["adapter_runtime_evidence"] != second["adapter_runtime_evidence"]
+
+
+def test_persisted_status_becomes_stale_after_committed_source_change(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _commit_file(root, "tasks/a.json", json.dumps([_task("T1")]), "source")
+        _write_governance(root, _contract([_json_source("a", "tasks/a.json")]))
+        resolved = resolve_task_sources(root, persist=True)
+        assert task_source_status(root)["status"] == "READY"
+
+        (root / "tasks/a.json").write_text(json.dumps([_task("T2")]))
+        _run(root, "git", "add", "tasks/a.json")
+        _run(root, "git", "commit", "-qm", "new task source")
+        stale = task_source_status(root)
+        assert stale["status"] == "STALE"
+        assert stale["task_source_set_sha256"] == resolved["task_source_set_sha256"]
+
+        activate(root)
+        durable = json.loads((repo_state_dir(root) / "state.json").read_text())
+        assert durable["task_source_sha256"] is None
+
+
+def test_tasks_cli_surface_parses_status_and_resolve():
+    status = build_cli_parser("test").parse_args(["tasks", "status", "--repo", "/tmp/example"])
+    assert status.command == "tasks"
+    assert status.tasks_command == "status"
+    resolve = build_cli_parser("test").parse_args(["tasks", "resolve", "--repo", "/tmp/example"])
+    assert resolve.command == "tasks"
+    assert resolve.tasks_command == "resolve"
+
+
+def test_adapter_output_order_normalises_deterministically(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "live")
+        _prepare_adapter_repo(root)
+        _write_governance(root, _contract([_adapter_source()]))
+        count = {"n": 0}
+
+        def reordered(view, argv, **kwargs):
+            count["n"] += 1
+            rows = [_task("A"), _task("B")]
+            if count["n"] % 2 == 0:
+                rows.reverse()
+            return {
+                "returncode": 0,
+                "stdout": json.dumps(rows),
+                "stderr": "",
+                "execution_boundary": "test-sandbox",
+                "sandboxed": True,
+                "environment_scrubbed": True,
+            }
+
+        result = resolve_task_sources(root, runner=reordered, persist=False)
+        assert [item["task"]["id"] for item in result["tasks"]] == ["A", "B"]
