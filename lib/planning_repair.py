@@ -11,7 +11,10 @@ from typing import Any
 
 from control_plane import _run_control_model, run_readonly_plan_agent
 from git_trust import trusted_git_env
-from promotion_policy import record_promotion_attestation
+from promotion_policy import (
+    REPOSITORY_PLANNING_REPAIR_CONTRACT,
+    record_promotion_attestation,
+)
 from protocols import parse_json_protocol
 from provider_config import provider_from_args
 from repo_identity import repo_id, repo_state_dir
@@ -21,7 +24,7 @@ from state_store import json_dump, load_json, sha256_text
 from workspace_recovery import promote_fast_forward
 
 
-PLANNING_REPAIR_CONTRACT = "repository-planning-repair"
+PLANNING_REPAIR_CONTRACT = REPOSITORY_PLANNING_REPAIR_CONTRACT
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
