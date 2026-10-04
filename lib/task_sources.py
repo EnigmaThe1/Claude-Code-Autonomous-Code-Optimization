@@ -584,6 +584,89 @@ def _clear_persisted(root: Path) -> None:
         json_dump(state_path, state)
 
 
+_PERSISTED_CANONICAL_KEYS = (
+    "schema_version",
+    "authority_snapshot_sha256",
+    "product_head",
+    "task_source_contract_digest",
+    "strict_dependencies",
+    "sources",
+    "tasks",
+    "external_dependencies",
+    "merged_tasks_sha256",
+)
+
+
+def load_resolved_task_source_set(
+    root: Path,
+    *,
+    require_current: bool = True,
+) -> dict[str, Any]:
+    root = root.expanduser().resolve()
+    path = _resolved_path(root)
+    persisted = load_json(path, {})
+    if not isinstance(persisted, dict) or not persisted:
+        raise TaskSourceError("no persisted TaskSourceSet is available")
+
+    missing = [key for key in _PERSISTED_CANONICAL_KEYS if key not in persisted]
+    if missing:
+        raise TaskSourceError(
+            "persisted TaskSourceSet is incomplete: " + ", ".join(missing)
+        )
+    canonical = {key: persisted[key] for key in _PERSISTED_CANONICAL_KEYS}
+    recorded = persisted.get("task_source_set_sha256")
+    if not isinstance(recorded, str) or len(recorded) != 64:
+        raise TaskSourceError("persisted TaskSourceSet digest is missing or invalid")
+    actual = _digest(canonical)
+    if actual != recorded:
+        raise TaskSourceError(
+            "persisted TaskSourceSet integrity check failed: semantic digest mismatch"
+        )
+
+    tasks = canonical.get("tasks")
+    if not isinstance(tasks, list):
+        raise TaskSourceError("persisted TaskSourceSet tasks must be a list")
+    merged_actual = _digest([
+        {
+            "task": item.get("task"),
+            "task_spec_sha256": item.get("task_spec_sha256"),
+            "record_sha256": item.get("record_sha256"),
+            "source_id": item.get("source_id"),
+        }
+        for item in tasks
+        if isinstance(item, dict)
+    ])
+    if len(tasks) != len([item for item in tasks if isinstance(item, dict)]):
+        raise TaskSourceError("persisted TaskSourceSet contains a malformed task record")
+    if merged_actual != canonical.get("merged_tasks_sha256"):
+        raise TaskSourceError(
+            "persisted TaskSourceSet integrity check failed: merged task digest mismatch"
+        )
+
+    state = load_json(repo_state_dir(root) / "state.json", {})
+    if not isinstance(state, dict) or state.get("task_source_sha256") != recorded:
+        raise TaskSourceError(
+            "persisted TaskSourceSet is not bound to the current durable state generation"
+        )
+
+    if require_current:
+        try:
+            snapshot = build_authority_snapshot(root)
+        except AuthoritySetError as exc:
+            raise TaskSourceError(str(exc)) from exc
+        if not isinstance(snapshot, dict):
+            raise TaskSourceError("repository governance is no longer configured")
+        if (
+            canonical.get("authority_snapshot_sha256") != snapshot.get("snapshot_sha256")
+            or canonical.get("product_head") != snapshot.get("product_head")
+            or canonical.get("task_source_contract_digest") != snapshot.get("task_source_contract_digest")
+        ):
+            raise TaskSourceError(
+                "persisted TaskSourceSet is stale for the current repository authority"
+            )
+    return persisted
+
+
 def task_source_status(root: Path) -> dict[str, Any]:
     root = root.expanduser().resolve()
     try:
@@ -604,25 +687,30 @@ def task_source_status(root: Path) -> dict[str, Any]:
             "authority_snapshot_sha256": snapshot["snapshot_sha256"],
         }
 
-    digest = persisted.get("task_source_set_sha256")
-    state = load_json(repo_state_dir(root) / "state.json", {})
+    try:
+        verified = load_resolved_task_source_set(root, require_current=False)
+    except TaskSourceError as exc:
+        return {
+            "status": "BLOCKED",
+            "repository": str(root),
+            "error": str(exc),
+        }
+
+    digest = verified["task_source_set_sha256"]
     current = (
-        persisted.get("authority_snapshot_sha256") == snapshot["snapshot_sha256"]
-        and persisted.get("product_head") == snapshot["product_head"]
-        and persisted.get("task_source_contract_digest") == snapshot["task_source_contract_digest"]
-        and isinstance(digest, str)
-        and isinstance(state, dict)
-        and state.get("task_source_sha256") == digest
+        verified.get("authority_snapshot_sha256") == snapshot["snapshot_sha256"]
+        and verified.get("product_head") == snapshot["product_head"]
+        and verified.get("task_source_contract_digest") == snapshot["task_source_contract_digest"]
     )
     return {
         "status": "READY" if current else "STALE",
         "repository": str(root),
         "authority_snapshot_sha256": snapshot["snapshot_sha256"],
         "task_source_set_sha256": digest,
-        "merged_tasks_sha256": persisted.get("merged_tasks_sha256"),
-        "task_count": len(persisted.get("tasks", [])) if isinstance(persisted.get("tasks"), list) else 0,
-        "external_dependencies": persisted.get("external_dependencies", []),
-        "resolved_at": persisted.get("resolved_at"),
+        "merged_tasks_sha256": verified.get("merged_tasks_sha256"),
+        "task_count": len(verified.get("tasks", [])),
+        "external_dependencies": verified.get("external_dependencies", []),
+        "resolved_at": verified.get("resolved_at"),
     }
 
 
