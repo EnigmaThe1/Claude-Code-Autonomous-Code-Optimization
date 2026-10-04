@@ -490,6 +490,11 @@ def test_semantic_only_write_guard_allows_host_scope_but_denies_governance_paths
         {"tool_name": "Bash", "tool_input": {"command": "printf bad > PLAN.md"}},
         env,
     ) == "deny"
+    assert _write_guard_decision(
+        guard,
+        {"tool_name": "Bash", "tool_input": {"command": "rm -rf ."}},
+        env,
+    ) == "deny"
 
 
 def test_isolated_full_also_keeps_semantic_write_guard():
