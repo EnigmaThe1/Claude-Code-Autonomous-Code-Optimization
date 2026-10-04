@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -21,6 +22,10 @@ def _trust_dir(root: Path) -> Path:
 
 def _trust_path(root: Path) -> Path:
     return _trust_dir(root) / "policy.json"
+
+
+def _package_excludes_path(root: Path) -> Path:
+    return _trust_dir(root) / "trusted-excludes"
 
 
 def _resolve_candidate(root: Path, raw: str | Path) -> Path:
@@ -66,27 +71,86 @@ def validate_trusted_excludes_file(root: Path, raw: str | Path) -> Path:
     return path
 
 
+def _read_operator_excludes(path: Path) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("trusted excludes file must remain a regular file")
+        if st.st_size > _MAX_EXCLUDES_BYTES:
+            raise ValueError("trusted excludes file is unexpectedly large")
+        if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+            raise ValueError("trusted excludes file must remain owned by the current user")
+        if stat.S_IMODE(st.st_mode) & 0o022:
+            raise ValueError("trusted excludes file must not be group/world writable")
+        chunks: list[bytes] = []
+        remaining = _MAX_EXCLUDES_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > _MAX_EXCLUDES_BYTES:
+            raise ValueError("trusted excludes file is unexpectedly large")
+        return payload
+    finally:
+        os.close(fd)
+
+
+def _write_package_excludes(root: Path, payload: bytes) -> Path:
+    target = _package_excludes_path(root)
+    tmp = target.with_name(target.name + ".tmp")
+    with tmp.open("wb") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    tmp.chmod(0o600)
+    os.replace(tmp, target)
+    target.chmod(0o600)
+    return target
+
+
+def _ensure_package_excludes(root: Path) -> Path:
+    target = _package_excludes_path(root)
+    if not target.exists():
+        return _write_package_excludes(root, b"")
+    return validate_trusted_excludes_file(root, target)
+
+
 def configure_trusted_excludes(root: Path, raw: str | Path) -> dict[str, Any]:
     root = root.expanduser().resolve()
-    path = validate_trusted_excludes_file(root, raw)
+    source = validate_trusted_excludes_file(root, raw)
+    payload = _read_operator_excludes(source)
+    package_copy = _write_package_excludes(root, payload)
     policy = {
-        "schema_version": 1,
+        "schema_version": 2,
         "configured_at": utcnow(),
-        "trusted_excludes_file": str(path),
+        "source_excludes_file": str(source),
+        "source_sha256": hashlib.sha256(payload).hexdigest(),
+        "trusted_excludes_file": str(package_copy),
         "fetch_recurse_submodules": False,
         "submodule_recurse": False,
+        "hooks_disabled": True,
+        "fsmonitor_disabled": True,
     }
     json_dump(_trust_path(root), policy)
     return policy
 
 
 def clear_trusted_excludes(root: Path) -> dict[str, Any]:
-    path = _trust_path(root.expanduser().resolve())
+    root = root.expanduser().resolve()
+    path = _trust_path(root)
     previous = load_json(path, {})
     try:
         path.unlink()
     except FileNotFoundError:
         pass
+    _write_package_excludes(root, b"")
     return {"status": "cleared", "previous": previous if isinstance(previous, dict) else {}}
 
 
@@ -96,18 +160,26 @@ def load_git_trust_policy(root: Path) -> dict[str, Any]:
 
 
 def trusted_git_config(root: Path) -> list[tuple[str, str]]:
-    """Return only package-owned Git config reconstructed after caller sanitisation."""
+    """Return package-owned Git config reconstructed after caller sanitisation.
+
+    Authentication/transport settings remain available from ordinary Git config,
+    but WIP visibility, hook execution, submodule recursion and fsmonitor are
+    deterministic package-owned policy.
+    """
     root = root.expanduser().resolve()
-    config: list[tuple[str, str]] = [
-        ("fetch.recurseSubmodules", "false"),
-        ("submodule.recurse", "false"),
-    ]
     policy = load_git_trust_policy(root)
     raw = policy.get("trusted_excludes_file")
     if isinstance(raw, str) and raw.strip():
         path = validate_trusted_excludes_file(root, raw)
-        config.insert(0, ("core.excludesFile", str(path)))
-    return config
+    else:
+        path = _ensure_package_excludes(root)
+    return [
+        ("core.excludesFile", str(path)),
+        ("core.hooksPath", os.devnull),
+        ("core.fsmonitor", "false"),
+        ("fetch.recurseSubmodules", "false"),
+        ("submodule.recurse", "false"),
+    ]
 
 
 def trusted_git_env(
