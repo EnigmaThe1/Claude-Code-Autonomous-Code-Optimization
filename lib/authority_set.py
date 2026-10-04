@@ -234,16 +234,16 @@ def _helper_control_selectors(contract: dict[str, Any]) -> list[str]:
                         except GovernanceContractError:
                             pass
     for source in contract["tasks"]["sources"]:
+        for key in ("paths", "inputs"):
+            raw = source.get(key)
+            values = raw if isinstance(raw, list) else [raw]
+            for item in values:
+                if isinstance(item, str) and item:
+                    try:
+                        selectors.add(normalise_repo_selector(item))
+                    except GovernanceContractError:
+                        pass
         if source.get("kind") == "adapter":
-            for key in ("path", "config", "inputs"):
-                raw = source.get(key)
-                values = raw if isinstance(raw, list) else [raw]
-                for item in values:
-                    if isinstance(item, str) and item:
-                        try:
-                            selectors.add(normalise_repo_selector(item))
-                        except GovernanceContractError:
-                            pass
             argv = source.get("argv")
             if isinstance(argv, list):
                 for candidate in argv[:2]:
