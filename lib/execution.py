@@ -155,12 +155,19 @@ def _readonly_toolchain_paths(root: Path) -> list[Path]:
     return out
 
 
-def _sandbox_settings(root: Path, temp_home: Path, *, read_only_root: bool = False) -> dict[str, Any]:
+def _sandbox_settings(
+    root: Path,
+    temp_home: Path,
+    *,
+    read_only_root: bool = False,
+    hidden_paths: list[Path] | None = None,
+) -> dict[str, Any]:
     root = root.resolve()
     real_home = Path.home().resolve()
     deny_read = [
         str(real_home),
         str(root / ".git"),
+        *(str(path.resolve()) for path in (hidden_paths or [])),
     ]
     allow_read = [str(root), *(str(p) for p in _readonly_toolchain_paths(root))]
     allow_write = [str(temp_home), str(temp_home / "tmp")]
@@ -195,7 +202,13 @@ def _path_is_within(path: Path, parent: Path) -> bool:
         return False
 
 
-def _bwrap_base(root: Path, *, read_only_root: bool = False, cwd: Path | None = None) -> list[str] | None:
+def _bwrap_base(
+    root: Path,
+    *,
+    read_only_root: bool = False,
+    cwd: Path | None = None,
+    hidden_paths: list[Path] | None = None,
+) -> list[str] | None:
     """Build a Linux bubblewrap boundary that hides user homes and network."""
     if sys.platform != "linux":
         return None
@@ -226,6 +239,20 @@ def _bwrap_base(root: Path, *, read_only_root: bool = False, cwd: Path | None = 
     if real_home.exists() and not any(_path_is_within(real_home, p) for p in mask_points):
         mask_points.append(real_home)
         args += ["--tmpfs", str(real_home)]
+
+    # P2 adapters can explicitly hide the real target repository even when it
+    # lives outside the conventional masked home/tmp trees.
+    for hidden in hidden_paths or []:
+        try:
+            hp = hidden.resolve()
+        except OSError:
+            continue
+        if not hp.exists() or _path_is_within(root, hp) or _path_is_within(hp, root):
+            continue
+        if any(_path_is_within(hp, p) for p in mask_points):
+            continue
+        mask_points.append(hp)
+        args += ["--tmpfs", str(hp)]
 
     created_dirs: set[Path] = set()
 
@@ -274,8 +301,14 @@ def _run_bwrap(
     timeout: int | None,
     read_only_root: bool = False,
     cwd: Path | None = None,
+    hidden_paths: list[Path] | None = None,
 ) -> dict[str, Any] | None:
-    base = _bwrap_base(root, read_only_root=read_only_root, cwd=cwd)
+    base = _bwrap_base(
+        root,
+        read_only_root=read_only_root,
+        cwd=cwd,
+        hidden_paths=hidden_paths,
+    )
     if base is None:
         return None
 
@@ -366,6 +399,7 @@ def run_repository_command(
     unrestricted_host: bool = False,
     read_only_root: bool = False,
     working_directory: Path | None = None,
+    hidden_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     """Run repository-controlled code under an explicit execution boundary.
 
@@ -412,7 +446,12 @@ def run_repository_command(
 
         srt = shutil.which("srt")
         if srt:
-            settings = _sandbox_settings(root, temp_home, read_only_root=read_only_root)
+            settings = _sandbox_settings(
+                root,
+                temp_home,
+                read_only_root=read_only_root,
+                hidden_paths=hidden_paths,
+            )
             settings_path = temp_home / "srt-settings.json"
             settings_path.write_text(json.dumps(settings, indent=2) + "\n")
             result = _run_process(
@@ -438,6 +477,7 @@ def run_repository_command(
             timeout=timeout,
             read_only_root=read_only_root,
             cwd=workdir,
+            hidden_paths=hidden_paths,
         )
         if bwrap_result is not None:
             if bwrap_result.get("execution_boundary") != "unavailable":
