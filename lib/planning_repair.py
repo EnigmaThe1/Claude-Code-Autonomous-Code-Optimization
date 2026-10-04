@@ -3,8 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
-import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -337,7 +335,7 @@ def run_planning_repair_architect(root: Path, args: Any) -> dict[str, Any]:
         prompt,
     ]
 
-    cp, result_text, session_id, raw, outcome, outcome_reason, usage, attempts, wall_seconds = _run_control_model(
+    cp, result_text, session_id, _raw, outcome, outcome_reason, usage, attempts, wall_seconds = _run_control_model(
         cmd=cmd,
         root=worktree,
         sd=repo_state_dir(root),
