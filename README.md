@@ -207,7 +207,7 @@ See [Model routing](docs/MODEL_ROUTING.md).
 
 `main` represents the latest accepted and qualified public state. Each candidate is developed on `release/<version>`, qualified there, then merged or fast-forwarded into `main`. Accepted release branches remain fixed as recovery/comparison references and version tags are immutable.
 
-The first public baseline is **1.0.0-rc1**. **1.0.0-rc2** adds trusted Git reconstruction, protected/idempotent promotion and repository-owned planning repair. **1.0.0-rc3** is the current development candidate and adds explicit Apache-2.0 licensing plus release-workflow hardening.
+The first public baseline is **1.0.0-rc1**. **1.0.0-rc2** adds trusted Git reconstruction, protected/idempotent promotion and repository-owned planning repair. **1.0.0-rc3** adds explicit Apache-2.0 licensing, release-workflow hardening and deterministic release finalisation.
 
 ## License
 

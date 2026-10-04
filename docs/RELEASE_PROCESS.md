@@ -13,7 +13,7 @@ Each candidate is developed on `release/<version>`, for example `release/1.0.0-r
 7. Release qualification requires `.release-qualify` to attest its immediate parent, requires a current committed manifest, and runs complete source/archive/installer qualification.
 8. Do not advance `main` unless that exact finalised candidate SHA has a green release qualification.
 9. Advance `main` to the exact accepted candidate, then require normal `main` CI to pass at that same SHA.
-10. Create immutable tag `v<version>` only for the accepted SHA.
+10. After the exact candidate SHA is on `main` and post-promotion `main` CI is green, dispatch the `Tag accepted release` workflow for `<version>`. It refuses to create the tag unless `main`, `release/<version>` and a successful release-qualification run all agree on the exact SHA, and it refuses to overwrite an existing tag.
 11. Keep accepted release branches fixed for recovery/comparison, and start the next candidate from the new `main`.
 
 This repository starts public version history at `1.0.0-rc1`.

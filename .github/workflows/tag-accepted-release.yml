@@ -1,0 +1,84 @@
+name: Tag accepted release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Accepted version without the leading v (for example 1.0.0-rc3)"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Validate accepted release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_NAME" != "main" ]]; then
+            echo "::error title=Tagging must run from main::Dispatch this workflow from the main branch."
+            exit 1
+          fi
+
+          VERSION="$(cat VERSION)"
+          if [[ "$REQUESTED_VERSION" != "$VERSION" ]]; then
+            echo "::error title=Requested version mismatch::Requested '$REQUESTED_VERSION' but main contains VERSION '$VERSION'."
+            exit 1
+          fi
+
+          TAG="v$VERSION"
+          RELEASE_BRANCH="release/$VERSION"
+          MAIN_SHA="$GITHUB_SHA"
+
+          git fetch --no-tags origin "refs/heads/$RELEASE_BRANCH:refs/remotes/origin/$RELEASE_BRANCH"
+          RELEASE_SHA="$(git rev-parse "refs/remotes/origin/$RELEASE_BRANCH")"
+          if [[ "$RELEASE_SHA" != "$MAIN_SHA" ]]; then
+            echo "::error title=Release/main mismatch::main is $MAIN_SHA but $RELEASE_BRANCH is $RELEASE_SHA."
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error title=Tag already exists::$TAG already exists; this workflow never overwrites release tags."
+            exit 1
+          fi
+
+          if [[ ! -f .release-qualify ]]; then
+            echo "::error title=Qualification attestation missing::.release-qualify is required on the accepted SHA."
+            exit 1
+          fi
+          grep -Fxq "version=$VERSION" .release-qualify || {
+            echo "::error title=Qualification version mismatch::.release-qualify does not attest $VERSION."
+            exit 1
+          }
+
+          gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/release-candidate.yml/runs"             -f branch="$RELEASE_BRANCH" -f status=success -f per_page=100 > /tmp/release-runs.json
+          MAIN_SHA="$MAIN_SHA" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          sha = os.environ["MAIN_SHA"]
+          data = json.loads(Path("/tmp/release-runs.json").read_text())
+          matches = [
+              run for run in data.get("workflow_runs", [])
+              if run.get("head_sha") == sha and run.get("conclusion") == "success"
+          ]
+          if not matches:
+              raise SystemExit(f"No successful release qualification found for exact SHA {sha}")
+          print(f"qualification_run={matches[0]['id']}")
+          PY
+
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs"             -f ref="refs/tags/$TAG"             -f sha="$MAIN_SHA"
+          echo "Created immutable-by-process release tag $TAG -> $MAIN_SHA"
