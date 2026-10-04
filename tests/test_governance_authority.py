@@ -474,3 +474,48 @@ def test_governance_status_surface_is_read_only_and_parseable(monkeypatch):
         assert result["snapshot"]["sets"][0]["members"][0]["path"] == "PLAN.md"
         after = _run(root, "git", "status", "--porcelain=v1").stdout
         assert after == before == ""
+
+
+def test_nested_instructions_ci_and_verification_script_are_control_surfaces(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("plan\n")
+        (root / "src").mkdir()
+        (root / "src" / "CLAUDE.md").write_text("nested instruction\n")
+        workflow = root / ".github" / "workflows" / "ci.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("name: ci\n")
+        verify = root / "tools" / "verify.py"
+        verify.parent.mkdir()
+        verify.write_text("raise SystemExit(0)\n")
+        verification = root / ".claude-auto" / "verification.json"
+        verification.parent.mkdir(parents=True, exist_ok=True)
+        verification.write_text(json.dumps({
+            "schema_version": 1,
+            "commands": {"test": ["python3 tools/verify.py"]},
+        }))
+        _run(
+            root,
+            "git",
+            "add",
+            "PLAN.md",
+            "src/CLAUDE.md",
+            ".github/workflows/ci.yml",
+            "tools/verify.py",
+            ".claude-auto/verification.json",
+        )
+        _run(root, "git", "commit", "-qm", "control surfaces")
+        _write_contract(root, _contract([_set("default", [_member("PLAN.md")])]))
+
+        snapshot = build_authority_snapshot(root)
+        assert snapshot is not None
+        protected = set(snapshot["protected_paths"])
+        assert "src/CLAUDE.md" in protected
+        assert ".github/workflows/ci.yml" in protected
+        assert "tools/verify.py" in protected
+        assert ".claude-auto/verification.json" in protected
+
+        verify.write_text("raise SystemExit(1)\n")
+        with pytest.raises(AuthoritySetError, match="working tree differs"):
+            build_authority_snapshot(root)
