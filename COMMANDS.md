@@ -110,6 +110,14 @@ claude-auto promotion require-contract --repo /path/to/repo --contract CONTRACT_
 claude-auto promotion clear-contract --repo /path/to/repo
 ```
 
+## Repository governance status
+
+```bash
+claude-auto governance status --repo /path/to/repo
+```
+
+This is read-only. It reports the exact committed AuthoritySet snapshot, protected control surfaces and snapshot digest, or a fail-closed blocker. A repository may opt into multi-file/multi-domain planning with `.claude-auto/governance.json`; RC4-P1 inspects and protects that authority but does not yet execute it.
+
 ## Repository-owned planning repair
 
 ```bash
