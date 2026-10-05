@@ -20,6 +20,7 @@ import os
 import subprocess
 import unicodedata
 from contextlib import nullcontext
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -34,9 +35,11 @@ from execution_envelope import (
 from git_trust import trusted_git_env
 from governance_contract import canonical_json_bytes
 from repo_identity import SupervisorLease, repo_state_dir
+from repo_profile import profile_repo
 from runtime_paths import ensure_private_dir, utcnow
 from state_store import json_dump
 from task_sources import TaskSourceError, load_resolved_task_source_set
+from verification import _run_verification_command, _verification_commands
 from task_workspace import (
     TaskWorkspaceError,
     candidate_ref_for_workspace,
@@ -537,6 +540,488 @@ def reconcile_task_candidate(
         return workspace
 
 
+
+
+
+def _verification_dir(state_dir: Path) -> Path:
+    return ensure_private_dir(state_dir / "tasks" / "verification")
+
+
+def _verification_bundle_path(
+    state_dir: Path,
+    candidate_sha: str,
+) -> Path:
+    return _verification_dir(state_dir) / f"{candidate_sha}.json"
+
+
+def _verification_worktree_parent(state_dir: Path) -> Path:
+    return ensure_private_dir(
+        state_dir / "tasks" / "verification-worktrees"
+    )
+
+
+def _verification_worktree_path(
+    state_dir: Path,
+    candidate_sha: str,
+    label: str,
+) -> Path:
+    if label not in {"base", "candidate"}:
+        raise TaskAcceptanceError("unknown verification worktree label")
+    token = candidate_sha[:24].lower()
+    return (
+        _verification_worktree_parent(state_dir)
+        / token
+        / label
+    ).resolve()
+
+
+def _remove_verification_worktree(
+    coordinator_root: Path,
+    path: Path,
+    *,
+    state_dir: Path,
+) -> None:
+    parent = _verification_worktree_parent(state_dir).resolve()
+    target = path.expanduser().resolve()
+    try:
+        target.relative_to(parent)
+    except ValueError as exc:
+        raise TaskAcceptanceError(
+            "verification worktree cleanup target escaped package state"
+        ) from exc
+    if target == parent:
+        raise TaskAcceptanceError(
+            "verification worktree cleanup target is package parent"
+        )
+    cp = _git(
+        coordinator_root,
+        "worktree",
+        "remove",
+        "--force",
+        str(target),
+        state_dir=state_dir,
+    )
+    if cp.returncode != 0 and target.exists():
+        detail = str(cp.stderr or cp.stdout or "git worktree remove failed")
+        raise TaskAcceptanceError(detail.strip()[:1600])
+
+
+def _fresh_verification_worktree(
+    coordinator_root: Path,
+    *,
+    sha: str,
+    path: Path,
+    state_dir: Path,
+) -> Path:
+    if path.exists():
+        _remove_verification_worktree(
+            coordinator_root,
+            path,
+            state_dir=state_dir,
+        )
+    ensure_private_dir(path.parent)
+    cp = _git(
+        coordinator_root,
+        "worktree",
+        "add",
+        "--detach",
+        str(path),
+        sha,
+        state_dir=state_dir,
+    )
+    if cp.returncode != 0:
+        detail = str(cp.stderr or cp.stdout or "git worktree add failed")
+        raise TaskAcceptanceError(
+            "unable to create exact verification worktree: "
+            + detail.strip()[:1600]
+        )
+    head = str(
+        _require_git(
+            path,
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+            state_dir=state_dir,
+        ).stdout
+    ).strip().lower()
+    if head != sha.lower():
+        raise TaskAcceptanceError(
+            "verification worktree HEAD differs from requested exact SHA"
+        )
+    branch = str(
+        _require_git(
+            path,
+            "branch",
+            "--show-current",
+            state_dir=state_dir,
+        ).stdout
+    ).strip()
+    if branch:
+        raise TaskAcceptanceError(
+            "verification worktree must be detached at the exact SHA"
+        )
+    return path
+
+
+def _verification_semantic_receipt(
+    receipt: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        key: receipt.get(key)
+        for key in (
+            "category",
+            "command",
+            "effective_command",
+            "command_adjustment",
+            "exit_code",
+            "timed_out",
+            "signature",
+            "tracked_source_unchanged",
+            "source_fingerprint",
+            "execution_boundary",
+            "sandboxed",
+            "environment_scrubbed",
+            "verdict",
+        )
+    }
+
+
+def _classify_candidate_receipt(
+    receipt: dict[str, Any],
+    baseline: dict[str, Any] | None,
+) -> tuple[str, str | None]:
+    if receipt.get("execution_boundary") == "unavailable":
+        return (
+            "UNVERIFIED",
+            "safe repository execution boundary is unavailable",
+        )
+    if receipt.get("timed_out"):
+        return "UNVERIFIED", "verification command timed out"
+    try:
+        exit_code = int(receipt.get("exit_code", 1))
+    except (TypeError, ValueError):
+        exit_code = 1
+    if exit_code in {126, 127}:
+        return (
+            "UNVERIFIED",
+            f"verification shell could not execute command (exit {exit_code})",
+        )
+    if not receipt.get("tracked_source_unchanged", True):
+        return (
+            "FAIL",
+            "verification command mutated tracked/indexed candidate source",
+        )
+    if exit_code == 0:
+        return "PASS", None
+    if (
+        isinstance(baseline, dict)
+        and baseline.get("exit_code") == receipt.get("exit_code")
+        and baseline.get("signature") == receipt.get("signature")
+    ):
+        return "BASELINE_FAILURE_UNCHANGED", None
+    return "FAIL", f"verification command exited {exit_code}"
+
+
+def _strong_verification_marker(root: Path) -> bool:
+    markers = (
+        "tox.ini",
+        "noxfile.py",
+        "build.gradle",
+        "build.gradle.kts",
+        "pom.xml",
+        "CMakeLists.txt",
+        "Rakefile",
+    )
+    return (
+        any((root / marker).exists() for marker in markers)
+        or bool(list(root.glob("*.sln")))
+        or bool(list(root.glob("*.csproj")))
+    )
+
+
+def _persist_verification_bundle(
+    state_dir: Path,
+    *,
+    workspace: dict[str, Any],
+    commands: list[tuple[str, str]],
+    task_claims: list[str],
+    baseline_receipts: list[dict[str, Any]],
+    candidate_receipts: list[dict[str, Any]],
+    verdict: str,
+    findings: list[str],
+) -> dict[str, Any]:
+    candidate_sha = str(workspace["candidate_sha"]).lower()
+    semantic = {
+        "schema_version": 1,
+        "task_id": workspace["task_id"],
+        "task_spec_sha256": workspace["task_spec_sha256"],
+        "task_source_set_sha256": workspace["task_source_set_sha256"],
+        "execution_envelope_sha256": workspace[
+            "execution_envelope_sha256"
+        ],
+        "base_sha": workspace["product_base_sha"],
+        "candidate_sha": candidate_sha,
+        "candidate_tree_sha": workspace.get("candidate_tree_sha"),
+        "no_op": bool(workspace.get("no_op_candidate")),
+        "commands": [
+            {"category": category, "command": command}
+            for category, command in commands
+        ],
+        "task_verification_claims": list(task_claims),
+        "baseline_receipts": [
+            _verification_semantic_receipt(receipt)
+            for receipt in baseline_receipts
+        ],
+        "candidate_receipts": [
+            _verification_semantic_receipt(receipt)
+            for receipt in candidate_receipts
+        ],
+        "verdict": verdict,
+        "findings": list(findings),
+    }
+    bundle = {
+        **semantic,
+        "verification_bundle_sha256": _digest(semantic),
+        "recorded_at": utcnow(),
+        "baseline_receipt_details": baseline_receipts,
+        "candidate_receipt_details": candidate_receipts,
+    }
+    json_dump(
+        _verification_bundle_path(state_dir, candidate_sha),
+        bundle,
+    )
+    return bundle
+
+
+def verify_task_candidate_deterministic(
+    coordinator_root: Path,
+    *,
+    timeout: int = 900,
+    trust_repo_scripts: bool = False,
+    unrestricted_host: bool = False,
+    state_dir: Path | None = None,
+    acquire_lease: bool = True,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(coordinator_root)
+    )
+    context = (
+        SupervisorLease(state_root, coordinator_root)
+        if acquire_lease
+        else nullcontext()
+    )
+    with context:
+        workspace = load_active_task_workspace(
+            coordinator_root,
+            state_dir=state_root,
+        )
+        if workspace is None:
+            raise TaskAcceptanceError(
+                "no active TaskWorkspaceRecord exists"
+            )
+        if workspace["lifecycle_state"] == "CANDIDATE":
+            workspace = reconcile_task_candidate(
+                coordinator_root,
+                state_dir=state_root,
+                acquire_lease=False,
+            )
+            validate_task_candidate_worktree(
+                coordinator_root,
+                state_dir=state_root,
+            )
+            workspace = update_task_workspace_package_state(
+                coordinator_root,
+                state_dir=state_root,
+                expected_states={"CANDIDATE"},
+                updates={
+                    "lifecycle_state": "VERIFYING",
+                    "deterministic_verification_sha256": None,
+                    "deterministic_verification_verdict": None,
+                    "verification_started_at": utcnow(),
+                },
+            )
+        elif workspace["lifecycle_state"] == "VERIFYING":
+            validate_task_candidate_worktree(
+                coordinator_root,
+                state_dir=state_root,
+            )
+        else:
+            raise TaskAcceptanceError(
+                "deterministic verification requires CANDIDATE or "
+                f"VERIFYING state, found {workspace['lifecycle_state']!r}"
+            )
+
+        candidate_sha = str(workspace["candidate_sha"]).lower()
+        base_sha = str(workspace["product_base_sha"]).lower()
+        task_record = _task_record(
+            Path(workspace["task_worktree"]).expanduser().resolve(),
+            coordinator_root,
+            workspace,
+            state_dir=state_root,
+        )
+        task_claims = [
+            str(item)
+            for item in (task_record["task"].get("verification") or [])
+        ]
+
+        candidate_path = _verification_worktree_path(
+            state_root,
+            candidate_sha,
+            "candidate",
+        )
+        base_path = _verification_worktree_path(
+            state_root,
+            candidate_sha,
+            "base",
+        )
+        baseline_receipts: list[dict[str, Any]] = []
+        candidate_receipts: list[dict[str, Any]] = []
+        commands: list[tuple[str, str]] = []
+        findings: list[str] = []
+        verdict = "PASS"
+        cleanup_errors: list[str] = []
+
+        try:
+            base_root = _fresh_verification_worktree(
+                coordinator_root,
+                sha=base_sha,
+                path=base_path,
+                state_dir=state_root,
+            )
+            candidate_root = _fresh_verification_worktree(
+                coordinator_root,
+                sha=candidate_sha,
+                path=candidate_path,
+                state_dir=state_root,
+            )
+
+            candidate_profile = asdict(profile_repo(candidate_root))
+            commands = list(_verification_commands(candidate_profile))
+            for category, command in commands:
+                baseline = _run_verification_command(
+                    base_root,
+                    category,
+                    command,
+                    int(timeout),
+                    trust_repo_scripts=trust_repo_scripts,
+                    unrestricted_host=unrestricted_host,
+                )
+                if not baseline.get("tracked_source_unchanged", True):
+                    baseline["verdict"] = "INVALID_BASELINE"
+                    baseline_receipts.append(baseline)
+                    verdict = "UNVERIFIED"
+                    findings.append(
+                        f"{category}: {command} mutated tracked/indexed "
+                        "source at the exact task base"
+                    )
+                    break
+                baseline["verdict"] = (
+                    "PASS"
+                    if int(baseline.get("exit_code", 1)) == 0
+                    else "BASELINE_FAILURE"
+                )
+                baseline_receipts.append(baseline)
+
+            if verdict == "PASS":
+                baseline_by_key = {
+                    (str(row.get("category")), str(row.get("command"))): row
+                    for row in baseline_receipts
+                }
+                for category, command in commands:
+                    receipt = _run_verification_command(
+                        candidate_root,
+                        category,
+                        command,
+                        int(timeout),
+                        trust_repo_scripts=trust_repo_scripts,
+                        unrestricted_host=unrestricted_host,
+                    )
+                    baseline = baseline_by_key.get((category, command))
+                    row_verdict, reason = _classify_candidate_receipt(
+                        receipt,
+                        baseline,
+                    )
+                    receipt["verdict"] = row_verdict
+                    candidate_receipts.append(receipt)
+                    if row_verdict == "UNVERIFIED":
+                        verdict = "UNVERIFIED"
+                        if reason:
+                            findings.append(
+                                f"{category}: {command}: {reason}"
+                            )
+                    elif row_verdict == "FAIL" and verdict != "UNVERIFIED":
+                        verdict = "FAIL"
+                        if reason:
+                            findings.append(
+                                f"{category}: {command}: {reason}"
+                            )
+
+                if not commands and _strong_verification_marker(candidate_root):
+                    verdict = "UNVERIFIED"
+                    findings.append(
+                        "repository contains recognised verification/build "
+                        "markers but no deterministic verification command "
+                        "could be established"
+                    )
+        finally:
+            for path in (candidate_path, base_path):
+                try:
+                    _remove_verification_worktree(
+                        coordinator_root,
+                        path,
+                        state_dir=state_root,
+                    )
+                except TaskAcceptanceError as exc:
+                    cleanup_errors.append(str(exc))
+
+        if cleanup_errors:
+            verdict = "UNVERIFIED"
+            findings.extend(
+                "verification worktree cleanup failed: " + item
+                for item in cleanup_errors
+            )
+
+        bundle = _persist_verification_bundle(
+            state_root,
+            workspace=workspace,
+            commands=commands,
+            task_claims=task_claims,
+            baseline_receipts=baseline_receipts,
+            candidate_receipts=candidate_receipts,
+            verdict=verdict,
+            findings=findings,
+        )
+
+        lifecycle = "VERIFYING" if verdict == "PASS" else "BLOCKED"
+        workspace = update_task_workspace_package_state(
+            coordinator_root,
+            state_dir=state_root,
+            expected_states={"VERIFYING"},
+            updates={
+                "lifecycle_state": lifecycle,
+                "deterministic_verification_sha256": bundle[
+                    "verification_bundle_sha256"
+                ],
+                "deterministic_verification_verdict": verdict,
+                "deterministic_verification_findings": findings[:100],
+                "verification_finished_at": utcnow(),
+            },
+        )
+        return {
+            "status": verdict,
+            "task_id": workspace["task_id"],
+            "candidate_sha": candidate_sha,
+            "verification_bundle_sha256": bundle[
+                "verification_bundle_sha256"
+            ],
+            "command_count": len(commands),
+            "findings": findings,
+            "receipts": candidate_receipts,
+            "baseline_receipts": baseline_receipts,
+        }
 
 
 def validate_task_candidate_worktree(
