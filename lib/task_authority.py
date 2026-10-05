@@ -265,7 +265,13 @@ def _activate_locked(
     task_id: str,
     *,
     state_dir: Path | None = None,
+    authority_root: Path | None = None,
 ) -> dict[str, Any]:
+    authority_check_root = (
+        authority_root.expanduser().resolve()
+        if authority_root is not None
+        else root.expanduser().resolve()
+    )
     state_root = (
         state_dir.expanduser().resolve()
         if state_dir is not None
