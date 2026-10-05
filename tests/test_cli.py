@@ -582,13 +582,13 @@ def test_p4_headless_noop_task_runs_in_worktree_and_reaches_acceptance(monkeypat
             "--plan",
             "PLAN.md",
             "--max-cycles",
-            "1",
+            "2",
             "--max-turns",
             "5",
             "--security-scanners",
             "off",
         ])
-        assert rc == 4
+        assert rc == 0
 
         sd = ca.repo_state_dir(r)
         state = json.loads((sd / "state.json").read_text())
@@ -601,19 +601,20 @@ def test_p4_headless_noop_task_runs_in_worktree_and_reaches_acceptance(monkeypat
         ).stdout.strip()
         assert state["active_task_id"] is None
         assert state.get("active_task_worktree") is None
+        assert state["status"] == "COMPLETE"
 
         calls = [
             json.loads(line)
             for line in capture.read_text().splitlines()
             if line.strip()
         ]
-        worker = next(
+        goal_calls = [
             row
             for row in calls
-            if row["args"]
-            and row["args"][-1].startswith("/goal ")
-            and "AUTONOMY_TASK_RESULT" not in row["args"][-1]
-        )
+            if row["args"] and row["args"][-1].startswith("/goal ")
+        ]
+        assert len(goal_calls) == 1
+        worker = goal_calls[0]
         # The worker's goal prompt describes the protocol but executes from the
         # external package-owned task worktree, never from primary checkout.
         assert Path(worker["cwd"]).resolve() != r.resolve()
