@@ -26,7 +26,11 @@ from typing import Any, Iterable
 
 from authority_set import AuthoritySetError, build_authority_snapshot
 from git_trust import trusted_git_env
-from governance_contract import canonical_json_bytes
+from governance_contract import (
+    GovernanceContractError,
+    canonical_json_bytes,
+    load_governance_contract,
+)
 from repo_identity import repo_state_dir
 from runtime_paths import ensure_private_dir, package_root, utcnow
 from state_store import json_dump, load_json
@@ -951,6 +955,18 @@ def path_has_symlink_component(root: Path, rel: str) -> bool:
     return False
 
 
+def task_owned_mode(root: Path) -> bool:
+    root = root.expanduser().resolve()
+    try:
+        contract = load_governance_contract(root)
+    except GovernanceContractError as exc:
+        raise ExecutionEnvelopeError(str(exc)) from exc
+    if not isinstance(contract, dict):
+        return False
+    tasks = contract.get("tasks")
+    return bool(isinstance(tasks, dict) and tasks.get("sources"))
+
+
 def direct_repository_mutation_reason(
     root: Path,
     *,
@@ -958,19 +974,11 @@ def direct_repository_mutation_reason(
     allow_scratch: bool = False,
 ) -> str | None:
     root = root.expanduser().resolve()
-    try:
-        task_set = load_resolved_task_source_set(
-            root,
-            require_current=False,
-            require_state_binding=False,
-        )
-    except TaskSourceError:
-        return None
-
-    # The existence of declared/persisted task authority means product mutation
-    # requires an active current envelope. A stale set still blocks rather than
-    # reverting silently to RC3 repository-wide mutation.
-    if not task_set.get("tasks") and not task_set.get("sources"):
+    # Repository-declared TaskSources switch product mutation into task-owned
+    # mode even before the sources have been resolved. Unresolved/stale task
+    # authority must block, never silently fall back to RC3 repository-wide
+    # mutation authority.
+    if not task_owned_mode(root):
         return None
 
     try:
