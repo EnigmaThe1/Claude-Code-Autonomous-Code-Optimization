@@ -51,7 +51,16 @@ from task_sources import (
     load_resolved_task_source_set,
     resolve_task_sources,
 )
-from task_workspace import begin_task_workspace, load_active_task_workspace
+from task_acceptance import (
+    TaskAcceptanceError,
+    reconcile_task_candidate,
+    seal_task_candidate,
+)
+from task_workspace import (
+    begin_task_workspace,
+    candidate_ref_for_workspace,
+    load_active_task_workspace,
+)
 from workspace_recovery import promote_fast_forward
 
 
@@ -1552,6 +1561,254 @@ def test_p4_post_batch_unexpected_git_ref_becomes_durable_block(monkeypatch):
         ).exists()
 
         _run(primary, "git", "branch", "-D", rogue_branch)
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_candidate_seal_keeps_task_head_at_base_and_anchors_exact_commit(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        base = record["product_base_sha"]
+
+        new_file = worktree / "src" / "task" / "candidate.txt"
+        new_file.write_text("candidate content\n")
+        result = seal_task_candidate(primary)
+
+        assert result["status"] == "CANDIDATE"
+        assert result["no_op"] is False
+        candidate = result["candidate_sha"]
+        assert candidate != base
+        assert _run(worktree, "git", "rev-parse", "HEAD").stdout.strip() == base
+        assert _run(
+            worktree, "git", "branch", "--show-current"
+        ).stdout.strip() == record["task_branch"]
+        assert not _run(
+            worktree, "git", "diff", "--cached", "--name-only"
+        ).stdout.strip()
+        assert new_file.read_text() == "candidate content\n"
+
+        parent = _run(
+            worktree,
+            "git",
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            candidate,
+        ).stdout.strip().split()
+        assert parent == [candidate, base]
+        changed = _run(
+            worktree,
+            "git",
+            "diff",
+            "--name-only",
+            base,
+            candidate,
+        ).stdout.splitlines()
+        assert changed == ["src/task/candidate.txt"]
+
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "CANDIDATE"
+        assert workspace["candidate_sha"] == candidate
+        assert workspace["candidate_ref_pending"] is False
+        candidate_ref = candidate_ref_for_workspace(workspace)
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            "--hash",
+            candidate_ref,
+        ).stdout.strip() == candidate
+
+        # Idempotent retry reconciles the already sealed exact candidate.
+        again = seal_task_candidate(primary)
+        assert again["candidate_sha"] == candidate
+
+        _run(primary, "git", "update-ref", "-d", candidate_ref)
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_candidate_scratch_only_is_verified_noop_shape_without_fake_commit(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        scratch = worktree / ".scratch" / "T1" / "runtime.txt"
+        scratch.parent.mkdir(parents=True)
+        scratch.write_text("runtime only\n")
+
+        result = seal_task_candidate(primary)
+        assert result["no_op"] is True
+        assert result["candidate_sha"] == record["product_base_sha"]
+        assert scratch.read_text() == "runtime only\n"
+
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "CANDIDATE"
+        assert workspace["no_op_candidate"] is True
+        assert workspace["candidate_ref"] is None
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            candidate_ref_for_workspace(workspace),
+            check=False,
+        ).returncode != 0
+
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_candidate_rebuilds_worker_index_package_side(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+
+        target = worktree / "src" / "task" / "existing.txt"
+        target.write_text("worker changed\n")
+        _run(worktree, "git", "add", "--", "src/task/existing.txt")
+        assert _run(
+            worktree, "git", "diff", "--cached", "--name-only"
+        ).stdout.strip() == "src/task/existing.txt"
+
+        result = seal_task_candidate(primary)
+        assert result["no_op"] is False
+        assert not _run(
+            worktree, "git", "diff", "--cached", "--name-only"
+        ).stdout.strip()
+        assert target.read_text() == "worker changed\n"
+        assert _run(
+            worktree,
+            "git",
+            "show",
+            f"{result['candidate_sha']}:src/task/existing.txt",
+        ).stdout == "worker changed\n"
+
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        _run(
+            primary,
+            "git",
+            "update-ref",
+            "-d",
+            candidate_ref_for_workspace(workspace),
+        )
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_candidate_pending_ref_crash_reconciles_exact_candidate(monkeypatch):
+    import task_acceptance as acceptance
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        target = worktree / "src" / "task" / "crash.txt"
+        target.write_text("recover me\n")
+
+        original = acceptance._reconcile_pending_candidate_ref
+
+        def crash_before_ref(*args, **kwargs):
+            raise TaskAcceptanceError("simulated crash before candidate ref")
+
+        monkeypatch.setattr(
+            acceptance,
+            "_reconcile_pending_candidate_ref",
+            crash_before_ref,
+        )
+        with pytest.raises(
+            TaskAcceptanceError,
+            match="simulated crash",
+        ):
+            acceptance.seal_task_candidate(primary)
+
+        pending = load_active_task_workspace(primary)
+        assert pending is not None
+        assert pending["lifecycle_state"] == "CANDIDATE"
+        assert pending["candidate_ref_pending"] is True
+        candidate = pending["candidate_sha"]
+        candidate_ref = candidate_ref_for_workspace(pending)
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            candidate_ref,
+            check=False,
+        ).returncode != 0
+        assert _run(
+            primary,
+            "git",
+            "cat-file",
+            "-e",
+            f"{candidate}^{{commit}}",
+            check=False,
+        ).returncode == 0
+
+        monkeypatch.setattr(
+            acceptance,
+            "_reconcile_pending_candidate_ref",
+            original,
+        )
+        reconciled = reconcile_task_candidate(primary)
+        assert reconciled["candidate_sha"] == candidate
+        assert reconciled["candidate_ref_pending"] is False
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            "--hash",
+            candidate_ref,
+        ).stdout.strip() == candidate
+        assert _run(worktree, "git", "rev-parse", "HEAD").stdout.strip() == record[
+            "product_base_sha"
+        ]
+        assert not _run(
+            worktree, "git", "diff", "--cached", "--name-only"
+        ).stdout.strip()
+
+        _run(primary, "git", "update-ref", "-d", candidate_ref)
         _run(
             primary,
             "git",
