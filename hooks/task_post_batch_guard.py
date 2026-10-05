@@ -39,6 +39,11 @@ from execution_envelope import (  # noqa: E402
     task_owned_mode,
 )
 from state_store import StateCorruptionError, load_json  # noqa: E402
+from task_workspace import (  # noqa: E402
+    TaskWorkspaceError,
+    evaluate_task_workspace_boundary,
+    mark_task_workspace_guard_failure,
+)
 
 
 _MUTATING_TOOL_NAMES = {"Write", "Edit", "NotebookEdit", "Bash"}
@@ -331,6 +336,41 @@ def main() -> int:
             )
             return 0
 
+        if (
+            os.environ.get("CLAUDE_AUTO_TASK_WORKSPACE") == "1"
+            and state_dir is not None
+        ):
+            boundary = evaluate_task_workspace_boundary(
+                authority_root,
+                task_root=root,
+                state_dir=state_dir,
+            )
+            if boundary["status"] != "VALID":
+                mark_task_workspace_guard_failure(
+                    authority_root,
+                    violations=boundary["violations"],
+                    state_dir=state_dir,
+                )
+                detail = "; ".join(
+                    f"{row['path']}: {row['reason']}"
+                    for row in boundary["violations"][:40]
+                )
+                record_task_authority_failure(
+                    root,
+                    reason=(
+                        "P4 task workspace boundary failed after tool batch: "
+                        + detail
+                    ),
+                    tool_batch=batch,
+                    state_dir=state_dir,
+                    git_state_dir=state_dir,
+                )
+                _block(
+                    "P4 task workspace boundary violation after tool batch: "
+                    + detail
+                )
+                return 0
+
         envelope = load_active_execution_envelope(
             root,
             state_dir=state_dir,
@@ -361,7 +401,7 @@ def main() -> int:
         )
         _block("ExecutionEnvelope violation after tool batch: " + summary)
         return 0
-    except ExecutionEnvelopeError as exc:
+    except (ExecutionEnvelopeError, TaskWorkspaceError) as exc:
         record_task_authority_failure(
             root,
             reason=f"task authority integrity/current-state check failed after tool batch: {exc}",
