@@ -22,6 +22,16 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from authority_set import (
+    AuthoritySetError,
+    authority_content_sha256,
+    build_authority_snapshot,
+)
+from governance_contract import (
+    GovernanceContractError,
+    load_governance_contract,
+)
+from task_spec import selector_matches_path
 from git_trust import trusted_git_env
 from execution_envelope import (
     ExecutionEnvelopeError,
@@ -249,22 +259,207 @@ def _canonical_plan_path(root: Path) -> str | None:
     return path.as_posix()
 
 
+_GOVERNANCE_CONTRACT_PATH = ".claude-auto/governance.json"
+
+
+def _planning_promotion_requirement(
+    root: Path,
+    *,
+    base_for_diff: str,
+    target: str,
+) -> dict[str, Any]:
+    if base_for_diff == target:
+        return {
+            "required": False,
+            "p5": False,
+            "base_snapshot": None,
+            "changed_paths": [],
+        }
+
+    changed = _changed_paths(root, base_for_diff, target)
+    if _GOVERNANCE_CONTRACT_PATH in changed:
+        raise ValueError(
+            "ordinary Planning Repair cannot promote a governance-contract change; "
+            "a fresh governance-authority cycle is required"
+        )
+
+    canonical = _canonical_plan_path(root)
+    required = bool(canonical and canonical in changed)
+    p5 = False
+    try:
+        base_snapshot = build_authority_snapshot(root, base_for_diff)
+    except (AuthoritySetError, OSError) as exc:
+        raise ValueError(
+            f"unable to resolve base planning authority for promotion: {exc}"
+        ) from exc
+
+    if isinstance(base_snapshot, dict):
+        base_member_paths = {
+            str(member["path"])
+            for authority_set in base_snapshot.get("sets", [])
+            if isinstance(authority_set, dict)
+            for member in authority_set.get("members", [])
+            if isinstance(member, dict) and isinstance(member.get("path"), str)
+        }
+        control_paths = {
+            str(item["path"])
+            for item in base_snapshot.get("control_surfaces", [])
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        if changed & (base_member_paths | control_paths):
+            required = True
+            if base_snapshot.get("governance_blob") is not None:
+                p5 = True
+
+        try:
+            contract = load_governance_contract(root, base_for_diff)
+        except GovernanceContractError as exc:
+            raise ValueError(
+                f"unable to resolve base governance contract for promotion: {exc}"
+            ) from exc
+        if contract is not None:
+            selectors = [
+                str(member["path"])
+                for authority_set in contract["planning_authority"]["sets"]
+                for member in authority_set["members"]
+            ]
+            for rel in changed:
+                if any(
+                    selector_matches_path(selector, rel)
+                    for selector in selectors
+                ):
+                    required = True
+                    p5 = True
+                    break
+
+    return {
+        "required": required,
+        "p5": p5,
+        "base_snapshot": base_snapshot,
+        "changed_paths": sorted(changed),
+    }
+
+
+def _sha256_metadata(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(ch in "0123456789abcdef" for ch in value.lower())
+    )
+
+
+def _verify_p5_planning_attestation(
+    root: Path,
+    *,
+    base_for_diff: str,
+    target: str,
+    attestation: dict[str, Any],
+    requirement: dict[str, Any],
+) -> None:
+    if not requirement.get("p5"):
+        return
+    metadata = attestation.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError(
+            "P5 planning promotion requires enriched planning attestation metadata"
+        )
+    envelope_sha = metadata.get("repair_envelope_sha256")
+    candidate_content = metadata.get("candidate_authority_content_sha256")
+    base_content = metadata.get("base_authority_content_sha256")
+    evidence_sha = metadata.get("candidate_authority_evidence_sha256")
+    validator_sha = metadata.get("validator_receipt_bundle_sha256")
+    reconciler_sha = metadata.get("reconciler_receipt_bundle_sha256")
+    selected = metadata.get("selected_authority_sets")
+
+    if not _sha256_metadata(envelope_sha):
+        raise ValueError(
+            "P5 planning attestation is missing a valid RepairEnvelope digest"
+        )
+    if not _sha256_metadata(candidate_content):
+        raise ValueError(
+            "P5 planning attestation is missing candidate authority-content digest"
+        )
+    if not _sha256_metadata(base_content):
+        raise ValueError(
+            "P5 planning attestation is missing base authority-content digest"
+        )
+    if not _sha256_metadata(evidence_sha):
+        raise ValueError(
+            "P5 planning attestation is missing candidate authority evidence digest"
+        )
+    if not _sha256_metadata(validator_sha):
+        raise ValueError(
+            "P5 planning attestation is missing validator receipt digest"
+        )
+    if reconciler_sha is not None and not _sha256_metadata(reconciler_sha):
+        raise ValueError(
+            "P5 planning attestation carries malformed reconciler receipt digest"
+        )
+    if (
+        not isinstance(selected, list)
+        or not selected
+        or any(not isinstance(item, str) or not item for item in selected)
+        or len(selected) != len(set(selected))
+    ):
+        raise ValueError(
+            "P5 planning attestation has invalid selected AuthoritySet identity"
+        )
+
+    base_snapshot = requirement.get("base_snapshot")
+    if not isinstance(base_snapshot, dict):
+        try:
+            base_snapshot = build_authority_snapshot(root, base_for_diff)
+        except (AuthoritySetError, OSError) as exc:
+            raise ValueError(
+                f"unable to rebuild base planning authority for attestation: {exc}"
+            ) from exc
+    if not isinstance(base_snapshot, dict):
+        raise ValueError(
+            "P5 planning attestation requires configured base AuthoritySets"
+        )
+    actual_base_content = authority_content_sha256(base_snapshot)
+    if actual_base_content != str(base_content).lower():
+        raise ValueError(
+            "P5 planning attestation base authority-content digest is stale"
+        )
+
+    try:
+        target_snapshot = build_authority_snapshot(root, target)
+    except (AuthoritySetError, OSError) as exc:
+        raise ValueError(
+            f"unable to rebuild exact target planning authority: {exc}"
+        ) from exc
+    if not isinstance(target_snapshot, dict):
+        raise ValueError(
+            "P5 planning promotion target no longer resolves configured AuthoritySets"
+        )
+    actual_target_content = authority_content_sha256(target_snapshot)
+    if actual_target_content != str(candidate_content).lower():
+        raise ValueError(
+            "P5 planning attestation candidate authority-content digest "
+            "does not match the exact promotion target"
+        )
+
+
 def _effective_attestation_contract(
     root: Path,
     *,
     base_for_diff: str,
     target: str,
     explicit: str | None,
+    requirement: dict[str, Any] | None = None,
 ) -> str | None:
-    canonical = _canonical_plan_path(root)
-    if not canonical or base_for_diff == target:
-        return explicit
-    changed = _changed_paths(root, base_for_diff, target)
-    if canonical not in changed:
+    current = requirement or _planning_promotion_requirement(
+        root,
+        base_for_diff=base_for_diff,
+        target=target,
+    )
+    if not current["required"]:
         return explicit
     if explicit and explicit != REPOSITORY_PLANNING_REPAIR_CONTRACT:
         raise ValueError(
-            "a promotion changing the configured canonical plan must use the repository planning-repair attestation contract"
+            "a promotion changing repository planning authority must use the "
+            "repository planning-repair attestation contract"
         )
     return REPOSITORY_PLANNING_REPAIR_CONTRACT
 
@@ -380,17 +575,34 @@ def promote_fast_forward(
         expected_probe = _git(root, "rev-parse", "--verify", f"{expected_remote}^{{commit}}")
         if expected_probe.returncode == 0 and expected_probe.stdout.strip():
             attestation_base = expected_probe.stdout.strip().lower()
+    planning_requirement = _planning_promotion_requirement(
+        root,
+        base_for_diff=attestation_base,
+        target=target,
+    )
     effective_contract = _effective_attestation_contract(
         root,
         base_for_diff=attestation_base,
         target=target,
         explicit=attestation_contract,
+        requirement=planning_requirement,
     )
     attestation = require_exact_attestation(
         root,
         target,
         contract=effective_contract,
     )
+    if (
+        effective_contract == REPOSITORY_PLANNING_REPAIR_CONTRACT
+        and isinstance(attestation, dict)
+    ):
+        _verify_p5_planning_attestation(
+            root,
+            base_for_diff=attestation_base,
+            target=target,
+            attestation=attestation,
+            requirement=planning_requirement,
+        )
 
     # P3 reuses this broker as the only product-promotion path. A task-owned
     # repository cannot promote product history without the exact active
