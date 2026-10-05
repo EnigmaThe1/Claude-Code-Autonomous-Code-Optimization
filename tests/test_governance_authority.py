@@ -22,7 +22,12 @@ from pathlib import Path
 
 import pytest
 
-from authority_set import AuthoritySetError, authority_status, build_authority_snapshot
+from authority_set import (
+    AuthoritySetError,
+    authority_content_sha256,
+    authority_status,
+    build_authority_snapshot,
+)
 from cli_schema import build_parser as build_cli_parser
 from governance_contract import GovernanceContractError, load_governance_contract
 from repo_identity import repo_state_dir
@@ -519,3 +524,76 @@ def test_nested_instructions_ci_and_verification_script_are_control_surfaces(mon
         verify.write_text("raise SystemExit(1)\n")
         with pytest.raises(AuthoritySetError, match="working tree differs"):
             build_authority_snapshot(root)
+
+
+def test_authority_content_digest_is_worktree_independent(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        _write_contract(root, _contract([
+            _set("default", [_member("PLAN.md")]),
+        ]))
+
+        linked = Path(td) / "linked"
+        _run(
+            root,
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "authority-content-linked",
+            str(linked),
+            "HEAD",
+        )
+        try:
+            primary = build_authority_snapshot(root)
+            secondary = build_authority_snapshot(linked)
+            assert primary is not None and secondary is not None
+
+            # P1 remains intentionally worktree/branch specific.
+            assert primary["repository_id"] != secondary["repository_id"]
+            assert primary["branch"] != secondary["branch"]
+            assert primary["snapshot_sha256"] != secondary["snapshot_sha256"]
+
+            # P5 compares only the semantic planning authority across roots.
+            assert authority_content_sha256(primary) == authority_content_sha256(
+                secondary
+            )
+        finally:
+            _run(
+                root,
+                "git",
+                "worktree",
+                "remove",
+                "--force",
+                str(linked),
+            )
+            _run(root, "git", "branch", "-D", "authority-content-linked")
+
+
+def test_authority_content_digest_changes_with_member_blob(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("one\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan one")
+        _write_contract(root, _contract([
+            _set("default", [_member("PLAN.md")]),
+        ]))
+
+        before = build_authority_snapshot(root)
+        assert before is not None
+        before_digest = authority_content_sha256(before)
+
+        (root / "PLAN.md").write_text("two\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan two")
+        after = build_authority_snapshot(root)
+        assert after is not None
+
+        assert authority_content_sha256(after) != before_digest
