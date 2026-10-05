@@ -375,8 +375,14 @@ def prepare_execution_envelope(
     task_record: dict[str, Any],
     task_source_set: dict[str, Any],
     state: dict[str, Any],
+    authority_root: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
+    authority_check_root = (
+        authority_root.expanduser().resolve()
+        if authority_root is not None
+        else root
+    )
     task = task_record.get("task")
     if not isinstance(task, dict):
         raise ExecutionEnvelopeError("selected TaskSpec record is malformed")
@@ -402,7 +408,7 @@ def prepare_execution_envelope(
         )
 
     try:
-        snapshot = build_authority_snapshot(root)
+        snapshot = build_authority_snapshot(authority_check_root)
     except AuthoritySetError as exc:
         raise ExecutionEnvelopeError(str(exc)) from exc
     if not isinstance(snapshot, dict):
@@ -511,8 +517,14 @@ def load_active_execution_envelope(
     require_current: bool = True,
     require_head: bool = True,
     state_dir: Path | None = None,
+    authority_root: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
+    authority_check_root = (
+        authority_root.expanduser().resolve()
+        if authority_root is not None
+        else root
+    )
     state_root = _state_root(root, state_dir)
     state = load_json(state_root / "state.json", {})
     if not isinstance(state, dict):
@@ -547,6 +559,7 @@ def load_active_execution_envelope(
             require_current=require_current,
             require_state_binding=True,
             state_dir=state_root,
+            authority_root=authority_check_root,
         )
     except TaskSourceError as exc:
         raise ExecutionEnvelopeError(str(exc)) from exc
@@ -574,7 +587,7 @@ def load_active_execution_envelope(
         if _digest(accepted) != semantic["accepted_tasks_sha256"]:
             raise ExecutionEnvelopeError("accepted-task state changed since activation")
         try:
-            snapshot = build_authority_snapshot(root)
+            snapshot = build_authority_snapshot(authority_check_root)
         except AuthoritySetError as exc:
             raise ExecutionEnvelopeError(str(exc)) from exc
         if not isinstance(snapshot, dict) or snapshot.get("snapshot_sha256") != semantic["authority_snapshot_sha256"]:
