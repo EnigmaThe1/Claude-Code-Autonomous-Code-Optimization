@@ -829,20 +829,47 @@ def record_task_authority_failure(
     state = load_json(repo_state_dir(root) / "state.json", {})
     if not isinstance(state, dict):
         state = {}
+
+    envelope_sha = str(state.get("active_execution_envelope_sha256") or "unbound")
+    task_id = str(state.get("active_task_id") or "unbound")
+    product_base = "unknown"
+
+    # Current-authority checks may be failing precisely because HEAD or another
+    # bound input moved. Preserve the original envelope identity for audit only
+    # when the persisted envelope's own semantic digest is still valid. This
+    # does not authorise anything and does not relax the fail-closed decision.
+    path = _envelope_path(root)
+    if path.exists():
+        try:
+            raw = _read_json_exact(path, label="active ExecutionEnvelope")
+            semantic = _semantic_from_record(raw)
+            semantic_digest = _digest(semantic)
+            if semantic_digest == raw.get("execution_envelope_sha256"):
+                envelope_sha = semantic_digest
+                task_id = str(semantic.get("task_id") or task_id)
+                product_base = str(
+                    semantic.get("product_base_sha") or product_base
+                )
+        except ExecutionEnvelopeError:
+            pass
+
     try:
         observed_head = git_head(root)
     except ExecutionEnvelopeError:
         observed_head = "unknown"
+    try:
+        workspace_state_sha256 = _digest(capture_workspace_baseline(root))
+    except ExecutionEnvelopeError:
+        workspace_state_sha256 = "unavailable"
+
     core = {
         "schema_version": 1,
-        "execution_envelope_sha256": str(
-            state.get("active_execution_envelope_sha256") or "unbound"
-        ),
-        "task_id": str(state.get("active_task_id") or "unbound"),
-        "product_base_sha": "unknown",
+        "execution_envelope_sha256": envelope_sha,
+        "task_id": task_id,
+        "product_base_sha": product_base,
         "observed_head": observed_head,
         "violations": [{"path": "AUTHORITY", "reason": str(reason)[:2000]}],
-        "workspace_state_sha256": "unavailable",
+        "workspace_state_sha256": workspace_state_sha256,
         "tool_batch": tool_batch if isinstance(tool_batch, dict) else {},
     }
     record = {
