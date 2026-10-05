@@ -21,6 +21,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from accepted_task import AcceptedTaskError, load_accepted_task_record
 from execution_envelope import (
     ExecutionEnvelopeError,
     _envelope_path,
@@ -93,15 +94,43 @@ def _accepted_record_valid(
     accepted: Any,
     task_record: dict[str, Any],
     current_base: str,
+    state_dir: Path | None = None,
 ) -> tuple[bool, str]:
     if not isinstance(accepted, dict):
         return False, "no durable accepted-task record"
     expected_sha = task_record.get("task_spec_sha256")
     if accepted.get("task_spec_sha256") != expected_sha:
         return False, "accepted-task record is for a different TaskSpec digest"
+    acceptance_sha = accepted.get("acceptance_sha256")
+    if not isinstance(acceptance_sha, str) or len(acceptance_sha) != 64:
+        return False, "accepted-task compact index has no acceptance record digest"
+
+    task = task_record.get("task")
+    task_id = task.get("id") if isinstance(task, dict) else None
+    if not isinstance(task_id, str) or not task_id:
+        return False, "current TaskSpec identity is malformed"
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(root)
+    )
+    try:
+        full = load_accepted_task_record(state_root, task_id)
+    except AcceptedTaskError as exc:
+        return False, str(exc)
+    if full.get("acceptance_sha256") != acceptance_sha:
+        return False, "accepted-task compact index digest does not match full record"
+    if full.get("task_id") != task_id:
+        return False, "AcceptedTaskRecord task ID does not match current dependency"
+    if full.get("task_spec_sha256") != expected_sha:
+        return False, "AcceptedTaskRecord is for a different TaskSpec digest"
     product_sha = accepted.get("accepted_product_sha")
-    if not isinstance(product_sha, str) or not product_sha:
-        return False, "accepted-task record has no accepted product SHA"
+    if (
+        not isinstance(product_sha, str)
+        or not product_sha
+        or full.get("accepted_product_sha") != product_sha.lower()
+    ):
+        return False, "accepted-task product SHA does not match full record"
     probe = _git(root, "rev-parse", "--verify", f"{product_sha}^{{commit}}")
     if probe.returncode != 0:
         return False, "accepted-task product SHA is unavailable in local Git history"
@@ -150,6 +179,7 @@ def task_readiness(
             accepted=accepted_tasks.get(task_id),
             task_record=row,
             current_base=base,
+            state_dir=state_dir,
         )
         if own_ok:
             result[task_id] = {
@@ -173,6 +203,7 @@ def task_readiness(
                 accepted=accepted_tasks.get(dependency),
                 task_record=dep_row,
                 current_base=base,
+                state_dir=state_dir,
             )
             if not valid:
                 blockers.append({
