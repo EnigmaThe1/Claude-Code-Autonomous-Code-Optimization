@@ -417,6 +417,29 @@ def _resolve_control_surfaces(
     return [records[path] for path in sorted(records)]
 
 
+def planning_repair_control_selectors(
+    root: Path,
+    ref: str = "HEAD",
+) -> list[str]:
+    """Selectors for control/config/executable state P5 may never edit directly."""
+    root = root.expanduser().resolve()
+    commit = _rev(root, ref)
+    tree = _tree(root, commit)
+    try:
+        contract = load_governance_contract(root, commit)
+    except GovernanceContractError as exc:
+        raise AuthoritySetError(str(exc)) from exc
+    if contract is None:
+        return []
+
+    selectors = set(_MANDATORY_CONTROL_SELECTORS)
+    selectors.update(contract.get("control_surfaces", []))
+    selectors.update(_helper_executable_selectors(contract))
+    # Verification command discovery yields exact existing repository paths.
+    selectors.update(_verification_control_selectors(root, tree))
+    return sorted(selectors)
+
+
 def planning_repair_control_paths(
     root: Path,
     ref: str = "HEAD",
@@ -431,19 +454,9 @@ def planning_repair_control_paths(
     root = root.expanduser().resolve()
     commit = _rev(root, ref)
     tree = _tree(root, commit)
-    try:
-        contract = load_governance_contract(root, commit)
-    except GovernanceContractError as exc:
-        raise AuthoritySetError(str(exc)) from exc
-    if contract is None:
-        return []
-
-    selectors = set(_MANDATORY_CONTROL_SELECTORS)
-    selectors.update(contract.get("control_surfaces", []))
-    selectors.update(_helper_executable_selectors(contract))
-    selectors.update(_verification_control_selectors(root, tree))
+    selectors = planning_repair_control_selectors(root, commit)
     paths: set[str] = set()
-    for selector in sorted(selectors):
+    for selector in selectors:
         for entry in _resolve_selector(selector, tree, required=False):
             paths.add(unicodedata.normalize("NFC", entry["path"]))
     return sorted(paths)
