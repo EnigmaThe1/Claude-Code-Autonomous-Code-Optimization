@@ -819,6 +819,43 @@ def record_task_violation(
     return record
 
 
+def record_task_authority_failure(
+    root: Path,
+    *,
+    reason: str,
+    tool_batch: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    root = root.expanduser().resolve()
+    state = load_json(repo_state_dir(root) / "state.json", {})
+    if not isinstance(state, dict):
+        state = {}
+    try:
+        observed_head = git_head(root)
+    except ExecutionEnvelopeError:
+        observed_head = "unknown"
+    core = {
+        "schema_version": 1,
+        "execution_envelope_sha256": str(
+            state.get("active_execution_envelope_sha256") or "unbound"
+        ),
+        "task_id": str(state.get("active_task_id") or "unbound"),
+        "product_base_sha": "unknown",
+        "observed_head": observed_head,
+        "violations": [{"path": "AUTHORITY", "reason": str(reason)[:2000]}],
+        "workspace_state_sha256": "unavailable",
+        "tool_batch": tool_batch if isinstance(tool_batch, dict) else {},
+    }
+    record = {
+        **core,
+        "violation_sha256": _digest(core),
+        "recorded_at": utcnow(),
+    }
+    path = _violation_path(root)
+    ensure_private_dir(path.parent)
+    json_dump(path, record)
+    return record
+
+
 def load_task_violation(root: Path) -> dict[str, Any] | None:
     root = root.expanduser().resolve()
     path = _violation_path(root)
