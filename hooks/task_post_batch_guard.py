@@ -208,6 +208,18 @@ def main() -> int:
     if not root_raw:
         return 0
     root = Path(root_raw).expanduser().resolve()
+    state_dir_raw = os.environ.get("CLAUDE_AUTONOMY_STATE_DIR")
+    state_dir = (
+        Path(state_dir_raw).expanduser().resolve()
+        if state_dir_raw
+        else None
+    )
+    authority_raw = os.environ.get("CLAUDE_AUTO_AUTHORITY_ROOT")
+    authority_root = (
+        Path(authority_raw).expanduser().resolve()
+        if authority_raw
+        else root
+    )
 
     try:
         event = json.load(sys.stdin)
@@ -232,6 +244,7 @@ def main() -> int:
             root,
             reason=f"unable to resolve task-owned governance after tool batch: {exc}",
             tool_batch=batch,
+            state_dir=state_dir,
         )
         _block(f"Task governance could not be verified after the tool batch: {exc}")
         return 0
@@ -239,7 +252,6 @@ def main() -> int:
     if not governed:
         return 0
 
-    state_dir_raw = os.environ.get("CLAUDE_AUTONOMY_STATE_DIR")
     envelope_file = (
         Path(state_dir_raw).expanduser().resolve()
         / "tasks"
@@ -276,6 +288,7 @@ def main() -> int:
                 f"envelope_exists={envelope_exists})"
             ),
             tool_batch=batch,
+            state_dir=state_dir,
         )
         _block(
             "Durable active-task binding and ExecutionEnvelope storage disagree."
@@ -304,7 +317,7 @@ def main() -> int:
         return 0
 
     try:
-        existing = load_task_violation(root)
+        existing = load_task_violation(root, state_dir=state_dir)
         if existing is not None:
             _block(
                 "An unresolved task-envelope violation is already recorded; "
@@ -312,7 +325,11 @@ def main() -> int:
             )
             return 0
 
-        envelope = load_active_execution_envelope(root)
+        envelope = load_active_execution_envelope(
+            root,
+            state_dir=state_dir,
+            authority_root=authority_root,
+        )
         result = evaluate_active_workspace(root, envelope=envelope)
         if result["status"] == "VALID":
             return 0
@@ -322,6 +339,7 @@ def main() -> int:
             envelope=envelope,
             violations=result["violations"],
             tool_batch=batch,
+            state_dir=state_dir,
         )
         summary = "; ".join(
             f"{row['path']}: {row['reason']}"
@@ -334,6 +352,7 @@ def main() -> int:
             root,
             reason=f"task authority integrity/current-state check failed after tool batch: {exc}",
             tool_batch=batch,
+            state_dir=state_dir,
         )
         _block(f"Task authority failed closed after the tool batch: {exc}")
         return 0
@@ -342,6 +361,7 @@ def main() -> int:
             root,
             reason=f"unexpected PostToolBatch task guard failure: {type(exc).__name__}: {exc}",
             tool_batch=batch,
+            state_dir=state_dir,
         )
         _block(
             f"Task authority guard failed closed after the tool batch: {type(exc).__name__}"
