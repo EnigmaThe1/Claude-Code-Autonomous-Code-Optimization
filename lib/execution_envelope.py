@@ -1019,6 +1019,7 @@ def record_task_violation(
     violations: list[dict[str, Any]],
     tool_batch: dict[str, Any] | None = None,
     state_dir: Path | None = None,
+    git_state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     core = {
@@ -1026,9 +1027,14 @@ def record_task_violation(
         "execution_envelope_sha256": envelope["execution_envelope_sha256"],
         "task_id": envelope["task_id"],
         "product_base_sha": envelope["product_base_sha"],
-        "observed_head": git_head(root),
+        "observed_head": git_head(root, state_dir=git_state_dir),
         "violations": violations,
-        "workspace_state_sha256": _digest(capture_workspace_baseline(root)),
+        "workspace_state_sha256": _digest(
+            capture_workspace_baseline(
+                root,
+                state_dir=git_state_dir,
+            )
+        ),
         "tool_batch": tool_batch if isinstance(tool_batch, dict) else {},
     }
     record = {
@@ -1048,6 +1054,7 @@ def record_task_authority_failure(
     reason: str,
     tool_batch: dict[str, Any] | None = None,
     state_dir: Path | None = None,
+    git_state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     state_root = _state_root(root, state_dir)
@@ -1079,11 +1086,16 @@ def record_task_authority_failure(
             pass
 
     try:
-        observed_head = git_head(root)
+        observed_head = git_head(root, state_dir=git_state_dir)
     except ExecutionEnvelopeError:
         observed_head = "unknown"
     try:
-        workspace_state_sha256 = _digest(capture_workspace_baseline(root))
+        workspace_state_sha256 = _digest(
+            capture_workspace_baseline(
+                root,
+                state_dir=git_state_dir,
+            )
+        )
     except ExecutionEnvelopeError:
         workspace_state_sha256 = "unavailable"
 
@@ -1308,6 +1320,7 @@ def direct_repository_mutation_reason(
             root,
             state_dir=state_dir,
             authority_root=authority_root,
+            git_state_dir=state_dir,
         )
     except ExecutionEnvelopeError as exc:
         return f"task-owned repository has no current active ExecutionEnvelope: {exc}"
