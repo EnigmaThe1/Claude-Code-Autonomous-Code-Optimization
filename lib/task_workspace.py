@@ -1,0 +1,630 @@
+# Copyright 2026 Bogdan Carp (@EnigmaThe1)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Any
+
+from execution_envelope import (
+    ExecutionEnvelopeError,
+    capture_workspace_baseline,
+    git_branch,
+    git_head,
+    load_active_execution_envelope,
+)
+from git_trust import trusted_git_env
+from governance_contract import canonical_json_bytes
+from repo_identity import SupervisorLease, repo_id, repo_state_dir
+from runtime_paths import ensure_private_dir, utcnow
+from state_store import json_dump, load_json
+from task_authority import (
+    TaskAuthorityError,
+    activate_task,
+    ready_frontier,
+    task_readiness,
+)
+from task_sources import TaskSourceError, resolve_task_sources
+
+
+class TaskWorkspaceError(ValueError):
+    pass
+
+
+_SEMANTIC_KEYS = (
+    "schema_version",
+    "task_id",
+    "task_source_set_sha256",
+    "task_spec_sha256",
+    "authority_snapshot_sha256",
+    "execution_envelope_sha256",
+    "coordinator_repo_id",
+    "product_base_sha",
+    "product_branch",
+    "task_branch",
+    "task_worktree",
+    "primary_baseline_sha256",
+    "candidate_sha",
+    "verified_candidate_sha",
+    "acceptance_attestation_sha256",
+    "lifecycle_state",
+)
+
+_ALLOWED_STATES = {
+    "PREPARING",
+    "ACTIVE",
+    "CANDIDATE",
+    "VERIFYING",
+    "VERIFIED_PENDING_PROMOTION",
+    "PROMOTING",
+    "ACCEPTED_PENDING_CLEANUP",
+    "PRIMARY_DRIFT",
+    "STALE_BASE",
+    "BLOCKED",
+    "ABANDONED_PRESERVED",
+}
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _git(
+    root: Path,
+    *args: str,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        text=True,
+        capture_output=True,
+        env=trusted_git_env(root),
+    )
+
+
+def _state_root(root: Path, state_dir: Path | None = None) -> Path:
+    return (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(root)
+    )
+
+
+def _tasks_dir(state_root: Path) -> Path:
+    return ensure_private_dir(state_root / "tasks")
+
+
+def _active_path(state_root: Path) -> Path:
+    return _tasks_dir(state_root) / "workspace-active.json"
+
+
+def _workspace_parent(state_root: Path) -> Path:
+    return ensure_private_dir(_tasks_dir(state_root) / "workspaces")
+
+
+def _semantic(record: dict[str, Any]) -> dict[str, Any]:
+    missing = [key for key in _SEMANTIC_KEYS if key not in record]
+    if missing:
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord is missing semantic field(s): "
+            + ", ".join(missing)
+        )
+    out = {key: record[key] for key in _SEMANTIC_KEYS}
+    state = out["lifecycle_state"]
+    if state not in _ALLOWED_STATES:
+        raise TaskWorkspaceError(
+            f"TaskWorkspaceRecord has unknown lifecycle state: {state!r}"
+        )
+    envelope = out["execution_envelope_sha256"]
+    if state == "PREPARING":
+        if envelope is not None and (
+            not isinstance(envelope, str) or len(envelope) != 64
+        ):
+            raise TaskWorkspaceError(
+                "PREPARING TaskWorkspaceRecord envelope digest is invalid"
+            )
+    elif not isinstance(envelope, str) or len(envelope) != 64:
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord requires an ExecutionEnvelope digest"
+        )
+    return out
+
+
+def _persist(state_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    semantic = _semantic(record)
+    result = {
+        **record,
+        "task_workspace_sha256": _digest(semantic),
+        "updated_at": utcnow(),
+    }
+    json_dump(_active_path(state_root), result)
+    return result
+
+
+def _workspace_path_is_owned(state_root: Path, worktree: Path) -> bool:
+    parent = _workspace_parent(state_root).resolve()
+    target = worktree.expanduser().resolve()
+    try:
+        target.relative_to(parent)
+    except ValueError:
+        return False
+    return target != parent
+
+
+def load_active_task_workspace(
+    coordinator_root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = _state_root(coordinator_root, state_dir)
+    path = _active_path(state_root)
+    if not path.exists():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskWorkspaceError(
+            f"TaskWorkspaceRecord is unreadable or malformed: {exc}"
+        ) from exc
+    if not isinstance(record, dict):
+        raise TaskWorkspaceError("TaskWorkspaceRecord must be a JSON object")
+    semantic = _semantic(record)
+    if record.get("task_workspace_sha256") != _digest(semantic):
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord semantic integrity check failed"
+        )
+    baseline = record.get("primary_baseline")
+    if not isinstance(baseline, dict):
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord primary baseline evidence is missing"
+        )
+    if _digest(baseline) != record.get("primary_baseline_sha256"):
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord primary baseline binding is invalid"
+        )
+    worktree = Path(str(record.get("task_worktree") or ""))
+    if not _workspace_path_is_owned(state_root, worktree):
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord worktree is outside package-owned task state"
+        )
+    if record.get("coordinator_repo_id") != repo_id(coordinator_root):
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord coordinator repository identity is stale"
+        )
+    return record
+
+
+def _branch_exists(root: Path, branch: str) -> bool:
+    return (
+        _git(root, "show-ref", "--verify", f"refs/heads/{branch}").returncode
+        == 0
+    )
+
+
+def _ensure_exact_worktree(
+    coordinator_root: Path,
+    record: dict[str, Any],
+) -> Path:
+    branch = str(record["task_branch"])
+    base = str(record["product_base_sha"]).lower()
+    worktree = Path(str(record["task_worktree"])).expanduser().resolve()
+    branch_exists = _branch_exists(coordinator_root, branch)
+
+    if worktree.exists():
+        if not branch_exists:
+            raise TaskWorkspaceError(
+                "task worktree exists but its recorded task branch is missing"
+            )
+    elif branch_exists:
+        ensure_private_dir(worktree.parent)
+        cp = _git(
+            coordinator_root,
+            "worktree",
+            "add",
+            str(worktree),
+            branch,
+        )
+        if cp.returncode != 0:
+            detail = (cp.stderr or cp.stdout or "git worktree recovery failed")
+            raise TaskWorkspaceError(detail.strip()[:1600])
+    else:
+        ensure_private_dir(worktree.parent)
+        cp = _git(
+            coordinator_root,
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            str(worktree),
+            base,
+        )
+        if cp.returncode != 0:
+            detail = (cp.stderr or cp.stdout or "git worktree add failed")
+            raise TaskWorkspaceError(detail.strip()[:1600])
+
+    head = git_head(worktree)
+    current_branch = git_branch(worktree)
+    if head.lower() != base:
+        raise TaskWorkspaceError(
+            "task worktree HEAD does not match its recorded product base"
+        )
+    if current_branch != branch:
+        raise TaskWorkspaceError(
+            "task worktree is not on its exact recorded package branch"
+        )
+    status = _git(worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if status.returncode != 0:
+        detail = (status.stderr or status.stdout or "git status failed")
+        raise TaskWorkspaceError(detail.strip()[:1600])
+    if status.stdout:
+        raise TaskWorkspaceError(
+            "task worktree must be clean before ExecutionEnvelope activation"
+        )
+    return worktree
+
+
+def _primary_matches_record(
+    coordinator_root: Path,
+    record: dict[str, Any],
+) -> bool:
+    if git_head(coordinator_root).lower() != str(
+        record["product_base_sha"]
+    ).lower():
+        return False
+    if git_branch(coordinator_root) != record["product_branch"]:
+        return False
+    return (
+        _digest(capture_workspace_baseline(coordinator_root))
+        == record["primary_baseline_sha256"]
+    )
+
+
+def _state_has_active_task(state: dict[str, Any]) -> bool:
+    return any(
+        state.get(key) is not None
+        for key in (
+            "active_task_id",
+            "active_task_spec_sha256",
+            "active_execution_envelope_sha256",
+        )
+    )
+
+
+def _bind_workspace_state(
+    state_root: Path,
+    record: dict[str, Any],
+) -> None:
+    state = load_json(state_root / "state.json", {})
+    if not isinstance(state, dict):
+        raise TaskWorkspaceError("durable coordinator state is malformed")
+    state["active_task_workspace_sha256"] = record[
+        "task_workspace_sha256"
+    ]
+    state["active_task_worktree"] = record["task_worktree"]
+    state["active_task_branch"] = record["task_branch"]
+    state["task_workspace_lifecycle_state"] = record["lifecycle_state"]
+    json_dump(state_root / "state.json", state)
+
+
+def _resume_workspace(
+    coordinator_root: Path,
+    record: dict[str, Any],
+    *,
+    state_root: Path,
+) -> dict[str, Any]:
+    if not _primary_matches_record(coordinator_root, record):
+        raise TaskWorkspaceError(
+            "coordinator primary checkout changed since task workspace creation"
+        )
+
+    worktree = _ensure_exact_worktree(coordinator_root, record)
+    state = load_json(state_root / "state.json", {})
+    if not isinstance(state, dict):
+        raise TaskWorkspaceError("durable coordinator state is malformed")
+
+    if record["lifecycle_state"] == "PREPARING":
+        envelope: dict[str, Any]
+        if _state_has_active_task(state):
+            try:
+                envelope = load_active_execution_envelope(
+                    worktree,
+                    state_dir=state_root,
+                    authority_root=coordinator_root,
+                )
+            except ExecutionEnvelopeError as exc:
+                raise TaskWorkspaceError(
+                    "PREPARING task workspace has inconsistent active "
+                    f"ExecutionEnvelope state: {exc}"
+                ) from exc
+            if envelope["task_id"] != record["task_id"]:
+                raise TaskWorkspaceError(
+                    "PREPARING task workspace conflicts with another active task"
+                )
+        else:
+            try:
+                activated = activate_task(
+                    worktree,
+                    str(record["task_id"]),
+                    acquire_lease=False,
+                    state_dir=state_root,
+                    authority_root=coordinator_root,
+                )
+            except TaskAuthorityError as exc:
+                raise TaskWorkspaceError(str(exc)) from exc
+            envelope = load_active_execution_envelope(
+                worktree,
+                state_dir=state_root,
+                authority_root=coordinator_root,
+            )
+            if (
+                activated["execution_envelope_sha256"]
+                != envelope["execution_envelope_sha256"]
+            ):
+                raise TaskWorkspaceError(
+                    "activated task envelope changed during workspace activation"
+                )
+
+        record = _persist(
+            state_root,
+            {
+                **record,
+                "execution_envelope_sha256": envelope[
+                    "execution_envelope_sha256"
+                ],
+                "lifecycle_state": "ACTIVE",
+                "activated_at": utcnow(),
+            },
+        )
+        _bind_workspace_state(state_root, record)
+        return record
+
+    if record["lifecycle_state"] != "ACTIVE":
+        raise TaskWorkspaceError(
+            "task workspace begin/reuse currently requires PREPARING or ACTIVE "
+            f"state, found {record['lifecycle_state']!r}"
+        )
+
+    try:
+        envelope = load_active_execution_envelope(
+            worktree,
+            state_dir=state_root,
+            authority_root=coordinator_root,
+        )
+    except ExecutionEnvelopeError as exc:
+        raise TaskWorkspaceError(str(exc)) from exc
+    if (
+        envelope["task_id"] != record["task_id"]
+        or envelope["execution_envelope_sha256"]
+        != record["execution_envelope_sha256"]
+    ):
+        raise TaskWorkspaceError(
+            "active task workspace and ExecutionEnvelope identities disagree"
+        )
+    _bind_workspace_state(state_root, record)
+    return record
+
+
+def _task_record_index(task_set: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = task_set.get("tasks")
+    if not isinstance(rows, list):
+        raise TaskWorkspaceError("TaskSourceSet task records are malformed")
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("task"), dict)
+            or not isinstance(row["task"].get("id"), str)
+        ):
+            raise TaskWorkspaceError(
+                "TaskSourceSet contains a malformed task record"
+            )
+        out[row["task"]["id"]] = row
+    return out
+
+
+def _begin_locked(
+    coordinator_root: Path,
+    *,
+    task_id: str | None = None,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = _state_root(coordinator_root, state_dir)
+
+    existing = load_active_task_workspace(
+        coordinator_root,
+        state_dir=state_root,
+    )
+    if existing is not None:
+        if task_id is not None and task_id != existing["task_id"]:
+            raise TaskWorkspaceError(
+                "another task workspace is already active: "
+                f"{existing['task_id']!r}"
+            )
+        return _resume_workspace(
+            coordinator_root,
+            existing,
+            state_root=state_root,
+        )
+
+    state = load_json(state_root / "state.json", {})
+    if not isinstance(state, dict):
+        raise TaskWorkspaceError("durable coordinator state is malformed")
+    if _state_has_active_task(state):
+        raise TaskWorkspaceError(
+            "legacy/P3 active task authority exists without a P4 workspace; "
+            "reconcile or deactivate it before beginning a task workspace"
+        )
+
+    try:
+        task_set = resolve_task_sources(coordinator_root, persist=True)
+    except TaskSourceError as exc:
+        raise TaskWorkspaceError(str(exc)) from exc
+    if task_set.get("status") != "READY":
+        raise TaskWorkspaceError(
+            "repository TaskSources did not resolve to a READY TaskSourceSet"
+        )
+
+    state = load_json(state_root / "state.json", {})
+    if not isinstance(state, dict):
+        raise TaskWorkspaceError("durable coordinator state is malformed")
+    frontier = ready_frontier(
+        coordinator_root,
+        task_set=task_set,
+        state=state,
+        state_dir=state_root,
+        authority_root=coordinator_root,
+    )
+    if task_id is None:
+        if not frontier:
+            readiness = task_readiness(
+                coordinator_root,
+                task_set=task_set,
+                state=state,
+                state_dir=state_root,
+                authority_root=coordinator_root,
+            )
+            unresolved = [
+                key
+                for key, value in sorted(readiness.items())
+                if value.get("status") != "ACCEPTED"
+            ]
+            if not unresolved:
+                raise TaskWorkspaceError(
+                    "all current TaskSpecs are already durably accepted"
+                )
+            raise TaskWorkspaceError(
+                "no dependency-safe READY TaskSpec is available"
+            )
+        selected = frontier[0]
+    else:
+        if task_id not in frontier:
+            raise TaskWorkspaceError(
+                f"TaskSpec {task_id!r} is not in the dependency-safe READY frontier"
+            )
+        selected = task_id
+
+    index = _task_record_index(task_set)
+    task_record = index[selected]
+    product_base = str(task_set.get("product_head") or "").lower()
+    if not product_base or git_head(coordinator_root).lower() != product_base:
+        raise TaskWorkspaceError(
+            "coordinator HEAD changed since TaskSourceSet resolution"
+        )
+    product_branch = git_branch(coordinator_root)
+    if not product_branch:
+        raise TaskWorkspaceError(
+            "P4 task workspace requires a named coordinator product branch"
+        )
+
+    primary_baseline = capture_workspace_baseline(coordinator_root)
+    token = hashlib.sha256(
+        (
+            f"{repo_id(coordinator_root)}:{selected}:"
+            f"{task_record['task_spec_sha256']}:{product_base}"
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    task_branch = f"claude-auto/task/{token}"
+    worktree = (
+        _workspace_parent(state_root)
+        / token
+        / "worktree"
+    ).resolve()
+
+    if _branch_exists(coordinator_root, task_branch):
+        raise TaskWorkspaceError(
+            "stale package task branch exists without a durable workspace record: "
+            + task_branch
+        )
+    if worktree.exists():
+        raise TaskWorkspaceError(
+            "stale package task worktree exists without a durable workspace record: "
+            + str(worktree)
+        )
+
+    preparing = _persist(
+        state_root,
+        {
+            "schema_version": 1,
+            "task_id": selected,
+            "task_source_set_sha256": task_set["task_source_set_sha256"],
+            "task_spec_sha256": task_record["task_spec_sha256"],
+            "authority_snapshot_sha256": task_set[
+                "authority_snapshot_sha256"
+            ],
+            "execution_envelope_sha256": None,
+            "coordinator_repo_id": repo_id(coordinator_root),
+            "product_base_sha": product_base,
+            "product_branch": product_branch,
+            "task_branch": task_branch,
+            "task_worktree": str(worktree),
+            "primary_baseline_sha256": _digest(primary_baseline),
+            "candidate_sha": None,
+            "verified_candidate_sha": None,
+            "acceptance_attestation_sha256": None,
+            "lifecycle_state": "PREPARING",
+            "primary_baseline": primary_baseline,
+            "created_at": utcnow(),
+        },
+    )
+    _bind_workspace_state(state_root, preparing)
+    return _resume_workspace(
+        coordinator_root,
+        preparing,
+        state_root=state_root,
+    )
+
+
+def begin_task_workspace(
+    coordinator_root: Path,
+    *,
+    task_id: str | None = None,
+    acquire_lease: bool = True,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = _state_root(coordinator_root, state_dir)
+    context = (
+        SupervisorLease(state_root, coordinator_root)
+        if acquire_lease
+        else nullcontext()
+    )
+    with context:
+        return _begin_locked(
+            coordinator_root,
+            task_id=task_id,
+            state_dir=state_root,
+        )
+
+
+def task_workspace_status(
+    coordinator_root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = _state_root(coordinator_root, state_dir)
+    record = load_active_task_workspace(
+        coordinator_root,
+        state_dir=state_root,
+    )
+    return {
+        "repository": str(coordinator_root),
+        "state_dir": str(state_root),
+        "active": record,
+    }
