@@ -440,6 +440,36 @@ def reconcile_task_authority(
         return _reconcile_locked(root)
 
 
+def active_task_prompt_context(root: Path) -> dict[str, Any] | None:
+    root = root.expanduser().resolve()
+    state = _state(root)
+    if not _active_fields_present(state):
+        return None
+    try:
+        envelope = load_active_execution_envelope(root)
+        task_set = load_resolved_task_source_set(root)
+    except (ExecutionEnvelopeError, TaskSourceError) as exc:
+        raise TaskAuthorityError(str(exc)) from exc
+    row = _task_index(task_set).get(envelope["task_id"])
+    if row is None:
+        raise TaskAuthorityError(
+            "active ExecutionEnvelope task is absent from the current TaskSourceSet"
+        )
+    task = row["task"]
+    return {
+        "id": task["id"],
+        "depends_on": list(task.get("depends_on") or []),
+        "authority_sets": list(task.get("authority_sets") or []),
+        "owned_paths": list(task.get("owned_paths") or []),
+        "evidence_paths": list(task.get("evidence_paths") or []),
+        "runtime_scratch_paths": list(task.get("runtime_scratch_paths") or []),
+        "verification": list(task.get("verification") or []),
+        "task_spec_sha256": envelope["task_spec_sha256"],
+        "execution_envelope_sha256": envelope["execution_envelope_sha256"],
+        "product_base_sha": envelope["product_base_sha"],
+    }
+
+
 def ensure_supervisor_task_activation(root: Path) -> dict[str, Any]:
     """Resolve/reuse one deterministic active task while caller holds the repo lease.
 
