@@ -34,9 +34,16 @@ from repair_envelope import (
     RepairEnvelopeError,
     derive_repair_envelope,
     direct_repair_path_reason,
+    generated_repair_path_reason,
     load_repair_envelope,
     persist_repair_envelope,
 )
+from planning_helpers import (
+    PlanningHelperError,
+    HelperRunner,
+    run_planning_reconcilers,
+)
+from execution import run_repository_command
 from protocols import parse_json_protocol
 from provider_config import provider_from_args
 from repo_identity import repo_id, repo_state_dir
@@ -781,6 +788,191 @@ def run_planning_repair_architect(root: Path, args: Any) -> dict[str, Any]:
         "candidate_sha": active["candidate_sha"],
         "classification": classification,
         "summary": active["architect_summary"],
+    }
+
+
+def _tracked_planning_deletions(worktree: Path) -> set[str]:
+    cp = _git(
+        worktree,
+        "diff",
+        "--name-only",
+        "--diff-filter=D",
+        "-z",
+        "HEAD",
+        "--",
+    )
+    if cp.returncode != 0:
+        raise ValueError("unable to inspect planning repair deletions")
+    return {item for item in cp.stdout.split("\0") if item}
+
+
+def _p5_delta_path_reason(
+    coordinator_root: Path,
+    worktree: Path,
+    envelope: dict[str, Any],
+    rel: str,
+) -> tuple[str | None, str | None]:
+    direct = direct_repair_path_reason(worktree, envelope, rel)
+    if direct is None:
+        return "repairable", None
+    generated = generated_repair_path_reason(
+        coordinator_root,
+        envelope,
+        rel,
+    )
+    if generated is None:
+        return "generated", None
+    return None, (
+        f"repairable denial: {direct}; generated denial: {generated}"
+    )
+
+
+def run_planning_repair_reconcile(
+    root: Path,
+    *,
+    runner: HelperRunner = run_repository_command,
+) -> dict[str, Any]:
+    root = root.expanduser().resolve()
+    active = load_active_repair(root)
+    if not active or active.get("schema_version") != 2:
+        raise ValueError("P5 reconciliation requires an active schema-2 planning repair")
+    if active.get("status") != "RECONCILING":
+        raise ValueError(
+            "planning reconciliation requires RECONCILING state; "
+            f"found {active.get('status')!r}"
+        )
+
+    envelope = load_repair_envelope(root)
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("repair_envelope_sha256")
+        != active.get("repair_envelope_sha256")
+    ):
+        raise ValueError("active planning repair is not bound to its RepairEnvelope")
+    contracts = list(envelope.get("reconciler_contracts", []))
+    if not contracts:
+        raise ValueError("active RECONCILING repair has no reconciler contracts")
+
+    worktree = Path(active["worktree"]).expanduser().resolve()
+    base = str(active["base_sha"])
+    if _rev(worktree, "HEAD") != base:
+        raise ValueError("planning reconciler requires worktree HEAD at the exact repair base")
+
+    dirty_before = _worktree_dirty_paths(worktree)
+    if not dirty_before:
+        raise ValueError("planning reconciliation requires an Architect repair delta")
+
+    approved_deletes = set(active.get("architect_delete_paths") or [])
+    tracked_deletes = _tracked_planning_deletions(worktree)
+    for rel in sorted(dirty_before):
+        kind, denial = _p5_delta_path_reason(root, worktree, envelope, rel)
+        if denial:
+            raise ValueError(
+                f"planning reconciliation found out-of-envelope dirty path {rel}: {denial}"
+            )
+        if (
+            kind == "repairable"
+            and rel in tracked_deletes
+            and rel not in approved_deletes
+        ):
+            raise ValueError(
+                f"repairable deletion was not package-approved by the Architect protocol: {rel}"
+            )
+
+    try:
+        bundle = run_planning_reconcilers(
+            root,
+            worktree,
+            envelope,
+            runner=runner,
+        )
+    except PlanningHelperError as exc:
+        active["last_reconciliation_error"] = str(exc)[:1800]
+        active["reconciliation_failed_at"] = utcnow()
+        json_dump(_active_path(root), active)
+        raise ValueError(str(exc)) from exc
+
+    receipt_path = _repair_dir(root) / "reconciler-receipts.json"
+    json_dump(receipt_path, bundle)
+
+    dirty_after = _worktree_dirty_paths(worktree)
+    if not dirty_after:
+        raise ValueError(
+            "planning reconciliation produced no RepairEnvelope-admitted candidate delta"
+        )
+
+    output_paths = {
+        row["path"]
+        for receipt in bundle.get("receipts", [])
+        for row in receipt.get("output_state", [])
+    }
+    tracked_deletes = _tracked_planning_deletions(worktree)
+    for rel in sorted(dirty_after):
+        kind, denial = _p5_delta_path_reason(root, worktree, envelope, rel)
+        if denial:
+            raise ValueError(
+                f"planning reconciliation produced denied candidate path {rel}: {denial}"
+            )
+        if (
+            kind == "repairable"
+            and rel in tracked_deletes
+            and rel not in approved_deletes
+        ):
+            raise ValueError(
+                f"repairable deletion was not package-approved by the Architect protocol: {rel}"
+            )
+        if kind == "generated" and rel not in output_paths:
+            raise ValueError(
+                f"generated candidate path was not produced by a reconciler receipt: {rel}"
+            )
+
+    stage = _git(worktree, "add", "-A", "--", *sorted(dirty_after))
+    if stage.returncode != 0:
+        detail = (stage.stderr or stage.stdout or "git add failed").strip()
+        raise ValueError(f"unable to stage reconciled planning candidate: {detail[:1600]}")
+    commit = _git(
+        worktree,
+        "-c", "user.name=Claude Code Autonomous Optimization",
+        "-c", "user.email=claude-auto@localhost.invalid",
+        "-c", "commit.gpgSign=false",
+        "-c", "core.hooksPath=/dev/null",
+        "commit", "-m", "Repair repository planning authority",
+    )
+    if commit.returncode != 0:
+        detail = (commit.stderr or commit.stdout or "git commit failed").strip()
+        raise ValueError(detail[:1600])
+
+    candidate = _rev(worktree, "HEAD")
+    candidate_paths = _changed_paths(worktree, base, candidate)
+    for rel in sorted(candidate_paths):
+        _kind, denial = _p5_delta_path_reason(root, worktree, envelope, rel)
+        if denial:
+            raise ValueError(
+                f"reconciled candidate commit escaped RepairEnvelope at {rel}: {denial}"
+            )
+
+    active.update({
+        "status": "CANDIDATE",
+        "candidate_sha": candidate,
+        "candidate_created_at": utcnow(),
+        "verified_sha": None,
+        "reconciler_receipt_bundle_sha256": bundle[
+            "reconciler_receipt_bundle_sha256"
+        ],
+        "reconciler_receipt_path": str(receipt_path),
+        "reconciled_at": utcnow(),
+    })
+    active.pop("last_reconciliation_error", None)
+    json_dump(_active_path(root), active)
+    return {
+        "status": "candidate",
+        "candidate_sha": candidate,
+        "repair_envelope_sha256": envelope["repair_envelope_sha256"],
+        "reconciler_receipt_bundle_sha256": bundle[
+            "reconciler_receipt_bundle_sha256"
+        ],
+        "changed_paths": sorted(candidate_paths),
+        "receipts": bundle.get("receipts", []),
     }
 
 
