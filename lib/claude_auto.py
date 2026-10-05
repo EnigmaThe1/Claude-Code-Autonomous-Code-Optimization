@@ -1296,6 +1296,322 @@ def _revalidate_authoritative_plan(
     return None, 6, source_text, source_hash, state
 
 
+
+def _p4_worker_execution_context(
+    coordinator_root: Path,
+    sd: Path,
+    args: argparse.Namespace,
+    activation: dict[str, Any],
+) -> tuple[Path, dict[str, Any] | None, Path | None]:
+    if activation.get("status") != "ACTIVE":
+        return coordinator_root, None, None
+
+    workspace = load_active_task_workspace(
+        coordinator_root,
+        state_dir=sd,
+    )
+    if workspace is None:
+        raise TaskWorkspaceError(
+            "P4 supervisor reported ACTIVE without a TaskWorkspaceRecord"
+        )
+    if workspace["lifecycle_state"] != "ACTIVE":
+        raise TaskWorkspaceError(
+            "P4 worker execution requires ACTIVE lifecycle state, found "
+            f"{workspace['lifecycle_state']!r}"
+        )
+    if activation.get("task_id") != workspace["task_id"]:
+        raise TaskWorkspaceError(
+            "P4 supervisor activation and TaskWorkspaceRecord task IDs disagree"
+        )
+
+    task_root = Path(workspace["task_worktree"]).expanduser().resolve()
+    try:
+        task_context = active_task_prompt_context(
+            task_root,
+            state_dir=sd,
+            authority_root=coordinator_root,
+        )
+    except TaskAuthorityError as exc:
+        raise TaskWorkspaceError(str(exc)) from exc
+    if not isinstance(task_context, dict):
+        raise TaskWorkspaceError(
+            "P4 active task has no current worker prompt context"
+        )
+    task_context = {
+        **task_context,
+        "task_worktree": str(task_root),
+        "task_workspace_sha256": workspace["task_workspace_sha256"],
+        "prior_verifier_findings": list(
+            workspace.get("repair_findings") or []
+        )[:100],
+    }
+
+    task_profile = asdict(profile_repo(task_root))
+    task_profile.update({
+        "repo_root": str(task_root),
+        "task_workspace": True,
+        "authority_root": str(coordinator_root),
+        "semantic_protected_paths": [
+            str(coordinator_root.resolve()),
+            str(sd.resolve()),
+        ],
+    })
+    settings_dir = ensure_private_dir(sd / "tasks" / "worker-settings")
+    settings_path = (
+        settings_dir
+        / (
+            f"{workspace['task_workspace_sha256'][:20]}-"
+            f"{args.profile}-{args.memory_mode}.json"
+        )
+    )
+    json_dump(
+        settings_path,
+        make_settings(
+            sd,
+            args.memory_mode,
+            args.profile,
+            task_profile,
+            worker_permission_overrides(
+                set(getattr(args, "_permission_overrides", []) or [])
+            ),
+            permission_grants=worker_permission_grants(
+                list(getattr(args, "_permission_grants", []) or [])
+            ),
+        ),
+    )
+    return task_root, task_context, settings_path
+
+
+def _p4_advance_acceptance_checkpoint(
+    coordinator_root: Path,
+    sd: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Advance package-owned P4 states while caller holds SupervisorLease."""
+    for _ in range(12):
+        workspace = load_active_task_workspace(
+            coordinator_root,
+            state_dir=sd,
+        )
+        if workspace is None:
+            return {"status": "CLEAN"}
+
+        lifecycle = str(workspace["lifecycle_state"])
+        if lifecycle == "ACTIVE":
+            return {
+                "status": "ACTIVE",
+                "task_id": workspace["task_id"],
+                "task_worktree": workspace["task_worktree"],
+            }
+
+        if lifecycle == "CANDIDATE":
+            deterministic = verify_task_candidate_deterministic(
+                coordinator_root,
+                timeout=int(
+                    getattr(args, "verification_timeout", 900) or 900
+                ),
+                trust_repo_scripts=(
+                    bool(getattr(args, "trust_repo_scripts", False))
+                    or args.profile == "unattended"
+                ),
+                unrestricted_host=(
+                    args.profile == "unattended"
+                    or "unrestricted"
+                    in set(
+                        getattr(args, "_permission_overrides", []) or []
+                    )
+                ),
+                state_dir=sd,
+                acquire_lease=False,
+            )
+            verdict = str(deterministic.get("status") or "").upper()
+            if verdict == "PASS":
+                continue
+            if verdict == "FAIL":
+                reopened = reopen_task_candidate_for_repair(
+                    coordinator_root,
+                    findings=list(deterministic.get("findings") or []),
+                    state_dir=sd,
+                    acquire_lease=False,
+                )
+                return {
+                    "status": "REPAIR",
+                    "task_id": reopened["task_id"],
+                    "findings": deterministic.get("findings") or [],
+                }
+            return {
+                "status": "BLOCKED",
+                "task_id": workspace["task_id"],
+                "reason": (
+                    "deterministic task verification could not establish a "
+                    "safe exact-SHA result"
+                ),
+                "findings": deterministic.get("findings") or [],
+            }
+
+        if lifecycle == "VERIFYING":
+            deterministic_verdict = str(
+                workspace.get("deterministic_verification_verdict") or ""
+            ).upper()
+            if deterministic_verdict == "FAIL":
+                reopened = reopen_task_candidate_for_repair(
+                    coordinator_root,
+                    findings=list(
+                        workspace.get(
+                            "deterministic_verification_findings"
+                        )
+                        or []
+                    ),
+                    state_dir=sd,
+                    acquire_lease=False,
+                )
+                return {
+                    "status": "REPAIR",
+                    "task_id": reopened["task_id"],
+                    "findings": reopened.get("repair_findings") or [],
+                }
+            if deterministic_verdict and deterministic_verdict != "PASS":
+                return {
+                    "status": "BLOCKED",
+                    "task_id": workspace["task_id"],
+                    "reason": (
+                        "deterministic task verification is "
+                        + deterministic_verdict
+                    ),
+                    "findings": workspace.get(
+                        "deterministic_verification_findings"
+                    )
+                    or [],
+                }
+            if deterministic_verdict != "PASS":
+                deterministic = verify_task_candidate_deterministic(
+                    coordinator_root,
+                    timeout=int(
+                        getattr(args, "verification_timeout", 900) or 900
+                    ),
+                    trust_repo_scripts=(
+                        bool(getattr(args, "trust_repo_scripts", False))
+                        or args.profile == "unattended"
+                    ),
+                    unrestricted_host=(
+                        args.profile == "unattended"
+                        or "unrestricted"
+                        in set(
+                            getattr(args, "_permission_overrides", []) or []
+                        )
+                    ),
+                    state_dir=sd,
+                    acquire_lease=False,
+                )
+                if deterministic.get("status") != "PASS":
+                    continue
+
+            independent = verify_task_candidate_independent(
+                coordinator_root,
+                args,
+                state_dir=sd,
+                acquire_lease=False,
+            )
+            verdict = str(independent.get("status") or "").upper()
+            if verdict == "VERIFIED":
+                continue
+            if verdict == "REJECTED":
+                return {
+                    "status": "REPAIR",
+                    "task_id": independent.get("task_id"),
+                    "findings": independent.get("findings") or [],
+                }
+            return {
+                "status": "BLOCKED",
+                "task_id": independent.get("task_id"),
+                "reason": (
+                    independent.get("summary")
+                    or "independent Task Verifier was blocked"
+                ),
+                "findings": independent.get("findings") or [],
+            }
+
+        if lifecycle in {"VERIFIED_PENDING_PROMOTION", "PROMOTING"}:
+            accepted = accept_verified_task(
+                coordinator_root,
+                state_dir=sd,
+                acquire_lease=False,
+            )
+            status = str(accepted.get("status") or "")
+            if status == "ACCEPTED_PENDING_CLEANUP":
+                continue
+            if status == "STALE_BASE":
+                return {
+                    "status": "BLOCKED",
+                    "task_id": accepted.get("task_id"),
+                    "reason": "verified task candidate has a stale product base",
+                    "details": accepted,
+                }
+            return {
+                "status": "BLOCKED",
+                "task_id": accepted.get("task_id"),
+                "reason": (
+                    "verified task acceptance did not reach a cleanup checkpoint"
+                ),
+                "details": accepted,
+            }
+
+        if lifecycle == "ACCEPTED_PENDING_CLEANUP":
+            cleaned = cleanup_accepted_task_workspace(
+                coordinator_root,
+                state_dir=sd,
+                acquire_lease=False,
+            )
+            scheduler = str(cleaned.get("scheduler_status") or "")
+            if scheduler == "NEXT_READY":
+                return {
+                    "status": "NEXT_READY",
+                    **cleaned,
+                }
+            if scheduler == "COMPLETE":
+                return {
+                    "status": "TASKS_COMPLETE",
+                    **cleaned,
+                }
+            return {
+                "status": "BLOCKED",
+                "reason": (
+                    "post-acceptance task scheduler has unresolved blockers"
+                ),
+                **cleaned,
+            }
+
+        if lifecycle == "BLOCKED":
+            return {
+                "status": "BLOCKED",
+                "task_id": workspace["task_id"],
+                "reason": (
+                    "active P4 task workspace is durably blocked and requires "
+                    "reconciliation"
+                ),
+                "findings": (
+                    workspace.get("independent_verification_findings")
+                    or workspace.get("deterministic_verification_findings")
+                    or workspace.get("guard_violations")
+                    or []
+                ),
+            }
+
+        return {
+            "status": "BLOCKED",
+            "task_id": workspace["task_id"],
+            "reason": (
+                "P4 task workspace requires explicit reconciliation from "
+                f"lifecycle state {lifecycle}"
+            ),
+        }
+
+    return {
+        "status": "BLOCKED",
+        "reason": "P4 acceptance checkpoint exceeded bounded reconciliation steps",
+    }
+
+
 def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
     refuse_nested_claude_launch()
     root = find_repo_root(args.repo)
