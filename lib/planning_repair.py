@@ -893,8 +893,6 @@ def run_planning_repair_reconcile(
         raise ValueError("planning reconciler requires worktree HEAD at the exact repair base")
 
     dirty_before = _worktree_dirty_paths(worktree)
-    if not dirty_before:
-        raise ValueError("planning reconciliation requires an Architect repair delta")
 
     approved_deletes = set(active.get("architect_delete_paths") or [])
     tracked_deletes = _tracked_planning_deletions(worktree)
