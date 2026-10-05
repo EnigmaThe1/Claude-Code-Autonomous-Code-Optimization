@@ -132,6 +132,184 @@ def test_p4_task_operator_cli_routes_workspace_status_and_abort(monkeypatch, cap
         "operation": "P4 task workspace abort",
     }
 
+    calls.clear()
+    monkeypatch.setattr(
+        ca,
+        "begin_task_workspace",
+        lambda resolved, task_id=None: {
+            "status": "ACTIVE",
+            "task_id": task_id or "T1",
+            "task_worktree": "/tmp/task-worktree",
+        },
+    )
+    assert ca.main([
+        "tasks",
+        "begin",
+        "T1",
+        "--repo",
+        str(root),
+    ]) == 0
+    begun = json.loads(capsys.readouterr().out)
+    assert begun["status"] == "ACTIVE"
+    assert begun["task_id"] == "T1"
+    assert calls == {
+        "operator_root": root,
+        "operation": "P4 task workspace begin",
+    }
+
+    calls.clear()
+    monkeypatch.setattr(
+        ca,
+        "seal_task_candidate",
+        lambda resolved: {
+            "status": "CANDIDATE",
+            "task_id": "T1",
+            "candidate_sha": "b" * 40,
+        },
+    )
+    assert ca.main([
+        "tasks",
+        "candidate",
+        "--repo",
+        str(root),
+    ]) == 0
+    candidate = json.loads(capsys.readouterr().out)
+    assert candidate["candidate_sha"] == "b" * 40
+    assert calls == {
+        "operator_root": root,
+        "operation": "P4 task candidate sealing",
+    }
+
+    calls.clear()
+    verify_calls = []
+    monkeypatch.setattr(
+        ca,
+        "verify_task_candidate_deterministic",
+        lambda resolved, **kwargs: (
+            verify_calls.append(("deterministic", resolved, kwargs))
+            or {
+                "status": "PASS",
+                "task_id": "T1",
+                "candidate_sha": "b" * 40,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        ca,
+        "verify_task_candidate_independent",
+        lambda resolved, args: (
+            verify_calls.append(("independent", resolved, args.provider))
+            or {
+                "status": "VERIFIED",
+                "task_id": "T1",
+                "candidate_sha": "b" * 40,
+            }
+        ),
+    )
+    assert ca.main([
+        "tasks",
+        "verify",
+        "--repo",
+        str(root),
+        "--timeout",
+        "321",
+        "--trust-repo-scripts",
+    ]) == 0
+    verified = json.loads(capsys.readouterr().out)
+    assert verified["status"] == "VERIFIED"
+    assert verified["stage"] == "independent"
+    assert [row[0] for row in verify_calls] == [
+        "deterministic",
+        "independent",
+    ]
+    assert verify_calls[0][2]["timeout"] == 321
+    assert verify_calls[0][2]["trust_repo_scripts"] is True
+    assert verify_calls[1][2] == "native"
+    assert calls == {
+        "operator_root": root,
+        "operation": "P4 task candidate verification",
+    }
+
+    calls.clear()
+    verify_calls.clear()
+    monkeypatch.setattr(
+        ca,
+        "verify_task_candidate_deterministic",
+        lambda resolved, **kwargs: (
+            verify_calls.append(("deterministic", resolved, kwargs))
+            or {
+                "status": "UNVERIFIED",
+                "task_id": "T1",
+                "candidate_sha": "b" * 40,
+                "findings": ["safe execution boundary unavailable"],
+            }
+        ),
+    )
+    assert ca.main([
+        "tasks",
+        "verify",
+        "--repo",
+        str(root),
+    ]) == 2
+    unverified = json.loads(capsys.readouterr().out)
+    assert unverified["status"] == "UNVERIFIED"
+    assert unverified["stage"] == "deterministic"
+    assert [row[0] for row in verify_calls] == ["deterministic"]
+    assert calls == {
+        "operator_root": root,
+        "operation": "P4 task candidate verification",
+    }
+
+    calls.clear()
+    monkeypatch.setattr(
+        ca,
+        "accept_verified_task",
+        lambda resolved, **kwargs: {
+            "status": "ACCEPTED_PENDING_CLEANUP",
+            "task_id": "T1",
+            "candidate_sha": "b" * 40,
+            "remote": kwargs.get("remote"),
+        },
+    )
+    assert ca.main([
+        "tasks",
+        "accept",
+        "--repo",
+        str(root),
+        "--remote",
+        "origin",
+    ]) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["status"] == "ACCEPTED_PENDING_CLEANUP"
+    assert accepted["remote"] == "origin"
+    assert calls == {
+        "operator_root": root,
+        "operation": "P4 task candidate acceptance",
+    }
+
+    calls.clear()
+    monkeypatch.setattr(
+        ca,
+        "cleanup_accepted_task_workspace",
+        lambda resolved: {
+            "status": "CLEAN",
+            "scheduler_status": "COMPLETE",
+            "accepted_task_id": "T1",
+        },
+    )
+    assert ca.main([
+        "tasks",
+        "cleanup",
+        "--repo",
+        str(root),
+    ]) == 0
+    cleaned = json.loads(capsys.readouterr().out)
+    assert cleaned["scheduler_status"] == "COMPLETE"
+    assert calls == {
+        "operator_root": root,
+        "operation": "P4 accepted task cleanup",
+    }
+
 
 def test_profile_detects_python_and_js():
     with tempfile.TemporaryDirectory() as td:
