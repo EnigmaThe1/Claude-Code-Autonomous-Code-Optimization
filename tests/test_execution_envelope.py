@@ -1332,6 +1332,42 @@ def test_p4_unattended_worker_cannot_write_primary_or_mutate_git(monkeypatch):
         )
         assert _decision(json.loads(cp.stdout)) == "allow"
 
+        task_governance_write = {
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(
+                    worktree / ".claude-auto" / "governance.json"
+                ),
+                "content": "{}\n",
+            },
+        }
+        cp = subprocess.run(
+            [sys.executable, str(WRITE_GUARD)],
+            input=json.dumps(task_governance_write),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        assert _decision(json.loads(cp.stdout)) == "deny"
+
+        coordinator_state_write = {
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(coordinator_state / "state.json"),
+                "content": "{}\n",
+            },
+        }
+        cp = subprocess.run(
+            [sys.executable, str(WRITE_GUARD)],
+            input=json.dumps(coordinator_state_write),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        assert _decision(json.loads(cp.stdout)) == "deny"
+
         git_add = {
             "tool_name": "Bash",
             "tool_input": {"command": "git add src/task/existing.txt"},
