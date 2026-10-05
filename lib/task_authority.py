@@ -116,14 +116,18 @@ def task_readiness(
     *,
     task_set: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
+    state_dir: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     root = root.expanduser().resolve()
     try:
-        current_set = task_set or load_resolved_task_source_set(root)
+        current_set = task_set or load_resolved_task_source_set(
+            root,
+            state_dir=state_dir,
+        )
     except TaskSourceError as exc:
         raise TaskAuthorityError(str(exc)) from exc
     if state is None:
-        state = load_json(repo_state_dir(root) / "state.json", {})
+        state = _state(root, state_dir=state_dir)
     if not isinstance(state, dict):
         raise TaskAuthorityError("durable repository state is malformed")
 
@@ -187,8 +191,14 @@ def ready_frontier(
     *,
     task_set: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
+    state_dir: Path | None = None,
 ) -> list[str]:
-    readiness = task_readiness(root, task_set=task_set, state=state)
+    readiness = task_readiness(
+        root,
+        task_set=task_set,
+        state=state,
+        state_dir=state_dir,
+    )
     return [
         task_id
         for task_id in sorted(readiness)
@@ -196,8 +206,17 @@ def ready_frontier(
     ]
 
 
-def _state(root: Path) -> dict[str, Any]:
-    value = load_json(repo_state_dir(root) / "state.json", {})
+def _state(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(root)
+    )
+    value = load_json(state_root / "state.json", {})
     if not isinstance(value, dict):
         raise TaskAuthorityError("durable repository state is malformed")
     return value
@@ -214,25 +233,43 @@ def _active_fields_present(state: dict[str, Any]) -> bool:
     )
 
 
-def _ensure_no_orphan_authority(root: Path, state: dict[str, Any]) -> None:
-    envelope_exists = _envelope_path(root).exists()
+def _ensure_no_orphan_authority(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    state_dir: Path | None = None,
+) -> None:
+    envelope_exists = _envelope_path(root, state_dir=state_dir).exists()
     if envelope_exists and not _active_fields_present(state):
         raise TaskAuthorityError(
             "an orphaned ExecutionEnvelope exists without durable active-task binding; run tasks reconcile"
         )
-    if _violation_path(root).exists() and not _active_fields_present(state):
+    if _violation_path(root, state_dir=state_dir).exists() and not _active_fields_present(state):
         raise TaskAuthorityError(
             "an orphaned task violation record exists; run tasks reconcile"
         )
 
 
-def _activate_locked(root: Path, task_id: str) -> dict[str, Any]:
+def _activate_locked(
+    root: Path,
+    task_id: str,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(root)
+    )
     try:
-        task_set = load_resolved_task_source_set(root)
+        task_set = load_resolved_task_source_set(
+            root,
+            state_dir=state_root,
+        )
     except TaskSourceError as exc:
         raise TaskAuthorityError(str(exc)) from exc
-    state = _state(root)
-    _ensure_no_orphan_authority(root, state)
+    state = _state(root, state_dir=state_root)
+    _ensure_no_orphan_authority(root, state, state_dir=state_root)
     if _active_fields_present(state):
         raise TaskAuthorityError(
             f"another task is already active: {state.get('active_task_id')!r}"
@@ -243,7 +280,12 @@ def _activate_locked(root: Path, task_id: str) -> dict[str, Any]:
     if row is None:
         raise TaskAuthorityError(f"TaskSpec {task_id!r} is not present in the current TaskSourceSet")
 
-    readiness = task_readiness(root, task_set=task_set, state=state)
+    readiness = task_readiness(
+        root,
+        task_set=task_set,
+        state=state,
+        state_dir=state_root,
+    )
     status = readiness[task_id]
     if status["status"] == "ACCEPTED":
         raise TaskAuthorityError(f"TaskSpec {task_id!r} is already durably accepted")
@@ -266,20 +308,23 @@ def _activate_locked(root: Path, task_id: str) -> dict[str, Any]:
     except ExecutionEnvelopeError as exc:
         raise TaskAuthorityError(str(exc)) from exc
 
-    persist_execution_envelope(root, envelope)
+    persist_execution_envelope(root, envelope, state_dir=state_root)
     state["active_task_id"] = task_id
     state["active_task_spec_sha256"] = row["task_spec_sha256"]
     state["active_execution_envelope_sha256"] = envelope["execution_envelope_sha256"]
     state["task_authority_activated_at"] = utcnow()
     state.pop("task_authority_invalidated_reason", None)
     state.pop("task_authority_invalidated_at", None)
-    json_dump(repo_state_dir(root) / "state.json", state)
+    json_dump(state_root / "state.json", state)
 
     # Re-load through the full integrity/current-authority boundary before
     # reporting success. A crash between envelope and state persistence leaves a
     # fail-closed orphan rather than silently granting authority.
     try:
-        verified = load_active_execution_envelope(root)
+        verified = load_active_execution_envelope(
+            root,
+            state_dir=state_root,
+        )
     except ExecutionEnvelopeError as exc:
         raise TaskAuthorityError(f"persisted task activation did not verify: {exc}") from exc
 
@@ -300,15 +345,25 @@ def activate_task(
     task_id: str,
     *,
     acquire_lease: bool = True,
+    state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(root)
+    )
     context = (
-        SupervisorLease(repo_state_dir(root), root)
+        SupervisorLease(state_root, root)
         if acquire_lease
         else nullcontext()
     )
     with context:
-        return _activate_locked(root, task_id)
+        return _activate_locked(
+            root,
+            task_id,
+            state_dir=state_root,
+        )
 
 
 def _deactivate_locked(root: Path) -> dict[str, Any]:
@@ -440,14 +495,24 @@ def reconcile_task_authority(
         return _reconcile_locked(root)
 
 
-def active_task_prompt_context(root: Path) -> dict[str, Any] | None:
+def active_task_prompt_context(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any] | None:
     root = root.expanduser().resolve()
-    state = _state(root)
+    state = _state(root, state_dir=state_dir)
     if not _active_fields_present(state):
         return None
     try:
-        envelope = load_active_execution_envelope(root)
-        task_set = load_resolved_task_source_set(root)
+        envelope = load_active_execution_envelope(
+            root,
+            state_dir=state_dir,
+        )
+        task_set = load_resolved_task_source_set(
+            root,
+            state_dir=state_dir,
+        )
     except (ExecutionEnvelopeError, TaskSourceError) as exc:
         raise TaskAuthorityError(str(exc)) from exc
     row = _task_index(task_set).get(envelope["task_id"])
