@@ -1943,16 +1943,31 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
         json_dump(sd / "state.json", state)
         return 3
 
-    # P3 repository-task authority is selected by the outer supervisor, never
-    # by the worker. The caller already holds SupervisorLease.
+    # P4 repository-task authority is selected by the outer supervisor and
+    # executed only in a package-owned task worktree. The caller already holds
+    # SupervisorLease, so reconciliation must not acquire a nested lease.
     try:
-        task_activation = ensure_supervisor_task_activation(root)
-    except TaskAuthorityError as exc:
+        task_activation = _p4_prepare_supervisor_task(root, sd, args)
+    except (TaskWorkspaceError, TaskAcceptanceError) as exc:
         state = load_json(sd / "state.json", state)
         state.update({
             "status": "BLOCKED",
             "last_result_status": "BLOCKED",
-            "blocker": f"Task authority activation blocked: {exc}",
+            "blocker": f"P4 task workspace activation blocked: {exc}",
+            "updated_at": utcnow(),
+        })
+        json_dump(sd / "state.json", state)
+        print(state["blocker"], file=sys.stderr)
+        return 3
+    if task_activation.get("status") == "BLOCKED":
+        state = load_json(sd / "state.json", state)
+        state.update({
+            "status": "BLOCKED",
+            "last_result_status": "BLOCKED",
+            "blocker": str(
+                task_activation.get("reason")
+                or "P4 task workspace preparation is blocked"
+            )[:2000],
             "updated_at": utcnow(),
         })
         json_dump(sd / "state.json", state)
@@ -2003,17 +2018,31 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
             return 4
         cycle = int(state.get("cycle", 0)) + 1
         try:
-            cycle_task_activation = ensure_supervisor_task_activation(root)
-            task_context = (
-                active_task_prompt_context(root)
-                if cycle_task_activation.get("status") == "ACTIVE"
-                else None
+            cycle_task_activation = _p4_prepare_supervisor_task(
+                root,
+                sd,
+                args,
             )
-        except TaskAuthorityError as exc:
+            if cycle_task_activation.get("status") == "BLOCKED":
+                raise TaskWorkspaceError(
+                    str(
+                        cycle_task_activation.get("reason")
+                        or "P4 task workspace preparation is blocked"
+                    )
+                )
+            worker_root, task_context, task_settings = (
+                _p4_worker_execution_context(
+                    root,
+                    sd,
+                    args,
+                    cycle_task_activation,
+                )
+            )
+        except (TaskWorkspaceError, TaskAcceptanceError) as exc:
             state.update({
                 "status": "BLOCKED",
                 "last_result_status": "BLOCKED",
-                "blocker": f"Task authority revalidation blocked: {exc}",
+                "blocker": f"P4 task workspace revalidation blocked: {exc}",
                 "updated_at": utcnow(),
             })
             json_dump(sd / "state.json", state)
@@ -2032,8 +2061,18 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
         )
         args._effective_max_budget_usd = effective_invocation_budget(args, state)
         cp, before, after, log, result_text, session_id, raw_obj = _run_one_goal(
-            root=root, sd=sd, args=args, prompt=prompt, env=main_env, provider_detail=main_provider,
-            model=args.model, verifier_model=args.verifier_model, researcher_model=args.researcher_model, cycle=cycle,
+            root=worker_root,
+            sd=sd,
+            args=args,
+            prompt=prompt,
+            env=main_env,
+            provider_detail=main_provider,
+            model=args.model,
+            verifier_model=args.verifier_model,
+            researcher_model=args.researcher_model,
+            cycle=cycle,
+            settings_path_override=task_settings,
+            force_hermetic_settings=task_settings is not None,
         )
         effective_env = main_env
         effective_provider_detail = main_provider
@@ -2061,8 +2100,18 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
             fb_researcher = getattr(args, "fallback_researcher_model", None)
             print(f"Goal round {cycle}: {log.get('outcome')} on main route; retrying through {fb_detail['provider']}:{args.fallback_model}")
             cp, before, after, log, result_text, session_id, raw_obj = _run_one_goal(
-                root=root, sd=sd, args=args, prompt=prompt, env=fb_env, provider_detail=fb_detail,
-                model=args.fallback_model, verifier_model=fb_verifier, researcher_model=fb_researcher, cycle=cycle,
+                root=worker_root,
+                sd=sd,
+                args=args,
+                prompt=prompt,
+                env=fb_env,
+                provider_detail=fb_detail,
+                model=args.fallback_model,
+                verifier_model=fb_verifier,
+                researcher_model=fb_researcher,
+                cycle=cycle,
+                settings_path_override=task_settings,
+                force_hermetic_settings=task_settings is not None,
             )
             effective_env = fb_env
             effective_provider_detail = fb_detail
