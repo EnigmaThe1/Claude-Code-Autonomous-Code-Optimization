@@ -646,12 +646,25 @@ def test_settings_install_post_batch_guard_for_every_runtime_profile(monkeypatch
         profile = {"repo_root": str(root), "languages": [], "container_files": []}
         for name in ("balanced", "strict", "isolated-full", "unattended"):
             rendered = make_settings(Path(state), "external", name, profile)
-            hooks = rendered.get("hooks", {}).get("PostToolBatch", [])
-            assert any(
-                "task_post_batch_guard.py" in hook.get("command", "")
-                for group in hooks
+            post_groups = rendered.get("hooks", {}).get("PostToolBatch", [])
+            post_hooks = [
+                hook
+                for group in post_groups
                 for hook in group.get("hooks", [])
-            ), name
+                if "task_post_batch_guard.py" in hook.get("command", "")
+            ]
+            assert len(post_hooks) == 1, name
+            assert post_hooks[0]["timeout"] == 60
+
+            pre_groups = rendered.get("hooks", {}).get("PreToolUse", [])
+            write_hooks = [
+                hook
+                for group in pre_groups
+                for hook in group.get("hooks", [])
+                if "write_boundary_guard.py" in hook.get("command", "")
+            ]
+            assert len(write_hooks) == 1, name
+            assert write_hooks[0]["timeout"] == 30
 
 
 def test_task_cli_parser_exposes_p3_authority_actions():
