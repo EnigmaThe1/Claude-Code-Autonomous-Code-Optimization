@@ -177,21 +177,32 @@ def _decision(result: dict) -> str:
     return result["hookSpecificOutput"]["permissionDecision"]
 
 
-def _post_batch(root: Path, tool_names: list[str]) -> dict | None:
+def _post_batch(
+    root: Path,
+    tool_names: list[str],
+    *,
+    bash_commands: list[str] | None = None,
+) -> dict | None:
+    bash_commands = list(bash_commands or [])
+    bash_index = 0
+    calls = []
+    for index, name in enumerate(tool_names):
+        tool_input = {}
+        if name == "Bash" and bash_index < len(bash_commands):
+            tool_input = {"command": bash_commands[bash_index]}
+            bash_index += 1
+        calls.append({
+            "tool_name": name,
+            "tool_input": tool_input,
+            "tool_use_id": f"tool-{index}",
+            "tool_response": "omitted",
+        })
     event = {
         "session_id": "p3-test-session",
         "cwd": str(root),
         "permission_mode": "bypassPermissions",
         "hook_event_name": "PostToolBatch",
-        "tool_calls": [
-            {
-                "tool_name": name,
-                "tool_input": {},
-                "tool_use_id": f"tool-{index}",
-                "tool_response": "omitted",
-            }
-            for index, name in enumerate(tool_names)
-        ],
+        "tool_calls": calls,
     }
     cp = subprocess.run(
         [sys.executable, str(POST_BATCH_GUARD)],
@@ -794,4 +805,44 @@ def test_opaque_deletion_of_committed_governance_cannot_disable_task_owned_mode(
         blocked = _post_batch(root, ["Bash"])
         assert blocked and blocked["decision"] == "block"
         assert "governance" in blocked["reason"].lower()
+        assert load_task_violation(root) is not None
+
+
+def test_post_batch_recognises_only_exact_validated_promote_ff_handoff(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        activate_task(root, "T1")
+        target = _candidate_commit(root, {"src/task/promoted-by-hook.txt": "ok\n"})
+
+        result = promote_fast_forward(root, target)
+        assert result["status"] == "promoted"
+        handoff = _post_batch(
+            root,
+            ["Bash"],
+            bash_commands=[f"claude-auto promote-ff --repo . --sha {target}"],
+        )
+        assert handoff is not None
+        assert "decision" not in handoff
+        context = handoff["hookSpecificOutput"]["additionalContext"]
+        assert "intentionally invalidated" in context
+        assert "AUTONOMY_STATUS: CONTINUE" in context
+        assert load_task_violation(root) is None
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        activate_task(root, "T1")
+        target = _candidate_commit(root, {"src/task/promoted-compound.txt": "ok\n"})
+        promote_fast_forward(root, target)
+
+        blocked = _post_batch(
+            root,
+            ["Bash"],
+            bash_commands=[
+                f"touch unrelated-after.txt && claude-auto promote-ff --repo . --sha {target}"
+            ],
+        )
+        assert blocked is not None
+        assert blocked.get("decision") == "block"
         assert load_task_violation(root) is not None
