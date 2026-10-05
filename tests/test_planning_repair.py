@@ -561,6 +561,8 @@ def test_p5_multi_set_repair_envelope_requires_explicit_selection_and_captures_c
             "generate-a"
         ]
         assert ".claude-auto/governance.json" in envelope["protected_control_paths"]
+        assert "plans/main.md" not in envelope["protected_control_paths"]
+        assert "requirements.md" not in envelope["protected_control_paths"]
 
 
 def test_p5_repair_envelope_persistence_detects_semantic_tamper(monkeypatch):
