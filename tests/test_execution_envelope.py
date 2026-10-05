@@ -781,3 +781,17 @@ def test_post_batch_blocks_state_envelope_storage_disagreement_even_after_read(m
         violation = load_task_violation(root)
         assert violation is not None
         assert violation["task_id"] == "T1"
+
+
+def test_opaque_deletion_of_committed_governance_cannot_disable_task_owned_mode(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        activate_task(root, "T1")
+        governance = root / ".claude-auto" / "governance.json"
+        governance.unlink()
+
+        blocked = _post_batch(root, ["Bash"])
+        assert blocked and blocked["decision"] == "block"
+        assert "governance" in blocked["reason"].lower()
+        assert load_task_violation(root) is not None
