@@ -130,6 +130,7 @@ def build_goal_prompt(
     sd: Path | None = None,
     permission_overrides: set[str] | None = None,
     permission_grants: list[dict[str, Any]] | None = None,
+    task_context: dict[str, Any] | None = None,
 ) -> str:
     challenger = state.get("last_challenger_findings")
     plan: dict[str, Any] = {}
@@ -168,6 +169,9 @@ def build_goal_prompt(
             for grant in (permission_grants or [])
             if isinstance(grant, dict)
         ],
+        "active_repository_task": (
+            dict(task_context) if isinstance(task_context, dict) else None
+        ),
         "profile": compact_profile(prof),
     }
     plan_for_prompt = {
@@ -193,6 +197,7 @@ def build_goal_prompt(
     {_bounded_prompt_text(json.dumps(plan_for_prompt, separators=(',', ':')), 220_000, pointer=str(sd / "plans" / "current-plan.json") if sd is not None else None, label="validated implementation plan")}
 
     Work autonomously toward the objective and the currently validated plan. Reconcile current Git/repository reality and repository-local instructions first.
+    When EXTERNAL COMPACT CHECKPOINT.active_repository_task is non-null, it is the package-resolved repository TaskSpec currently authorised for product work. Work on that task only: do not self-select another repository task, widen owned/evidence/scratch paths, edit protected planning/control state, or treat free-form metadata/model reasoning as authority. The ExecutionEnvelope and hook/promotion gates remain authoritative even if prose conflicts with them.
     This is a headless run: do not invoke AskUserQuestion or tools that require interactive user input. If an interaction-only tool is denied, use a safe non-interactive alternative when possible; otherwise report the genuine external dependency instead of looping.
     Completing one subtask is not completion. If one item is blocked, continue independent useful work where dependency-safe.
     The plan is a controlled baseline, not a reason to ignore contradictory repository evidence. For trivial contained defects, perform root-cause analysis,
