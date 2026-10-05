@@ -106,6 +106,33 @@ def parse_status(text: str) -> tuple[str, str | None]:
     return status, summary
 
 
+def parse_task_result(text: str) -> dict[str, Any] | None:
+    obj = parse_json_protocol(text, "AUTONOMY_TASK_RESULT")
+    if not isinstance(obj, dict):
+        return None
+    task_id = str(obj.get("task_id") or "").strip()
+    status = str(obj.get("status") or "").strip().upper()
+    if not task_id or status not in {
+        "CONTINUE",
+        "READY_FOR_ACCEPTANCE",
+        "BLOCKED",
+    }:
+        return None
+    claims = obj.get("verification_claims")
+    if not isinstance(claims, list):
+        claims = []
+    return {
+        "task_id": task_id[:128],
+        "status": status,
+        "summary": str(obj.get("summary") or "")[:1800],
+        "verification_claims": [
+            str(item)[:1800]
+            for item in claims
+            if isinstance(item, (str, int, float, bool))
+        ][:100],
+    }
+
+
 def has_explicit_status(text: str) -> bool:
     return bool(re.search(r"AUTONOMY_STATUS:\s*(CONTINUE|COMPLETE|BLOCKED)\b", text, flags=re.I))
 
