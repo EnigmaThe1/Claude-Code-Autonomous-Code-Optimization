@@ -134,6 +134,7 @@ Allowed lifecycle states are deliberately finite:
 - `VERIFIED_PENDING_PROMOTION`
 - `PROMOTING`
 - `ACCEPTED_PENDING_CLEANUP`
+- `PRIMARY_DRIFT`
 - `STALE_BASE`
 - `BLOCKED`
 - `ABANDONED_PRESERVED`
@@ -264,7 +265,7 @@ In P4 it verifies two independent surfaces:
 1. **task root**
    - active envelope current;
    - actual task-worktree changes remain within direct-edit/scratch/baseline rules;
-   - task branch HEAD remains package-authorised;
+   - task branch HEAD remains pinned to the recorded product base while the worker/envelope is active;
 
 2. **coordinator primary root**
    - primary HEAD/branch/WIP baseline has not changed since the active task-workspace boundary.
@@ -308,7 +309,8 @@ Rules:
 - it does not create a commit, attestation or accepted-task record;
 - the package recomputes all repository evidence itself;
 - a worker's claimed SHA/path/test result is untrusted until independently reproduced;
-- while repository tasks remain unaccepted, ordinary `AUTONOMY_STATUS: COMPLETE` cannot by itself complete the overall objective.
+- while repository tasks remain unaccepted, ordinary `AUTONOMY_STATUS: COMPLETE` cannot by itself complete the overall objective;
+- in task-governed headless mode the supervisor requires the task-result record in addition to the existing autonomy status protocol; `READY_FOR_ACCEPTANCE` is treated as a supervisor checkpoint/CONTINUE boundary until package acceptance succeeds.
 
 ## 14. TaskSpec verification strings are claims, not commands
 
@@ -371,9 +373,22 @@ Runtime scratch is not staged.
 
 The package never uses `git add .` as an authority decision.
 
-## 17. Candidate commit
+## 17. Candidate commit without moving task HEAD
 
-A non-empty admitted candidate becomes one exact package-created commit on the task branch.
+A non-empty admitted candidate becomes one exact package-created commit object, but **candidate creation does not move the task-worktree branch HEAD**.
+
+P4 uses package-owned Git plumbing:
+
+1. package-owned staging builds the exact admitted index;
+2. `git write-tree` produces the exact candidate tree;
+3. `git commit-tree <tree> -p <product_base_sha>` creates one candidate commit;
+4. a package-owned ref such as `refs/claude-auto/task-candidates/<token>` is atomically updated to keep the candidate reachable;
+5. the task worktree branch/HEAD remains pinned to `product_base_sha`;
+6. the package resets only the index back to HEAD after candidate sealing, leaving admitted worktree content intact.
+
+Every candidate for the active task is therefore a one-parent exact snapshot whose parent is the same envelope/product base. A repaired candidate replaces the current candidate ref; it does not inherit an old verifier attestation.
+
+This design is required because P3 binds the active ExecutionEnvelope to the exact task-worktree HEAD/base. Moving task HEAD merely to create a verification candidate would make the envelope stale and would prevent clean repair after verifier rejection.
 
 Commit subject:
 
@@ -382,15 +397,17 @@ Commit subject:
 
 P4 may use the repository's valid configured author identity. If none is configured, it may use an explicit package identity rather than failing an otherwise valid autonomous task solely for missing local Git identity.
 
-Candidate creation must run with package Git hooks disabled.
+`write-tree`, `commit-tree` and `update-ref` are package-owned operations and run under the trusted Git policy; repository hooks are not run.
 
-After commit:
+After candidate sealing:
 
-- task branch HEAD must equal candidate SHA;
-- staged diff must be empty;
-- tracked worktree must match candidate;
+- task branch HEAD must still equal the envelope base;
+- candidate parent must equal the envelope/product base;
+- candidate tree must equal the package-staged admitted tree;
+- candidate base-to-target diff must pass P3 promotion admission;
+- tracked task-worktree content may remain as the worker's editable version of the candidate while the index is normalised back to HEAD;
 - remaining scratch/ignored outputs do not affect candidate identity;
-- candidate SHA is persisted in TaskWorkspaceRecord;
+- candidate SHA/ref are persisted in TaskWorkspaceRecord;
 - any prior verifier result is invalidated unless bound to the same candidate SHA.
 
 ## 18. Verified no-op task
@@ -542,6 +559,8 @@ If local WIP prevents a safe fast-forward, P4 keeps `VERIFIED_PENDING_PROMOTION`
 
 If the coordinator product HEAD changes before promotion and is not exactly the verified candidate, P4 does not silently rebase/cherry-pick an already verified candidate.
 
+If primary HEAD is unchanged but the primary WIP/branch baseline changes during the task, P4 enters `PRIMARY_DRIFT`; it does not guess that the drift is harmless merely because it is outside the task selectors.
+
 It enters `STALE_BASE`.
 
 The task branch/worktree/candidate/verifier evidence are preserved.
@@ -643,12 +662,13 @@ Task acceptance is not whole-objective completion.
 
 If the independent verifier returns REJECTED:
 
-- candidate commit remains on the package task branch as evidence;
+- candidate SHA/ref and verification evidence remain available for audit until superseded/archived;
 - accepted-task state is unchanged;
 - active task remains the same TaskSpec;
+- task branch HEAD remains at the original envelope base;
 - verifier findings are persisted and included in the next worker checkpoint;
-- worker may create further admitted changes;
-- package creates a new descendant candidate commit;
+- worker may continue editing the same admitted task worktree;
+- package seals a new exact candidate snapshot from the current worktree against the same base;
 - all exact-SHA verification/attestation gates rerun for the new candidate.
 
 A prior candidate's verifier attestation never transfers to a new SHA.
@@ -663,7 +683,7 @@ Safe abort cases:
 - only disposable declared runtime scratch exists: scratch may be removed with the package worktree after audit;
 - admitted product changes exist: preserve them before freeing the active workspace.
 
-A preservation mechanism may create a package-owned WIP commit/branch only after the same P3 path admission proves all preserved product changes are inside the task envelope.
+A preservation mechanism may use the same package-owned candidate plumbing to create a WIP preservation commit from admitted product changes and then anchor it under a package preservation ref/branch. The task branch itself need not move. Preservation is allowed only after the same P3 path admission proves all preserved product changes are inside the task envelope.
 
 If out-of-envelope/unknown changes exist, automatic cleanup is refused and the workspace is left preserved for operator reconciliation.
 
@@ -839,6 +859,8 @@ P4 must test at least:
 - commit subject from TaskSpec used safely;
 - missing Git identity uses explicit package fallback;
 - candidate SHA persisted and exact;
+- candidate parent is exact product base and task branch HEAD remains at base;
+- package candidate ref keeps the commit reachable without moving the task branch;
 - candidate creation disables repository hooks;
 - TaskSpec verification text resembling shell is never executed as a command;
 - explicit verification contract command is executed through existing safe boundary;
@@ -852,7 +874,7 @@ P4 must test at least:
 - verifier cannot mutate accepted-task/coordinator state;
 - verifier SHA/task mismatch rejects protocol;
 - verifier rejection returns findings to same task;
-- repaired descendant candidate invalidates old attestation;
+- repaired replacement candidate invalidates old attestation while task HEAD stays at base;
 - exact VERIFIED candidate receives task attestation;
 - unverified candidate promotion refused;
 - wrong candidate SHA promotion refused;
@@ -870,6 +892,7 @@ P4 must test at least:
 - promotion refreshes TaskSourceSet before next selection;
 - next READY task selected deterministically;
 - all accepted tasks transition outer scheduler to final whole-objective gates;
+- primary WIP/branch drift preserves candidate and enters PRIMARY_DRIFT;
 - stale product base preserves candidate and enters STALE_BASE;
 - candidate is never silently rebased under old verification;
 - clean abort removes workspace safely;
