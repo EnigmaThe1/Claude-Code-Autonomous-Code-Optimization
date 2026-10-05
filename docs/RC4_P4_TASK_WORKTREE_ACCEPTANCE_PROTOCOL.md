@@ -268,9 +268,17 @@ In P4 it verifies two independent surfaces:
    - task branch HEAD remains pinned to the recorded product base while the worker/envelope is active;
 
 2. **coordinator primary root**
-   - primary HEAD/branch/WIP baseline has not changed since the active task-workspace boundary.
+   - primary HEAD/branch/WIP baseline has not changed since the active task-workspace boundary;
 
-Any unexpected primary mutation blocks the worker round.
+3. **coordinator Git ref state**
+   - product branch ref is unchanged;
+   - task branch ref remains the exact product base;
+   - package candidate/preservation refs equal the package-persisted expected values;
+   - no unexpected ref mutation occurred during the worker batch.
+
+P4 records a deterministic relevant-ref digest/binding and refreshes it only around package-owned ref operations performed while the worker is not running.
+
+Any unexpected primary or Git-ref mutation blocks the worker round.
 
 This catches opaque subprocess attempts such as changing directory to the primary checkout and mutating it indirectly.
 
@@ -594,6 +602,8 @@ Required ordering:
 
 If the process crashes after step 4 but before step 6, resume checks durable Git truth and the exact attestation. If product HEAD already equals the verified candidate, it completes the accepted-task record idempotently rather than replaying promotion.
 
+For a VERIFIED no-op task there is no fast-forward step. P4 proves the current local product SHA still equals the verified no-op candidate/base (and, when existing remote-promotion policy requires it, that remote truth is consistent), writes the accepted-task record, transitions directly to `ACCEPTED_PENDING_CLEANUP`, then archives/invalidate/cleans the task workspace. A no-op acceptance never skips the independent verifier.
+
 ## 26. AcceptedTaskRecord v1
 
 Full semantic accepted-task evidence lives in coordinator external state.
@@ -733,18 +743,29 @@ Task acceptance never treats "the model says tests pass" as deterministic eviden
 
 ## 34. Protected Git/control state
 
-Worker-facing P4 guards continue to prohibit raw:
+Worker-facing P4 guards treat Git as read-only from the worker's authority perspective. Read-only commands such as status/diff/log/show/grep/ls-files/rev-parse may remain available, but worker-originated Git operations that mutate the index, working tree, refs, stash, notes, replacement objects, worktree registry or remotes are denied.
 
+This includes at least:
+
+- `git add/rm/mv/restore` when they mutate index/worktree state;
 - `git commit`;
 - `git push`;
 - `git merge`;
 - `git rebase`;
-- `git reset --hard`;
-- checkout/switch/branch operations that move task authority;
-- worktree administration;
+- `git cherry-pick/revert`;
+- `git reset`;
+- `git checkout/switch/branch` mutations;
+- `git tag` mutations;
+- `git update-ref`;
+- `git stash`;
+- `git notes`;
+- `git replace`;
+- `git worktree` administration;
 - direct edits to Git administrative files.
 
-Package-owned P4 Git operations run through trusted Git helpers and are not exposed as worker-granted authority.
+Package-owned P4 staging, candidate refs, worktree operations and promotion run through trusted Git helpers and are not exposed as worker-granted authority.
+
+The PostToolBatch ref binding exists as the authoritative backstop for opaque subprocesses that reach Git ref mutation without a statically recognisable command.
 
 ## 35. CLI/operator surfaces
 
@@ -843,6 +864,8 @@ P4 must test at least:
 - worker direct absolute write to primary is denied in Balanced;
 - worker direct absolute write to primary is denied in Unattended semantic mode;
 - opaque Bash mutation of primary is caught after batch;
+- opaque Git ref mutation is caught after batch even when task files remain valid;
+- worker cannot move/create package candidate refs;
 - human/out-of-band primary drift pauses task without deleting anything;
 - task worktree owned-path edit allowed;
 - task worktree evidence edit allowed;
@@ -861,6 +884,7 @@ P4 must test at least:
 - candidate SHA persisted and exact;
 - candidate parent is exact product base and task branch HEAD remains at base;
 - package candidate ref keeps the commit reachable without moving the task branch;
+- candidate-ref update is atomic and coordinator ref binding is refreshed only package-side;
 - candidate creation disables repository hooks;
 - TaskSpec verification text resembling shell is never executed as a command;
 - explicit verification contract command is executed through existing safe boundary;
