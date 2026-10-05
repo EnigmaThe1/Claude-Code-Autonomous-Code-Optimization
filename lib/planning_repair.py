@@ -470,6 +470,31 @@ def _architect_delete_paths(
     return sorted(out)
 
 
+def _clear_p5_candidate_evidence(active: dict[str, Any]) -> None:
+    for key in (
+        "validated_candidate_sha",
+        "candidate_authority_evidence_sha256",
+        "candidate_authority_content_sha256",
+        "candidate_authority_snapshot_sha256",
+        "candidate_task_source_set_sha256",
+        "candidate_authority_evidence_path",
+        "candidate_validated_at",
+        "validator_receipt_bundle_sha256",
+        "validator_receipt_path",
+        "validator_failed_at",
+        "last_validator_error",
+        "reconciler_receipt_bundle_sha256",
+        "reconciler_receipt_path",
+        "reconciled_at",
+        "verified_sha",
+        "verifier_summary",
+        "verifier_findings",
+        "verifier_attestation",
+        "verified_at",
+    ):
+        active.pop(key, None)
+
+
 def run_planning_repair_architect(root: Path, args: Any) -> dict[str, Any]:
     root = root.expanduser().resolve()
     active = load_active_repair(root) or begin_planning_repair(
@@ -686,6 +711,7 @@ def run_planning_repair_architect(root: Path, args: Any) -> dict[str, Any]:
                     f"planning repair delta is outside RepairEnvelope at {rel}: {denial}"
                 )
 
+        _clear_p5_candidate_evidence(active)
         active.update({
             "architect_classification": classification,
             "architect_summary": str(protocol.get("summary", ""))[:1800],
