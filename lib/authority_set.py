@@ -521,6 +521,45 @@ def build_authority_snapshot(root: Path, ref: str = "HEAD") -> dict[str, Any] | 
     return snapshot
 
 
+_AUTHORITY_CONTENT_KEYS = (
+    "governance_blob",
+    "source_mode",
+    "sets",
+    "task_source_contract_digest",
+    "control_surfaces",
+    "control_surface_digest",
+    "protected_paths",
+)
+
+
+def authority_content_record(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return worktree-independent semantic planning authority.
+
+    P1 snapshot_sha256 intentionally binds repository/worktree identity and,
+    for HEAD, branch identity. P5 needs a second digest that compares the
+    semantic planning content of one exact Git tree across coordinator,
+    planning-repair and verifier worktrees without weakening P1 identity.
+    """
+    if not isinstance(snapshot, dict):
+        raise AuthoritySetError("authority snapshot must be an object")
+    missing = [key for key in _AUTHORITY_CONTENT_KEYS if key not in snapshot]
+    if missing:
+        raise AuthoritySetError(
+            "authority snapshot is incomplete for content identity: "
+            + ", ".join(missing)
+        )
+    if snapshot.get("schema_version") != 1:
+        raise AuthoritySetError("unsupported authority snapshot schema")
+    return {
+        "schema_version": 1,
+        **{key: snapshot[key] for key in _AUTHORITY_CONTENT_KEYS},
+    }
+
+
+def authority_content_sha256(snapshot: dict[str, Any]) -> str:
+    return _digest(authority_content_record(snapshot))
+
+
 def authority_status(root: Path) -> dict[str, Any]:
     root = root.expanduser().resolve()
     try:
