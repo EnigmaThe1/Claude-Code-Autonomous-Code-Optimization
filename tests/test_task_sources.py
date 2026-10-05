@@ -1026,3 +1026,66 @@ def test_malformed_persisted_task_source_set_is_blocked_not_unresolved(monkeypat
         status = task_source_status(root)
         assert status["status"] == "BLOCKED"
         assert "malformed" in status["error"]
+
+
+def test_candidate_ref_resolution_is_read_only_and_does_not_replace_runtime_state(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _commit_file(
+            root,
+            "tasks/tasks.json",
+            json.dumps({"schema_version": 1, "tasks": [_task("T1")]}),
+            "initial tasks",
+        )
+        _write_governance(
+            root,
+            _contract([_json_source("tasks", "tasks/tasks.json")]),
+        )
+        persisted = resolve_task_sources(root, persist=True)
+        persisted_digest = persisted["task_source_set_sha256"]
+        state_path = repo_state_dir(root) / "state.json"
+        before_state = json.loads(state_path.read_text())
+        assert before_state["task_source_sha256"] == persisted_digest
+
+        worktree = Path(td) / "candidate"
+        _run(root, "git", "worktree", "add", "--detach", "-q", str(worktree), "HEAD")
+        try:
+            (worktree / "tasks" / "tasks.json").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "tasks": [_task("T1"), _task("T2", depends_on=["T1"])],
+                })
+                + "\n"
+            )
+            _run(worktree, "git", "add", "tasks/tasks.json")
+            _run(worktree, "git", "commit", "-qm", "candidate task ledger")
+            candidate = _run(worktree, "git", "rev-parse", "HEAD").stdout.strip()
+
+            resolved = resolve_task_sources(
+                root,
+                ref=candidate,
+                persist=False,
+            )
+            assert resolved["status"] == "READY"
+            assert resolved["product_head"] == candidate
+            assert [row["task"]["id"] for row in resolved["tasks"]] == ["T1", "T2"]
+            assert resolved["task_source_set_sha256"] != persisted_digest
+
+            # Candidate validation must not replace the runtime HEAD-bound set.
+            after = load_resolved_task_source_set(root)
+            assert after["task_source_set_sha256"] == persisted_digest
+            after_state = json.loads(state_path.read_text())
+            assert after_state["task_source_sha256"] == persisted_digest
+
+            with pytest.raises(TaskSourceError, match="HEAD-only"):
+                resolve_task_sources(root, ref=candidate, persist=True)
+        finally:
+            _run(
+                root,
+                "git",
+                "worktree",
+                "remove",
+                "--force",
+                str(worktree),
+            )
