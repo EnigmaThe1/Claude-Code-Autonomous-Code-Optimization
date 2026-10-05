@@ -360,8 +360,8 @@ def _ensure_exact_worktree(
             detail = (cp.stderr or cp.stdout or "git worktree add failed")
             raise TaskWorkspaceError(detail.strip()[:1600])
 
-    head = git_head(worktree)
-    current_branch = git_branch(worktree)
+    head = git_head(worktree, state_dir=state_root)
+    current_branch = git_branch(worktree, state_dir=state_root)
     if head.lower() != base:
         raise TaskWorkspaceError(
             "task worktree HEAD does not match its recorded product base"
@@ -391,15 +391,26 @@ def _ensure_exact_worktree(
 def _primary_matches_record(
     coordinator_root: Path,
     record: dict[str, Any],
+    *,
+    state_root: Path,
 ) -> bool:
-    if git_head(coordinator_root).lower() != str(
-        record["product_base_sha"]
-    ).lower():
+    if git_head(
+        coordinator_root,
+        state_dir=state_root,
+    ).lower() != str(record["product_base_sha"]).lower():
         return False
-    if git_branch(coordinator_root) != record["product_branch"]:
+    if git_branch(
+        coordinator_root,
+        state_dir=state_root,
+    ) != record["product_branch"]:
         return False
     return (
-        _digest(capture_workspace_baseline(coordinator_root))
+        _digest(
+            capture_workspace_baseline(
+                coordinator_root,
+                state_dir=state_root,
+            )
+        )
         == record["primary_baseline_sha256"]
     )
 
@@ -437,7 +448,11 @@ def _resume_workspace(
     *,
     state_root: Path,
 ) -> dict[str, Any]:
-    if not _primary_matches_record(coordinator_root, record):
+    if not _primary_matches_record(
+        coordinator_root,
+        record,
+        state_root=state_root,
+    ):
         raise TaskWorkspaceError(
             "coordinator primary checkout changed since task workspace creation"
         )
