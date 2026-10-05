@@ -23,6 +23,7 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+from authority_set import AuthoritySetError, build_authority_snapshot
 from control_plane import _run_control_model, run_readonly_plan_agent
 from operator_authority import require_top_level_operator
 from git_trust import trusted_git_env
@@ -1732,6 +1733,29 @@ def _refresh_p5_planning_repair_base(
     if old_to_new.returncode != 0:
         raise ValueError(
             "new product base is not a descendant of the P5 planning repair base"
+        )
+
+    try:
+        old_authority_snapshot = build_authority_snapshot(root, old_base)
+        new_authority_snapshot = build_authority_snapshot(root, new_base)
+    except AuthoritySetError as exc:
+        raise ValueError(
+            f"unable to compare planning control authority across base refresh: {exc}"
+        ) from exc
+    if (
+        not isinstance(old_authority_snapshot, dict)
+        or not isinstance(new_authority_snapshot, dict)
+    ):
+        raise ValueError(
+            "P5 base refresh requires configured planning authority at old and new bases"
+        )
+    if (
+        old_authority_snapshot.get("control_surface_digest")
+        != new_authority_snapshot.get("control_surface_digest")
+    ):
+        raise ValueError(
+            "product-base advancement changed planning/helper/verification control "
+            "surface bytes; the old RepairEnvelope is invalid and automatic refresh is refused"
         )
 
     old_envelope = load_repair_envelope(root)
