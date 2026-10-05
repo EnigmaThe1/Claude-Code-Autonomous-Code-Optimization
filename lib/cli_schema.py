@@ -275,6 +275,21 @@ def build_parser(version: str) -> argparse.ArgumentParser:
     tq.add_argument("--repo")
     tq = tsp.add_parser("deactivate", help="Deactivate a task only at its exact activation baseline")
     tq.add_argument("--repo")
+    tq = tsp.add_parser(
+        "workspace-status",
+        help="Show the active P4 package-owned task workspace and lifecycle state",
+    )
+    tq.add_argument("--repo")
+    tq = tsp.add_parser(
+        "abort",
+        help="Safely abort an ACTIVE P4 task workspace, preserving admitted product work before cleanup",
+    )
+    tq.add_argument("--repo")
+    tq.add_argument(
+        "--reason",
+        default="task workspace aborted by operator",
+        help="Audit reason recorded with the P4 abort/preservation transaction",
+    )
 
     q = sp.add_parser("profile", help="Inspect or request a human-controlled hot profile switch")
     psp = q.add_subparsers(dest="profile_command", required=True)
