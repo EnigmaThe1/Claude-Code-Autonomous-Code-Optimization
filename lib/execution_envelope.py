@@ -86,17 +86,22 @@ def _git(
     root: Path,
     *args: str,
     text: bool = True,
+    state_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     return subprocess.run(
         ["git", "-C", str(root), *args],
         text=text,
         capture_output=True,
-        env=trusted_git_env(root),
+        env=trusted_git_env(root, state_dir=state_dir),
     )
 
 
-def _git_bytes(root: Path, *args: str) -> bytes:
-    cp = _git(root, *args, text=False)
+def _git_bytes(
+    root: Path,
+    *args: str,
+    state_dir: Path | None = None,
+) -> bytes:
+    cp = _git(root, *args, text=False, state_dir=state_dir)
     if cp.returncode != 0:
         detail = bytes(cp.stderr or cp.stdout or b"").decode(
             "utf-8", errors="replace"
@@ -117,23 +122,48 @@ def _decode_git_path(raw: bytes) -> str:
     return unicodedata.normalize("NFC", value)
 
 
-def _nul_paths(root: Path, *args: str) -> list[str]:
-    payload = _git_bytes(root, *args)
+def _nul_paths(
+    root: Path,
+    *args: str,
+    state_dir: Path | None = None,
+) -> list[str]:
+    payload = _git_bytes(root, *args, state_dir=state_dir)
     return sorted(
         {_decode_git_path(item) for item in payload.split(b"\0") if item},
         key=lambda item: item.encode("utf-8"),
     )
 
 
-def git_head(root: Path) -> str:
-    cp = _git(root, "rev-parse", "--verify", "HEAD^{commit}")
+def git_head(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> str:
+    cp = _git(
+        root,
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}",
+        state_dir=state_dir,
+    )
     if cp.returncode != 0 or not str(cp.stdout).strip():
         raise ExecutionEnvelopeError("task authority requires a valid Git HEAD commit")
     return str(cp.stdout).strip().lower()
 
 
-def git_branch(root: Path) -> str | None:
-    cp = _git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+def git_branch(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> str | None:
+    cp = _git(
+        root,
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD",
+        state_dir=state_dir,
+    )
     if cp.returncode == 0 and str(cp.stdout).strip():
         return str(cp.stdout).strip()
     if cp.returncode == 1:
@@ -203,17 +233,38 @@ def _records(root: Path, paths: Iterable[str]) -> list[dict[str, Any]]:
     return [_path_identity(root, rel) for rel in sorted(set(paths))]
 
 
-def capture_workspace_baseline(root: Path) -> dict[str, Any]:
+def capture_workspace_baseline(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
     root = root.expanduser().resolve()
-    head = git_head(root)
-    staged = _nul_paths(root, "diff", "--cached", "--name-only", "-z", "--")
-    unstaged = _nul_paths(root, "diff", "--name-only", "-z", "--no-ext-diff", "--")
+    head = git_head(root, state_dir=state_dir)
+    staged = _nul_paths(
+        root,
+        "diff",
+        "--cached",
+        "--name-only",
+        "-z",
+        "--",
+        state_dir=state_dir,
+    )
+    unstaged = _nul_paths(
+        root,
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-ext-diff",
+        "--",
+        state_dir=state_dir,
+    )
     untracked = _nul_paths(
         root,
         "ls-files",
         "--others",
         "--exclude-standard",
         "-z",
+        state_dir=state_dir,
     )
     baseline = {
         "schema_version": 1,
@@ -300,8 +351,18 @@ def selector_covers_subtree(selector: str, rel: str) -> bool:
     return bool(literal_prefix and (literal_prefix == rel or literal_prefix.startswith(rel + "/")))
 
 
-def _gitlinks(root: Path) -> list[str]:
-    payload = _git_bytes(root, "ls-files", "-s", "-z")
+def _gitlinks(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> list[str]:
+    payload = _git_bytes(
+        root,
+        "ls-files",
+        "-s",
+        "-z",
+        state_dir=state_dir,
+    )
     out: list[str] = []
     for record in payload.split(b"\0"):
         if not record:
@@ -319,16 +380,28 @@ def _gitlinks(root: Path) -> list[str]:
 def _task_touches_gitlink(
     root: Path,
     selectors: Iterable[str],
+    *,
+    state_dir: Path | None = None,
 ) -> str | None:
     selectors = list(selectors)
-    for gitlink in _gitlinks(root):
+    for gitlink in _gitlinks(root, state_dir=state_dir):
         if any(selector_covers_subtree(selector, gitlink) for selector in selectors):
             return gitlink
     return None
 
 
-def _sparse_checkout_enabled(root: Path) -> bool:
-    cp = _git(root, "config", "--bool", "core.sparseCheckout")
+def _sparse_checkout_enabled(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> bool:
+    cp = _git(
+        root,
+        "config",
+        "--bool",
+        "core.sparseCheckout",
+        state_dir=state_dir,
+    )
     return cp.returncode == 0 and str(cp.stdout).strip().lower() == "true"
 
 
@@ -376,6 +449,7 @@ def prepare_execution_envelope(
     task_source_set: dict[str, Any],
     state: dict[str, Any],
     authority_root: Path | None = None,
+    git_state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     authority_check_root = (
@@ -391,17 +465,17 @@ def prepare_execution_envelope(
     if not isinstance(task_id, str) or not isinstance(task_spec_sha256, str):
         raise ExecutionEnvelopeError("selected TaskSpec identity is malformed")
 
-    if git_branch(root) is None:
+    if git_branch(root, state_dir=git_state_dir) is None:
         raise ExecutionEnvelopeError(
             "task activation requires a named branch; detached HEAD is read-only in P3"
         )
-    if _sparse_checkout_enabled(root):
+    if _sparse_checkout_enabled(root, state_dir=git_state_dir):
         raise ExecutionEnvelopeError(
             "task activation is blocked for sparse checkouts in P3; required task paths may be unmaterialised"
         )
 
     expected_head = task_source_set.get("product_head")
-    current_head = git_head(root)
+    current_head = git_head(root, state_dir=git_state_dir)
     if current_head != expected_head:
         raise ExecutionEnvelopeError(
             f"task activation base changed: TaskSourceSet={expected_head}, HEAD={current_head}"
@@ -424,13 +498,20 @@ def prepare_execution_envelope(
     scratch = sorted(set(task.get("runtime_scratch_paths") or []))
     protected = sorted(set(snapshot.get("protected_paths") or []))
 
-    gitlink = _task_touches_gitlink(root, [*direct, *scratch])
+    gitlink = _task_touches_gitlink(
+        root,
+        [*direct, *scratch],
+        state_dir=git_state_dir,
+    )
     if gitlink is not None:
         raise ExecutionEnvelopeError(
             f"task selectors cross unsupported gitlink/submodule boundary: {gitlink}"
         )
 
-    baseline = capture_workspace_baseline(root)
+    baseline = capture_workspace_baseline(
+        root,
+        state_dir=git_state_dir,
+    )
     if baseline["staged_paths"]:
         raise ExecutionEnvelopeError(
             "task activation requires an empty index; pre-existing staged WIP is present: "
@@ -518,6 +599,7 @@ def load_active_execution_envelope(
     require_head: bool = True,
     state_dir: Path | None = None,
     authority_root: Path | None = None,
+    git_state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     authority_check_root = (
@@ -593,7 +675,11 @@ def load_active_execution_envelope(
         if not isinstance(snapshot, dict) or snapshot.get("snapshot_sha256") != semantic["authority_snapshot_sha256"]:
             raise ExecutionEnvelopeError("ExecutionEnvelope governance binding is stale")
 
-    if require_head and git_head(root) != semantic["product_base_sha"]:
+    if (
+        require_head
+        and git_head(root, state_dir=git_state_dir)
+        != semantic["product_base_sha"]
+    ):
         raise ExecutionEnvelopeError("repository HEAD moved away from the active ExecutionEnvelope base")
     return record
 
