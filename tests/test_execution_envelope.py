@@ -30,6 +30,7 @@ from execution_envelope import (
     load_task_violation,
     validate_staged_diff,
 )
+from git_trust import configure_trusted_excludes
 from repo_identity import repo_state_dir
 from repo_runtime import activate
 from runtime_paths import package_root
@@ -1161,6 +1162,38 @@ def test_p4_task_workspace_is_external_resumable_and_primary_wip_isolated(monkey
         loaded = load_active_task_workspace(primary)
         assert loaded is not None
         assert loaded["task_workspace_sha256"] == record["task_workspace_sha256"]
+
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_task_workspace_reuse_honours_coordinator_trusted_excludes(monkeypatch):
+    with (
+        tempfile.TemporaryDirectory() as td,
+        tempfile.TemporaryDirectory() as state,
+        tempfile.TemporaryDirectory() as operator_td,
+    ):
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        excludes = Path(operator_td) / "trusted-excludes"
+        excludes.write_text("ignored-by-p4.txt\n")
+        configure_trusted_excludes(primary, excludes)
+
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        ignored = worktree / "ignored-by-p4.txt"
+        ignored.write_text("runtime ignored output\n")
+
+        reused = begin_task_workspace(primary)
+        assert reused["task_workspace_sha256"] == record["task_workspace_sha256"]
+        assert ignored.read_text() == "runtime ignored output\n"
 
         _run(
             primary,
