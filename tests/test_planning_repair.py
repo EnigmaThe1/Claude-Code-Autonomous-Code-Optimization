@@ -18,6 +18,7 @@ from planning_repair import (
     promote_planning_repair,
     refresh_planning_repair_base,
     run_planning_repair_architect,
+    run_planning_repair_reconcile,
     verify_planning_repair,
 )
 from promotion_policy import load_promotion_attestation
@@ -832,3 +833,275 @@ def test_p5_architect_stops_at_reconciling_when_generated_members_exist(monkeypa
             "base_sha"
         ]
         assert pr._worktree_dirty_paths(worktree) == {"plans/main.md"}
+
+
+def _p5_test_runner(
+    view: Path,
+    command: list[str],
+    *,
+    timeout: int,
+    trust_repo_scripts: bool,
+    unrestricted_host: bool,
+    read_only_root: bool,
+    working_directory: Path,
+    hidden_paths: list[Path],
+    max_output_bytes: int,
+    read_allowlist_only: bool,
+) -> dict:
+    assert view.resolve() != working_directory.resolve() or working_directory == view
+    assert trust_repo_scripts is False
+    assert unrestricted_host is False
+    assert read_only_root is False
+    assert read_allowlist_only is True
+    assert hidden_paths
+    assert max_output_bytes > 0
+    cp = subprocess.run(
+        command,
+        cwd=working_directory,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    return {
+        "returncode": cp.returncode,
+        "stdout": cp.stdout,
+        "stderr": cp.stderr,
+        "timed_out": False,
+        "wall_seconds": 0.01,
+        "execution_boundary": "test-sandbox",
+        "sandboxed": True,
+        "environment_scrubbed": True,
+    }
+
+
+def _p5_reconciling_fixture(
+    root: Path,
+    *,
+    helper: dict,
+) -> tuple[dict, Path]:
+    (root / "plans").mkdir(exist_ok=True)
+    (root / "plans" / "main.md").write_text("base plan\n")
+    (root / "generated").mkdir(exist_ok=True)
+    (root / "generated" / "index.json").write_text('{"state":"base"}\n')
+    (root / "generated" / "old.json").write_text('{"old":true}\n')
+    _git(root, "add", "plans", "generated")
+    _git(root, "commit", "-qm", "planning authority files")
+    _p5_write_governance(root, _p5_contract([
+        _p5_set(
+            "a",
+            [
+                _p5_member(
+                    "plans/*.md",
+                    role="source",
+                    repair="repairable",
+                ),
+                _p5_member(
+                    "generated/*.json",
+                    role="projection",
+                    repair="generated",
+                ),
+            ],
+            reconcilers=[helper],
+        ),
+    ]))
+    active = begin_planning_repair(
+        root,
+        reason="repair and regenerate",
+        authority_sets=["a"],
+    )
+    worktree = Path(active["worktree"])
+    (worktree / "plans" / "main.md").write_text("repaired plan\n")
+    active = load_active_repair(root)
+    active.update({
+        "status": "RECONCILING",
+        "architect_delete_paths": [],
+        "architect_summary": "repair source before regeneration",
+        "candidate_sha": None,
+        "verified_sha": None,
+    })
+    json_dump(pr._active_path(root), active)
+    return active, worktree
+
+
+def test_p5_reconciler_deterministically_creates_updates_and_deletes_generated_members(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        code = (
+            "from pathlib import Path;"
+            "p=Path('plans/main.md').read_text();"
+            "Path('generated/index.json').write_text('{\"plan\":'+repr(p)+'}\\n');"
+            "Path('generated/new.json').write_text('{\"new\":true}\\n');"
+            "Path('generated/old.json').unlink()"
+        )
+        helper = _p5_helper(
+            "generate-index",
+            inputs=["plans/*.md"],
+            outputs=["generated/*.json"],
+        )
+        helper["argv"] = ["python3", "-c", code]
+        active, worktree = _p5_reconciling_fixture(root, helper=helper)
+
+        # Simulate a half-applied prior reconciliation. The package must restore
+        # generated authority to the envelope base before rerunning helpers.
+        (worktree / "generated" / "index.json").write_text('{"partial":true}\n')
+
+        seen_initial_generated: list[str] = []
+
+        def runner(*args, **kwargs):
+            view = Path(args[0])
+            seen_initial_generated.append(
+                (view / "generated" / "index.json").read_text()
+            )
+            return _p5_test_runner(*args, **kwargs)
+
+        result = run_planning_repair_reconcile(root, runner=runner)
+        assert result["status"] == "candidate"
+        assert len(seen_initial_generated) == 2
+        assert seen_initial_generated == [
+            '{"state":"base"}\n',
+            '{"state":"base"}\n',
+        ]
+        assert len(result["receipts"]) == 1
+        receipt = result["receipts"][0]
+        assert receipt["helper_id"] == "generate-index"
+        assert receipt["output_state_sha256"]
+        assert len(receipt["determinism_runs"]) == 2
+
+        active = load_active_repair(root)
+        assert active["status"] == "CANDIDATE"
+        assert active["candidate_sha"] == result["candidate_sha"]
+        assert active["reconciler_receipt_bundle_sha256"] == result[
+            "reconciler_receipt_bundle_sha256"
+        ]
+        changed = pr._changed_paths(
+            worktree,
+            active["base_sha"],
+            active["candidate_sha"],
+        )
+        assert changed == {
+            "plans/main.md",
+            "generated/index.json",
+            "generated/new.json",
+            "generated/old.json",
+        }
+        assert (worktree / "generated" / "new.json").read_text() == '{"new":true}\n'
+        assert not (worktree / "generated" / "old.json").exists()
+        assert "repaired plan" in (worktree / "generated" / "index.json").read_text()
+
+
+@pytest.mark.parametrize("capability", ["network", "read_external"])
+def test_p5_reconciler_refuses_network_or_external_read_capability(monkeypatch, capability):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        helper = _p5_helper(
+            "generate-index",
+            inputs=["plans/*.md"],
+            outputs=["generated/*.json"],
+        )
+        helper["capabilities"][capability] = ["forbidden"]
+        _active, _worktree = _p5_reconciling_fixture(root, helper=helper)
+
+        called = False
+
+        def should_not_run(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("capability-denied reconciler must not execute")
+
+        with pytest.raises(ValueError, match="does not grant"):
+            run_planning_repair_reconcile(root, runner=should_not_run)
+        assert called is False
+        assert load_active_repair(root)["status"] == "RECONCILING"
+
+
+def test_p5_reconciler_rejects_undeclared_output_mutation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        helper = _p5_helper(
+            "generate-index",
+            inputs=["plans/*.md"],
+            outputs=["generated/*.json"],
+        )
+        helper["argv"] = [
+            "python3",
+            "-c",
+            "from pathlib import Path;"
+            "Path('generated/index.json').write_text('{}\\n');"
+            "Path('escape.txt').write_text('bad\\n')",
+        ]
+        _active, worktree = _p5_reconciling_fixture(root, helper=helper)
+        before_escape = worktree / "escape.txt"
+
+        with pytest.raises(ValueError, match="undeclared output path"):
+            run_planning_repair_reconcile(root, runner=_p5_test_runner)
+        assert not before_escape.exists()
+        assert load_active_repair(root)["status"] == "RECONCILING"
+
+
+def test_p5_reconciler_rejects_output_declared_as_repairable_not_generated(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        helper = _p5_helper(
+            "bad-generator",
+            inputs=["plans/*.md"],
+            outputs=["plans/*.md"],
+        )
+        _active, _worktree = _p5_reconciling_fixture(root, helper=helper)
+
+        with pytest.raises(ValueError, match="non-generated output"):
+            run_planning_repair_reconcile(root, runner=_p5_test_runner)
+
+
+def test_p5_reconciler_rejects_nondeterministic_output_bytes(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        helper = _p5_helper(
+            "generate-index",
+            inputs=["plans/*.md"],
+            outputs=["generated/*.json"],
+        )
+        _active, worktree = _p5_reconciling_fixture(root, helper=helper)
+        calls = 0
+
+        def nondeterministic_runner(
+            view: Path,
+            command: list[str],
+            **kwargs,
+        ) -> dict:
+            nonlocal calls
+            calls += 1
+            (view / "generated" / "index.json").write_text(
+                f'{{"run":{calls}}}\\n'
+            )
+            return {
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+                "timed_out": False,
+                "wall_seconds": 0.01,
+                "execution_boundary": "test-sandbox",
+                "sandboxed": True,
+                "environment_scrubbed": True,
+            }
+
+        with pytest.raises(ValueError, match="nondeterministic"):
+            run_planning_repair_reconcile(
+                root,
+                runner=nondeterministic_runner,
+            )
+        assert calls == 2
+        # No nondeterministic temporary output may be copied into the live repair.
+        assert (worktree / "generated" / "index.json").read_text() == '{"state":"base"}\n'
+
+
+def test_p5_planning_reconcile_cli_surface_exists():
+    from cli_schema import build_parser
+
+    args = build_parser("test").parse_args(["planning-repair", "reconcile"])
+    assert args.planning_repair_command == "reconcile"
