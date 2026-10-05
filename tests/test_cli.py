@@ -650,7 +650,7 @@ def test_p4_headless_noop_task_runs_in_worktree_and_reaches_acceptance(monkeypat
         sd = ca.repo_state_dir(r)
         state = json.loads((sd / "state.json").read_text())
         accepted = state["accepted_tasks"]["T1"]
-        assert accepted["product_sha"] == subprocess.run(
+        assert accepted["accepted_product_sha"] == subprocess.run(
             ["git", "-C", str(r), "rev-parse", "HEAD"],
             text=True,
             capture_output=True,
