@@ -412,8 +412,13 @@ def _resolve_builtin(
     }
 
 
-def _resolved_path(root: Path) -> Path:
-    return repo_state_dir(root) / "tasks" / "task-source-set.json"
+def _resolved_path(root: Path, *, state_dir: Path | None = None) -> Path:
+    base = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(root)
+    )
+    return base / "tasks" / "task-source-set.json"
 
 
 def resolve_task_sources(
@@ -602,9 +607,15 @@ def load_resolved_task_source_set(
     *,
     require_current: bool = True,
     require_state_binding: bool = True,
+    state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
-    path = _resolved_path(root)
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(root)
+    )
+    path = _resolved_path(root, state_dir=state_root)
     if not path.exists():
         raise TaskSourceError("no persisted TaskSourceSet is available")
     try:
@@ -649,7 +660,7 @@ def load_resolved_task_source_set(
             "persisted TaskSourceSet integrity check failed: merged task digest mismatch"
         )
 
-    state = load_json(repo_state_dir(root) / "state.json", {})
+    state = load_json(state_root / "state.json", {})
     if require_state_binding and (
         not isinstance(state, dict) or state.get("task_source_sha256") != recorded
     ):
