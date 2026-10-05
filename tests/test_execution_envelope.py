@@ -54,6 +54,7 @@ from task_sources import (
 from task_acceptance import (
     TaskAcceptanceError,
     reconcile_task_candidate,
+    reopen_task_candidate_for_repair,
     seal_task_candidate,
 )
 from task_workspace import (
@@ -1809,6 +1810,87 @@ def test_p4_candidate_pending_ref_crash_reconciles_exact_candidate(monkeypatch):
         ).stdout.strip()
 
         _run(primary, "git", "update-ref", "-d", candidate_ref)
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_rejected_candidate_reopens_and_reseals_replacement(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+
+        target = worktree / "src" / "task" / "repairable.txt"
+        target.write_text("candidate one\n")
+        first = seal_task_candidate(primary)
+        first_sha = first["candidate_sha"]
+
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        first_ref = candidate_ref_for_workspace(workspace)
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            "--hash",
+            first_ref,
+        ).stdout.strip() == first_sha
+
+        reopened = reopen_task_candidate_for_repair(
+            primary,
+            findings=["independent verifier found a defect"],
+        )
+        assert reopened["status"] == "ACTIVE"
+        assert reopened["rejected_candidate_sha"] == first_sha
+        assert "independent verifier found a defect" in reopened["repair_findings"]
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            first_ref,
+            check=False,
+        ).returncode != 0
+
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "ACTIVE"
+        assert workspace["candidate_sha"] is None
+        assert workspace["verified_candidate_sha"] is None
+        assert workspace["acceptance_attestation_sha256"] is None
+        assert workspace["last_rejected_candidate_sha"] == first_sha
+
+        target.write_text("candidate two\n")
+        second = seal_task_candidate(primary)
+        second_sha = second["candidate_sha"]
+        assert second_sha != first_sha
+        assert _run(worktree, "git", "rev-parse", "HEAD").stdout.strip() == record[
+            "product_base_sha"
+        ]
+
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        second_ref = candidate_ref_for_workspace(workspace)
+        assert second_ref == first_ref
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            "--hash",
+            second_ref,
+        ).stdout.strip() == second_sha
+
+        _run(primary, "git", "update-ref", "-d", second_ref)
         _run(
             primary,
             "git",
