@@ -95,10 +95,18 @@ def _task(
         "schema_version": 1,
         "id": task_id,
         "authority_sets": ["default"],
-        "depends_on": depends_on or [],
-        "owned_paths": owned_paths or ["src/task/**"],
-        "evidence_paths": evidence_paths or [f"evidence/{task_id}/**"],
-        "runtime_scratch_paths": scratch_paths or [f".scratch/{task_id}/**"],
+        "depends_on": depends_on if depends_on is not None else [],
+        "owned_paths": owned_paths if owned_paths is not None else ["src/task/**"],
+        "evidence_paths": (
+            evidence_paths
+            if evidence_paths is not None
+            else [f"evidence/{task_id}/**"]
+        ),
+        "runtime_scratch_paths": (
+            scratch_paths
+            if scratch_paths is not None
+            else [f".scratch/{task_id}/**"]
+        ),
         "verification": ["test"],
         "commit_subject": None,
         "metadata": {},
