@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import subprocess
+import textwrap
 import unicodedata
 from contextlib import nullcontext
 from dataclasses import asdict
@@ -35,9 +36,14 @@ from execution_envelope import (
 from git_trust import trusted_git_env
 from governance_contract import canonical_json_bytes
 from repo_identity import SupervisorLease, repo_state_dir
+from control_plane import run_readonly_plan_agent
+from promotion_policy import record_promotion_attestation
+from protocols import parse_json_protocol
+from provider_config import provider_from_args
 from repo_profile import profile_repo
 from runtime_paths import ensure_private_dir, utcnow
-from state_store import json_dump
+from settings_policy import make_readonly_settings
+from state_store import json_dump, load_json
 from task_sources import TaskSourceError, load_resolved_task_source_set
 from verification import _run_verification_command, _verification_commands
 from task_workspace import (
@@ -52,6 +58,9 @@ from task_workspace import (
 
 class TaskAcceptanceError(ValueError):
     pass
+
+
+TASK_ACCEPTANCE_CONTRACT = "claude-auto-task-acceptance-v1"
 
 
 def _digest(value: Any) -> str:
@@ -565,7 +574,7 @@ def _verification_worktree_path(
     candidate_sha: str,
     label: str,
 ) -> Path:
-    if label not in {"base", "candidate"}:
+    if label not in {"base", "candidate", "independent"}:
         raise TaskAcceptanceError("unknown verification worktree label")
     token = candidate_sha[:24].lower()
     return (
@@ -1021,6 +1030,501 @@ def verify_task_candidate_deterministic(
             "findings": findings,
             "receipts": candidate_receipts,
             "baseline_receipts": baseline_receipts,
+        }
+
+
+
+def load_deterministic_verification_bundle(
+    coordinator_root: Path,
+    *,
+    candidate_sha: str | None = None,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(coordinator_root)
+    )
+    workspace = load_active_task_workspace(
+        coordinator_root,
+        state_dir=state_root,
+    )
+    if workspace is None:
+        raise TaskAcceptanceError("no active TaskWorkspaceRecord exists")
+    candidate = str(
+        candidate_sha or workspace.get("candidate_sha") or ""
+    ).lower()
+    if not candidate:
+        raise TaskAcceptanceError("candidate SHA is missing")
+    path = _verification_bundle_path(state_root, candidate)
+    try:
+        bundle = load_json(path, {})
+    except OSError as exc:
+        raise TaskAcceptanceError(
+            f"deterministic verification bundle is unreadable: {exc}"
+        ) from exc
+    if not isinstance(bundle, dict) or not bundle:
+        raise TaskAcceptanceError(
+            "deterministic verification bundle does not exist"
+        )
+
+    semantic = {
+        key: bundle.get(key)
+        for key in (
+            "schema_version",
+            "task_id",
+            "task_spec_sha256",
+            "task_source_set_sha256",
+            "execution_envelope_sha256",
+            "base_sha",
+            "candidate_sha",
+            "candidate_tree_sha",
+            "no_op",
+            "commands",
+            "task_verification_claims",
+            "baseline_receipts",
+            "candidate_receipts",
+            "verdict",
+            "findings",
+        )
+    }
+    if bundle.get("verification_bundle_sha256") != _digest(semantic):
+        raise TaskAcceptanceError(
+            "deterministic verification bundle integrity check failed"
+        )
+    if (
+        semantic["task_id"] != workspace["task_id"]
+        or semantic["task_spec_sha256"] != workspace["task_spec_sha256"]
+        or semantic["task_source_set_sha256"]
+        != workspace["task_source_set_sha256"]
+        or semantic["execution_envelope_sha256"]
+        != workspace["execution_envelope_sha256"]
+        or str(semantic["base_sha"]).lower()
+        != str(workspace["product_base_sha"]).lower()
+        or str(semantic["candidate_sha"]).lower() != candidate
+        or str(semantic["candidate_tree_sha"]).lower()
+        != str(workspace.get("candidate_tree_sha") or "").lower()
+    ):
+        raise TaskAcceptanceError(
+            "deterministic verification bundle is not bound to the "
+            "current exact task candidate"
+        )
+    return bundle
+
+
+def _task_verifier_record_path(
+    state_dir: Path,
+    candidate_sha: str,
+) -> Path:
+    return (
+        _verification_dir(state_dir)
+        / f"{candidate_sha}-independent.json"
+    )
+
+
+def _task_verifier_evidence_path(
+    state_dir: Path,
+    candidate_sha: str,
+) -> Path:
+    return (
+        _verification_dir(state_dir)
+        / f"{candidate_sha}-evidence.json"
+    )
+
+
+def _attestation_digest(attestation: dict[str, Any]) -> str:
+    return _digest(attestation)
+
+
+def verify_task_candidate_independent(
+    coordinator_root: Path,
+    args: Any,
+    *,
+    state_dir: Path | None = None,
+    acquire_lease: bool = True,
+    verifier_runner=run_readonly_plan_agent,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(coordinator_root)
+    )
+    context = (
+        SupervisorLease(state_root, coordinator_root)
+        if acquire_lease
+        else nullcontext()
+    )
+    with context:
+        workspace = load_active_task_workspace(
+            coordinator_root,
+            state_dir=state_root,
+        )
+        if workspace is None:
+            raise TaskAcceptanceError(
+                "no active TaskWorkspaceRecord exists"
+            )
+        if workspace["lifecycle_state"] != "VERIFYING":
+            raise TaskAcceptanceError(
+                "independent verification requires VERIFYING lifecycle state"
+            )
+        if workspace.get("deterministic_verification_verdict") != "PASS":
+            raise TaskAcceptanceError(
+                "independent verifier requires deterministic PASS evidence"
+            )
+
+        candidate_sha = str(workspace.get("candidate_sha") or "").lower()
+        base_sha = str(workspace["product_base_sha"]).lower()
+        if not candidate_sha:
+            raise TaskAcceptanceError("candidate SHA is missing")
+        validate_task_candidate_worktree(
+            coordinator_root,
+            state_dir=state_root,
+        )
+        bundle = load_deterministic_verification_bundle(
+            coordinator_root,
+            candidate_sha=candidate_sha,
+            state_dir=state_root,
+        )
+        if bundle.get("verdict") != "PASS":
+            raise TaskAcceptanceError(
+                "deterministic verification bundle is not PASS"
+            )
+
+        task_root = Path(workspace["task_worktree"]).expanduser().resolve()
+        task_record = _task_record(
+            task_root,
+            coordinator_root,
+            workspace,
+            state_dir=state_root,
+        )
+        task = task_record["task"]
+        state = load_json(state_root / "state.json", {})
+        objective = str(
+            state.get("objective")
+            if isinstance(state, dict)
+            else ""
+        ).strip() or (
+            "Preserve the repository objective and satisfy the exact "
+            "repository-owned TaskSpec."
+        )
+
+        diff = _git(
+            coordinator_root,
+            "diff",
+            "--no-ext-diff",
+            "--binary",
+            base_sha,
+            candidate_sha,
+            "--",
+            state_dir=state_root,
+        )
+        if diff.returncode != 0:
+            detail = str(diff.stderr or diff.stdout or "git diff failed")
+            raise TaskAcceptanceError(
+                "unable to capture exact candidate diff: "
+                + detail.strip()[:1600]
+            )
+
+        evidence = {
+            "schema_version": 1,
+            "objective": objective,
+            "task": task,
+            "task_spec_sha256": workspace["task_spec_sha256"],
+            "task_source_set_sha256": workspace[
+                "task_source_set_sha256"
+            ],
+            "execution_envelope_sha256": workspace[
+                "execution_envelope_sha256"
+            ],
+            "base_sha": base_sha,
+            "candidate_sha": candidate_sha,
+            "candidate_diff": diff.stdout,
+            "deterministic_verification_sha256": bundle[
+                "verification_bundle_sha256"
+            ],
+            "deterministic_verification_verdict": bundle["verdict"],
+            "deterministic_verification_commands": bundle["commands"],
+            "deterministic_verification_receipts": bundle[
+                "candidate_receipts"
+            ],
+            "task_verification_claims": bundle[
+                "task_verification_claims"
+            ],
+        }
+        evidence_path = _task_verifier_evidence_path(
+            state_root,
+            candidate_sha,
+        )
+        json_dump(evidence_path, evidence)
+
+        verifier_root = _verification_worktree_path(
+            state_root,
+            candidate_sha,
+            "independent",
+        )
+        verifier_record: dict[str, Any] = {}
+        try:
+            verifier_root = _fresh_verification_worktree(
+                coordinator_root,
+                sha=candidate_sha,
+                path=verifier_root,
+                state_dir=state_root,
+            )
+            readonly = (
+                _verification_dir(state_root)
+                / f"{candidate_sha}-settings-readonly.json"
+            )
+            json_dump(
+                readonly,
+                make_readonly_settings(state_root, verifier_root),
+            )
+            env, provider_detail = provider_from_args(args)
+            prompt = textwrap.dedent(
+                f"""
+                You are the independent Task Verifier. You did not author
+                this candidate. Operate HARD READ-ONLY and verify exactly
+                one immutable repository TaskSpec candidate.
+
+                TASK ID: {workspace['task_id']}
+                EXACT CANDIDATE SHA: {candidate_sha}
+                BASE SHA: {base_sha}
+                TASKSPEC SHA-256: {workspace['task_spec_sha256']}
+                DETERMINISTIC VERIFICATION BUNDLE SHA-256:
+                {bundle['verification_bundle_sha256']}
+
+                PRIVATE EVIDENCE FILE:
+                {evidence_path}
+
+                Inspect the exact candidate repository and evidence. Verify
+                that the exact candidate satisfies the repository-owned
+                TaskSpec, its verification claims, dependencies and intended
+                objective without unrelated scope expansion or material
+                unresolved correctness/security defects.
+
+                Deterministic verification receipts are evidence, not a
+                command request. Do not modify any repository or package
+                state. If evidence is insufficient, return BLOCKED. If any
+                material defect remains, return REJECTED.
+
+                Return exactly one JSON protocol record:
+                TASK_ACCEPT_VERIFY: {{"verdict":"VERIFIED|REJECTED|BLOCKED",
+                "task_id":"{workspace['task_id']}",
+                "candidate_sha":"{candidate_sha}",
+                "summary":"...","findings":["..."]}}
+                """
+            ).strip()
+
+            result_text, meta = verifier_runner(
+                root=verifier_root,
+                sd=state_root,
+                prompt=prompt,
+                env=env,
+                provider_detail=provider_detail,
+                model=getattr(args, "model", None),
+                timeout=(getattr(args, "timeout", 0) or None),
+                max_turns=int(getattr(args, "max_turns", 35) or 35),
+                verify_repo=True,
+                max_budget_usd=getattr(args, "max_budget_usd", None),
+                settings_path=readonly,
+            )
+            protocol = parse_json_protocol(
+                result_text,
+                "TASK_ACCEPT_VERIFY",
+            )
+            if not protocol:
+                verdict = "BLOCKED"
+                summary = "independent Task Verifier returned no valid protocol"
+                findings = [summary]
+            else:
+                verdict = str(
+                    protocol.get("verdict", "BLOCKED")
+                ).upper()
+                summary = str(protocol.get("summary", ""))[:1800]
+                raw_findings = protocol.get("findings")
+                findings = (
+                    [str(item)[:1800] for item in raw_findings[:100]]
+                    if isinstance(raw_findings, list)
+                    else []
+                )
+                if verdict not in {"VERIFIED", "REJECTED", "BLOCKED"}:
+                    verdict = "BLOCKED"
+                    findings.append(
+                        "verifier returned an unsupported verdict"
+                    )
+                if str(protocol.get("task_id", "")) != workspace["task_id"]:
+                    verdict = "BLOCKED"
+                    findings.append(
+                        "verifier protocol task ID does not match active task"
+                    )
+                if (
+                    str(protocol.get("candidate_sha", "")).lower()
+                    != candidate_sha
+                ):
+                    verdict = "BLOCKED"
+                    findings.append(
+                        "verifier protocol candidate SHA does not match exact candidate"
+                    )
+                if meta.get("repository_unchanged") is not True:
+                    verdict = "BLOCKED"
+                    findings.append(
+                        "independent verifier read-only repository invariant "
+                        "was not positively proven"
+                    )
+
+            verifier_semantic = {
+                "schema_version": 1,
+                "task_id": workspace["task_id"],
+                "task_spec_sha256": workspace["task_spec_sha256"],
+                "candidate_sha": candidate_sha,
+                "base_sha": base_sha,
+                "deterministic_verification_sha256": bundle[
+                    "verification_bundle_sha256"
+                ],
+                "verdict": verdict,
+                "summary": summary,
+                "findings": findings,
+                "provider": meta.get("provider"),
+                "model": meta.get("model"),
+                "repository_unchanged": meta.get(
+                    "repository_unchanged"
+                ),
+            }
+            verifier_record = {
+                **verifier_semantic,
+                "task_verifier_evidence_sha256": _digest(
+                    verifier_semantic
+                ),
+                "meta": meta,
+                "recorded_at": utcnow(),
+            }
+            json_dump(
+                _task_verifier_record_path(
+                    state_root,
+                    candidate_sha,
+                ),
+                verifier_record,
+            )
+        finally:
+            _remove_verification_worktree(
+                coordinator_root,
+                verifier_root,
+                state_dir=state_root,
+            )
+
+        verdict = str(verifier_record.get("verdict") or "BLOCKED")
+        findings = list(verifier_record.get("findings") or [])
+        summary = str(verifier_record.get("summary") or "")[:1800]
+        if verdict == "REJECTED":
+            reopened = reopen_task_candidate_for_repair(
+                coordinator_root,
+                findings=findings,
+                state_dir=state_root,
+                acquire_lease=False,
+            )
+            return {
+                "status": "REJECTED",
+                "task_id": workspace["task_id"],
+                "candidate_sha": candidate_sha,
+                "summary": summary,
+                "findings": findings,
+                "reopened": reopened,
+            }
+
+        if verdict != "VERIFIED":
+            blocked = update_task_workspace_package_state(
+                coordinator_root,
+                state_dir=state_root,
+                expected_states={"VERIFYING"},
+                updates={
+                    "lifecycle_state": "BLOCKED",
+                    "independent_verification_verdict": "BLOCKED",
+                    "independent_verification_findings": findings,
+                    "independent_verification_summary": summary,
+                    "independent_verification_record_sha256": verifier_record[
+                        "task_verifier_evidence_sha256"
+                    ],
+                    "independent_verification_finished_at": utcnow(),
+                },
+            )
+            return {
+                "status": "BLOCKED",
+                "task_id": blocked["task_id"],
+                "candidate_sha": candidate_sha,
+                "summary": summary,
+                "findings": findings,
+            }
+
+        evidence_sha256 = verifier_record[
+            "task_verifier_evidence_sha256"
+        ]
+        try:
+            attestation = record_promotion_attestation(
+                coordinator_root,
+                target_sha=candidate_sha,
+                contract=TASK_ACCEPTANCE_CONTRACT,
+                verifier=(
+                    "task-verifier:"
+                    + str(
+                        verifier_record.get("model")
+                        or getattr(args, "model", None)
+                        or "native-default"
+                    )
+                ),
+                evidence_sha256=evidence_sha256,
+                summary=summary,
+                metadata={
+                    "provider": verifier_record.get("provider"),
+                    "findings": findings,
+                    "repository_unchanged": verifier_record.get(
+                        "repository_unchanged"
+                    ),
+                    "deterministic_verification_sha256": bundle[
+                        "verification_bundle_sha256"
+                    ],
+                    "task_spec_sha256": workspace[
+                        "task_spec_sha256"
+                    ],
+                    "task_source_set_sha256": workspace[
+                        "task_source_set_sha256"
+                    ],
+                    "execution_envelope_sha256": workspace[
+                        "execution_envelope_sha256"
+                    ],
+                },
+            )
+        except ValueError as exc:
+            raise TaskAcceptanceError(str(exc)) from exc
+
+        attestation_sha256 = _attestation_digest(attestation)
+        verified = update_task_workspace_package_state(
+            coordinator_root,
+            state_dir=state_root,
+            expected_states={"VERIFYING"},
+            updates={
+                "lifecycle_state": "VERIFIED_PENDING_PROMOTION",
+                "verified_candidate_sha": candidate_sha,
+                "acceptance_attestation_sha256": attestation_sha256,
+                "acceptance_attestation_contract": TASK_ACCEPTANCE_CONTRACT,
+                "deterministic_verification_sha256": bundle[
+                    "verification_bundle_sha256"
+                ],
+                "independent_verification_verdict": "VERIFIED",
+                "independent_verification_findings": findings,
+                "independent_verification_summary": summary,
+                "independent_verification_record_sha256": evidence_sha256,
+                "independent_verification_finished_at": utcnow(),
+            },
+        )
+        return {
+            "status": "VERIFIED",
+            "task_id": verified["task_id"],
+            "candidate_sha": candidate_sha,
+            "attestation": attestation,
+            "acceptance_attestation_sha256": attestation_sha256,
+            "summary": summary,
+            "findings": findings,
         }
 
 
