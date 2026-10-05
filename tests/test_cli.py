@@ -440,8 +440,8 @@ elif "CLAUDE AUTO SUBAGENT QUALIFICATION" in prompt:
     result='SUBAGENT_QUALIFICATION: {"ok":true}'
 elif "You are the independent Task Verifier" in prompt:
     import re
-    task_match=re.search(r"TASK ID:\s*([^\\n]+)", prompt)
-    sha_match=re.search(r"EXACT CANDIDATE SHA:\s*([0-9a-fA-F]+)", prompt)
+    task_match=re.search(r"TASK ID:\\s*([^\\n]+)", prompt)
+    sha_match=re.search(r"EXACT CANDIDATE SHA:\\s*([0-9a-fA-F]+)", prompt)
     result='TASK_ACCEPT_VERIFY: '+json.dumps({
         "verdict":"VERIFIED",
         "task_id":task_match.group(1).strip() if task_match else "",
@@ -504,10 +504,10 @@ def test_p4_headless_noop_task_runs_in_worktree_and_reaches_acceptance(monkeypat
             ["git", "-C", str(r), "config", "user.name", "P4 Test"],
             check=True,
         )
-        (r / "PLAN.md").write_text("# Plan\\n")
+        (r / "PLAN.md").write_text("# Plan\n")
         owned = r / "src" / "task"
         owned.mkdir(parents=True)
-        (owned / "existing.txt").write_text("already satisfied\\n")
+        (owned / "existing.txt").write_text("already satisfied\n")
         governance = {
             "schema_version": 1,
             "planning_authority": {
@@ -548,7 +548,7 @@ def test_p4_headless_noop_task_runs_in_worktree_and_reaches_acceptance(monkeypat
         }
         gov = r / ".claude-auto" / "governance.json"
         gov.parent.mkdir(parents=True)
-        gov.write_text(json.dumps(governance, indent=2) + "\\n")
+        gov.write_text(json.dumps(governance, indent=2) + "\n")
         subprocess.run(["git", "-C", str(r), "add", "-A"], check=True)
         subprocess.run(
             ["git", "-C", str(r), "commit", "-qm", "governed base"],
@@ -562,15 +562,13 @@ def test_p4_headless_noop_task_runs_in_worktree_and_reaches_acceptance(monkeypat
         monkeypatch.setenv("FAKE_CLAUDE_CAPTURE", str(capture))
         monkeypatch.setenv(
             "FAKE_GOAL_RESULT",
-            "AUTONOMY_TASK_RESULT: "
-            "{\\\"task_id\\\":\\\"T1\\\","
-            "\\\"status\\\":\\\"READY_FOR_ACCEPTANCE\\\","
-            "\\\"summary\\\":\\\"task is already satisfied\\\","
-            "\\\"verification_claims\\\":[\\\"inspected current implementation\\\"]}"
-            "\\nAUTONOMY_STATUS: CONTINUE"
-            "\\nAUTONOMY_SUMMARY: task ready for package acceptance"
-            "\\nAUTONOMY_PLAN_IMPACT: NONE"
-            "\\nAUTONOMY_PHASE_BOUNDARY: NO",
+            'AUTONOMY_TASK_RESULT: {"task_id":"T1","status":"READY_FOR_ACCEPTANCE",'
+            '"summary":"task is already satisfied",'
+            '"verification_claims":["inspected current implementation"]}'
+            "\nAUTONOMY_STATUS: CONTINUE"
+            "\nAUTONOMY_SUMMARY: task ready for package acceptance"
+            "\nAUTONOMY_PLAN_IMPACT: NONE"
+            "\nAUTONOMY_PHASE_BOUNDARY: NO",
         )
 
         rc = ca.main([
@@ -615,8 +613,6 @@ def test_p4_headless_noop_task_runs_in_worktree_and_reaches_acceptance(monkeypat
         ]
         assert len(goal_calls) == 1
         worker = goal_calls[0]
-        # The worker's goal prompt describes the protocol but executes from the
-        # external package-owned task worktree, never from primary checkout.
         assert Path(worker["cwd"]).resolve() != r.resolve()
         assert Path(worker["cwd"]).resolve().is_relative_to(
             (sd / "tasks" / "workspaces").resolve()
@@ -626,7 +622,6 @@ def test_p4_headless_noop_task_runs_in_worktree_and_reaches_acceptance(monkeypat
             r,
             state_dir=sd,
         )["status"] == "COMPLETE"
-
 
 def test_goal_engine_uses_goal_and_compact_logging(monkeypatch):
     with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as dh, tempfile.TemporaryDirectory() as bd:
