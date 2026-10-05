@@ -240,6 +240,11 @@ def build_parser(version: str) -> argparse.ArgumentParser:
         help="Run declared deterministic reconcilers and seal the schema-2 planning candidate",
     )
     pr.add_argument("--repo")
+    pr = prsp.add_parser(
+        "validate",
+        help="Rebuild exact candidate AuthoritySets and candidate TaskSources without changing live runtime state",
+    )
+    pr.add_argument("--repo")
     pr = prsp.add_parser("verify", help="Independently verify and attest the exact repair candidate SHA")
     pr.add_argument("--repo")
     pr.add_argument("--sha", help="Exact candidate SHA; defaults to active candidate")
