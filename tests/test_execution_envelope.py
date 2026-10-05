@@ -24,6 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from accepted_task import persist_accepted_task_record
 from execution_envelope import (
     ExecutionEnvelopeError,
     evaluate_active_workspace,
@@ -173,6 +174,37 @@ def _configured(root: Path, tasks: list[dict]) -> Path:
     result = resolve_task_sources(root, persist=True)
     assert result["status"] == "READY"
     return root
+
+
+def _persist_test_acceptance(
+    root: Path,
+    task_set: dict,
+    task_row: dict,
+    *,
+    product_sha: str,
+) -> dict:
+    state_dir = repo_state_dir(root)
+    record = persist_accepted_task_record(
+        state_dir,
+        {
+            "schema_version": 1,
+            "task_id": task_row["task"]["id"],
+            "task_spec_sha256": task_row["task_spec_sha256"],
+            "task_source_set_sha256": task_set["task_source_set_sha256"],
+            "authority_snapshot_sha256": task_set[
+                "authority_snapshot_sha256"
+            ],
+            "execution_envelope_sha256": "1" * 64,
+            "base_sha": product_sha,
+            "candidate_sha": product_sha,
+            "accepted_product_sha": product_sha,
+            "no_op": True,
+            "verification_bundle_sha256": "2" * 64,
+            "verifier_attestation_sha256": "3" * 64,
+            "attestation_contract": TASK_ACCEPTANCE_CONTRACT,
+        },
+    )
+    return record
 
 
 def _hook_env(
@@ -325,11 +357,18 @@ def test_dependency_acceptance_requires_current_taskspec_and_ancestor(monkeypatc
         task_set = load_resolved_task_source_set(root)
         rows = {row["task"]["id"]: row for row in task_set["tasks"]}
         state_path = repo_state_dir(root) / "state.json"
+        acceptance = _persist_test_acceptance(
+            root,
+            task_set,
+            rows["T1"],
+            product_sha=task_set["product_head"],
+        )
         state_obj = load_json(state_path, {})
         state_obj["accepted_tasks"] = {
             "T1": {
                 "task_spec_sha256": rows["T1"]["task_spec_sha256"],
                 "accepted_product_sha": task_set["product_head"],
+                "acceptance_sha256": acceptance["acceptance_sha256"],
             }
         }
         json_dump(state_path, state_obj)
@@ -984,11 +1023,18 @@ def test_shallow_clone_missing_accepted_history_blocks_dependency_readiness(monk
         resolved = resolve_task_sources(shallow, persist=True)
         rows = {row["task"]["id"]: row for row in resolved["tasks"]}
         state_path = repo_state_dir(shallow) / "state.json"
+        acceptance = _persist_test_acceptance(
+            shallow,
+            resolved,
+            rows["T1"],
+            product_sha=old_product,
+        )
         state_obj = load_json(state_path, {})
         state_obj["accepted_tasks"] = {
             "T1": {
                 "task_spec_sha256": rows["T1"]["task_spec_sha256"],
                 "accepted_product_sha": old_product,
+                "acceptance_sha256": acceptance["acceptance_sha256"],
             }
         }
         json_dump(state_path, state_obj)
