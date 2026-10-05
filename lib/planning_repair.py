@@ -42,6 +42,7 @@ from planning_helpers import (
     PlanningHelperError,
     HelperRunner,
     run_planning_reconcilers,
+    run_planning_validators,
 )
 from execution import run_repository_command
 from protocols import parse_json_protocol
@@ -984,6 +985,7 @@ def validate_planning_repair_candidate(
     root: Path,
     *,
     task_source_runner: HelperRunner = run_repository_command,
+    validator_runner: HelperRunner = run_repository_command,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     active = load_active_repair(root)
@@ -1027,6 +1029,25 @@ def validate_planning_repair_candidate(
         / f"candidate-authority-{candidate[:16]}.json"
     )
     json_dump(evidence_path, evidence)
+
+    try:
+        validator_bundle = run_planning_validators(
+            root,
+            candidate,
+            envelope,
+            runner=validator_runner,
+        )
+    except PlanningHelperError as exc:
+        active["last_validator_error"] = str(exc)[:1800]
+        active["validator_failed_at"] = utcnow()
+        json_dump(_active_path(root), active)
+        raise ValueError(str(exc)) from exc
+    validator_path = (
+        _repair_dir(root)
+        / f"validator-receipts-{candidate[:16]}.json"
+    )
+    json_dump(validator_path, validator_bundle)
+
     task_sources = evidence.get("candidate_task_sources", {})
     active.update({
         "candidate_authority_evidence_sha256": evidence[
@@ -1042,10 +1063,15 @@ def validate_planning_repair_candidate(
             "task_source_set_sha256"
         ),
         "candidate_authority_evidence_path": str(evidence_path),
+        "validator_receipt_bundle_sha256": validator_bundle[
+            "validator_receipt_bundle_sha256"
+        ],
+        "validator_receipt_path": str(validator_path),
         "candidate_validated_at": utcnow(),
         "validated_candidate_sha": candidate,
     })
     active.pop("last_candidate_validation_error", None)
+    active.pop("last_validator_error", None)
     json_dump(_active_path(root), active)
     return {
         "status": "valid",
@@ -1059,7 +1085,11 @@ def validate_planning_repair_candidate(
         "candidate_task_source_set_sha256": active.get(
             "candidate_task_source_set_sha256"
         ),
+        "validator_receipt_bundle_sha256": active[
+            "validator_receipt_bundle_sha256"
+        ],
         "evidence_path": str(evidence_path),
+        "validator_receipt_path": str(validator_path),
     }
 
 
