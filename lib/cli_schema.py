@@ -291,6 +291,55 @@ def build_parser(version: str) -> argparse.ArgumentParser:
         help="Audit reason recorded with the P4 abort/preservation transaction",
     )
 
+    tq = tsp.add_parser(
+        "begin",
+        help="Begin or resume the package-owned P4 task worktree for the dependency-safe READY task",
+    )
+    tq.add_argument("task_id", nargs="?", help="Optional exact READY TaskSpec ID; defaults to deterministic frontier selection")
+    tq.add_argument("--repo")
+
+    tq = tsp.add_parser(
+        "candidate",
+        help="Seal the active P4 task worktree into an exact package-owned candidate snapshot",
+    )
+    tq.add_argument("--repo")
+
+    tq = tsp.add_parser(
+        "verify",
+        help="Run deterministic verification, then the independent exact-SHA Task Verifier",
+    )
+    tq.add_argument("--repo")
+    add_provider_args(tq, include_roles=True)
+    tq.add_argument("--model", help="Model ID/alias for the independent Task Verifier")
+    tq.add_argument("--timeout", type=int, default=900, help="Verification/model timeout in seconds")
+    tq.add_argument("--max-turns", type=int, default=35, help="Maximum independent verifier turns")
+    tq.add_argument("--max-budget-usd", type=float, help="Optional verifier budget ceiling")
+    tq.add_argument(
+        "--trust-repo-scripts",
+        action="store_true",
+        help="Explicitly allow repository verification scripts through the existing verification boundary",
+    )
+    tq.add_argument(
+        "--unrestricted-host",
+        action="store_true",
+        help="Explicitly permit verification on the unrestricted host where the existing policy allows it",
+    )
+
+    tq = tsp.add_parser(
+        "accept",
+        help="Promote the exact VERIFIED task candidate and persist AcceptedTaskRecord evidence",
+    )
+    tq.add_argument("--repo")
+    tq.add_argument("--remote", help="Optional existing remote name for promotion")
+    tq.add_argument("--remote-branch", help="Optional remote branch for promotion")
+    tq.add_argument("--expected-remote", help="Expected remote base SHA for lease-protected promotion")
+
+    tq = tsp.add_parser(
+        "cleanup",
+        help="Clean an ACCEPTED_PENDING_CLEANUP task workspace and recompute the next READY frontier",
+    )
+    tq.add_argument("--repo")
+
     q = sp.add_parser("profile", help="Inspect or request a human-controlled hot profile switch")
     psp = q.add_subparsers(dest="profile_command", required=True)
     pq = psp.add_parser("status", help="Show the active profile and any pending switch")
