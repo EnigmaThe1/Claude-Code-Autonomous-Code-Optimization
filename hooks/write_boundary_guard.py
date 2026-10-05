@@ -400,10 +400,24 @@ def _task_mutation_reason(
     except ValueError:
         return None
     try:
+        state_raw = os.environ.get("CLAUDE_AUTONOMY_STATE_DIR")
+        authority_raw = os.environ.get("CLAUDE_AUTO_AUTHORITY_ROOT")
+        state_dir = (
+            Path(state_raw).expanduser().resolve()
+            if state_raw
+            else None
+        )
+        authority_root = (
+            Path(authority_raw).expanduser().resolve()
+            if authority_raw
+            else None
+        )
         return _task_module().direct_repository_mutation_reason(
             root,
             rel=rel if rel else ".",
             allow_scratch=allow_scratch,
+            state_dir=state_dir,
+            authority_root=authority_root,
         )
     except Exception as exc:
         return f"task authority could not be verified fail-closed: {type(exc).__name__}: {str(exc)[:500]}"
@@ -461,6 +475,26 @@ _NO_ENVELOPE_MUTATING_GIT = _HEAD_MUTATING_GIT | {
     "rm",
     "mv",
     "apply",
+}
+
+_P4_READONLY_GIT = {
+    "status",
+    "diff",
+    "log",
+    "show",
+    "grep",
+    "ls-files",
+    "rev-parse",
+    "rev-list",
+    "merge-base",
+    "cat-file",
+    "ls-tree",
+    "for-each-ref",
+    "show-ref",
+    "name-rev",
+    "describe",
+    "shortlog",
+    "blame",
 }
 
 
@@ -647,6 +681,12 @@ def _guard_bash(
 
         if cmd == "git" and _task_owned_mode(root):
             subcommand, _sub_index = _git_subcommand(args)
+            if os.environ.get("CLAUDE_AUTO_TASK_WORKSPACE") == "1":
+                if subcommand not in _P4_READONLY_GIT:
+                    return "deny", (
+                        "P4 task-workspace workers have read-only Git authority; "
+                        f"git {subcommand or '<unknown>'} is package-owned mutation authority"
+                    )
             if (
                 subcommand in _HEAD_MUTATING_GIT
                 and _active_task_envelope_present()
