@@ -129,15 +129,26 @@ claude-auto tasks activate TASK_ID --repo /path/to/repo
 claude-auto tasks validate-stage --repo /path/to/repo
 claude-auto tasks reconcile --repo /path/to/repo
 claude-auto tasks deactivate --repo /path/to/repo
+
+# P4 task-worktree / acceptance lifecycle
+claude-auto tasks workspace-status --repo /path/to/repo
+claude-auto tasks begin [TASK_ID] --repo /path/to/repo
+claude-auto tasks candidate --repo /path/to/repo
+claude-auto tasks verify --repo /path/to/repo
+claude-auto tasks accept --repo /path/to/repo
+claude-auto tasks cleanup --repo /path/to/repo
+claude-auto tasks abort --repo /path/to/repo --reason "..."
 ```
 
-`tasks status`, `show`, `explain` and `validate-stage` are inspection/admission commands and do not execute repository adapters. `tasks resolve` reads built-in JSON/JSONL/TOML/static task sources from the exact committed Git tree. A custom adapter receives only its declared exact-commit inputs in an ephemeral read-only snapshot, with the live repository hidden, network disabled and no host fallback; the adapter must produce the same normalised TaskSpecs in two independent runs.
+`tasks status`, `show`, `explain`, `validate-stage` and `workspace-status` are read-only inspection/admission commands. `tasks resolve` reads built-in JSON/JSONL/TOML/static task sources from the exact committed Git tree. A custom adapter receives only its declared exact-commit inputs in an ephemeral read-only snapshot, with the live repository hidden, network disabled and no host fallback; the adapter must produce the same normalised TaskSpecs in two independent runs.
 
-When TaskSources are configured, `claude-auto run` and supervised `start` resolve or reuse the deterministic dependency-safe READY task before launching a mutating worker. The resulting package-owned ExecutionEnvelope binds the exact TaskSourceSet, TaskSpec digest, AuthoritySet snapshot, base commit, direct-edit/promotion selectors, scratch selectors and pre-task WIP identity.
+When TaskSources are configured, `claude-auto run` automatically resolves the dependency-safe READY task and executes it in a package-owned linked worktree stored under external coordinator state. The user's primary checkout remains a separately fingerprinted semantic boundary. P3's ExecutionEnvelope still binds the exact TaskSourceSet, TaskSpec digest, AuthoritySet snapshot, product base, direct-edit/promotion selectors and scratch selectors, but P4 applies that envelope to the task worktree while authority currentness remains anchored to the coordinator checkout.
 
-Direct file tools are fenced to task-owned/evidence paths, Bash writes are checked before execution where statically identifiable, and a `PostToolBatch` gate checks actual Git/workspace state after each Claude tool batch. Scratch paths may be used during execution but are never promotable. Staged and `promote-ff` diffs are admitted only when every changed path is inside the active promotion envelope and outside protected/scratch state.
+Direct file/Bash writes remain envelope-gated and every tool batch is checked against both task-worktree state and coordinator semantic boundaries. Candidate creation is package-owned: the worker-controlled index is discarded, only admitted non-scratch product/evidence paths are staged, and Git plumbing seals an exact candidate snapshot without moving task-worktree HEAD away from the envelope base.
 
-`tasks activate`, `reconcile` and `deactivate` change package task authority and therefore require a top-level operator when invoked through the CLI. The outer supervisor uses the same package functions directly while holding its repository lease. P3 deliberately does not create task worktrees or mark tasks accepted; those exact commit/verification/acceptance semantics are introduced in P4.
+`tasks verify` first runs deterministic verification against exact base/candidate worktrees using existing verification-command authority; TaskSpec verification prose is never shell authority. Only after deterministic PASS does an independent read-only Task Verifier inspect the exact candidate SHA and issue the task-acceptance attestation. `tasks accept` can then promote only that exact verified SHA and persist an integrity-checked AcceptedTaskRecord; `tasks cleanup` retires the accepted workspace and recomputes the dependency-safe READY frontier. Verified no-op tasks are accepted at the unchanged product SHA without manufacturing an empty commit.
+
+Authority-changing P3/P4 lifecycle commands are top-level-operator only when invoked through the CLI. The autonomous supervisor calls the same package functions while holding the coordinator lease. `tasks abort` performs bounded safe cleanup from ACTIVE workspaces and preserves admitted product work when required rather than destructively resetting the user's checkout.
 
 ## Repository-owned planning repair
 
