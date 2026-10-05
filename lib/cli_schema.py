@@ -255,11 +255,25 @@ def build_parser(version: str) -> argparse.ArgumentParser:
     gq = gsp.add_parser("status", help="Show the exact resolved AuthoritySet snapshot")
     gq.add_argument("--repo")
 
-    q = sp.add_parser("tasks", help="Inspect or resolve repository-owned TaskSpec sources")
+    q = sp.add_parser("tasks", help="Inspect, resolve and enforce repository-owned TaskSpec authority")
     tsp = q.add_subparsers(dest="tasks_command", required=True)
-    tq = tsp.add_parser("status", help="Show persisted TaskSourceSet state without executing adapters")
+    tq = tsp.add_parser("status", help="Show TaskSourceSet, readiness and active ExecutionEnvelope state")
     tq.add_argument("--repo")
     tq = tsp.add_parser("resolve", help="Resolve exact committed TaskSpecs; adapters run only in the bounded P2 sandbox")
+    tq.add_argument("--repo")
+    for action, help_text in (
+        ("show", "Show one persisted TaskSpec and readiness state"),
+        ("explain", "Explain one TaskSpec's resolved execution authority"),
+        ("activate", "Activate one dependency-ready TaskSpec into an ExecutionEnvelope"),
+    ):
+        tq = tsp.add_parser(action, help=help_text)
+        tq.add_argument("task_id")
+        tq.add_argument("--repo")
+    tq = tsp.add_parser("validate-stage", help="Validate the current Git index against the active task promotion envelope")
+    tq.add_argument("--repo")
+    tq = tsp.add_parser("reconcile", help="Clear a task violation/orphan only after repository state is valid again")
+    tq.add_argument("--repo")
+    tq = tsp.add_parser("deactivate", help="Deactivate a task only at its exact activation baseline")
     tq.add_argument("--repo")
 
     q = sp.add_parser("profile", help="Inspect or request a human-controlled hot profile switch")
