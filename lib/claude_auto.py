@@ -247,6 +247,7 @@ from cli_schema import (
 from authority_set import build_authority_snapshot, governance_action
 from task_authority import (
     TaskAuthorityError,
+    active_task_prompt_context,
     ensure_supervisor_task_activation,
     task_action,
 )
@@ -1619,6 +1620,24 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
             print(limit_reason)
             return 4
         cycle = int(state.get("cycle", 0)) + 1
+        try:
+            cycle_task_activation = ensure_supervisor_task_activation(root)
+            task_context = (
+                active_task_prompt_context(root)
+                if cycle_task_activation.get("status") == "ACTIVE"
+                else None
+            )
+        except TaskAuthorityError as exc:
+            state.update({
+                "status": "BLOCKED",
+                "last_result_status": "BLOCKED",
+                "blocker": f"Task authority revalidation blocked: {exc}",
+                "updated_at": utcnow(),
+            })
+            json_dump(sd / "state.json", state)
+            print(state["blocker"], file=sys.stderr)
+            return 3
+
         prompt = build_goal_prompt(
             objective,
             state,
@@ -1627,6 +1646,7 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
             sd,
             permission_overrides=worker_permission_overrides(set(args._permission_overrides)),
             permission_grants=worker_permission_grants(args._permission_grants),
+            task_context=task_context,
         )
         args._effective_max_budget_usd = effective_invocation_budget(args, state)
         cp, before, after, log, result_text, session_id, raw_obj = _run_one_goal(
