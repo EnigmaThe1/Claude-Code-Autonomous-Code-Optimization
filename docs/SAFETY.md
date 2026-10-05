@@ -68,7 +68,11 @@ RC4-P2 can additionally resolve repository-owned structured TaskSpecs from exact
 
 Custom adapters do not run against the live checkout. Claude Auto materialises only declared exact-commit blobs into an ephemeral view, hides the real repository, requires a read-only/no-network sandbox with no host fallback, and runs the adapter twice. Only identical normalised output is accepted. Adapter declarations may request capabilities, but P2 grants no network or external-read capability.
 
-TaskSpec resolution is still **not task execution authority**. P2 does not activate a task or grant worker write paths; execution envelopes and task worktrees are later RC4 phases.
+P2 TaskSpec resolution by itself is **not task execution authority**. P3 adds the separate package-owned activation boundary: a current dependency-safe TaskSpec is bound into an ExecutionEnvelope before a mutating worker runs. Direct file writes are limited to owned/evidence paths; Bash writes are rejected pre-execution when their target can be determined; and an authoritative `PostToolBatch` check compares actual repository state after each tool batch so opaque subprocess writes are detected before the next model turn.
+
+Runtime scratch remains distinct from promotable source. Scratch may be used by builds/tests when declared, but staged/promotion admission rejects it. Protected planning/governance/control paths override broad task selectors. Pre-existing unrelated WIP is fingerprinted and must remain byte-identical; WIP overlapping task authority blocks activation. On a P3 violation Claude Auto records external evidence and stops the task round but does not destructively reset the user's primary checkout. P4 adds the disposable task-worktree containment/acceptance transaction.
+
+These semantic task controls remain active in **Balanced, Strict, Isolated Full and Unattended**. Runtime profiles may change how an operation executes, but they do not widen the TaskSpec or disable the ExecutionEnvelope. Package-owned semantic state and the active task binding are also protected from direct worker mutation.
 
 Authority-changing `git-trust`, promotion-policy and planning-repair CLI actions continue to refuse invocation from inside an active Claude worker. Legacy one-file repair candidates remain independently verified at their exact SHA before promotion. Bound multi-requirement attestations for the general RC4 promotion model are introduced in a later RC4 phase.
 
