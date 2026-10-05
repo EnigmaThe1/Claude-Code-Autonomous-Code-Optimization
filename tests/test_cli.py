@@ -198,6 +198,37 @@ def test_progress_fingerprint_tracks_repository_not_summary():
     assert a != c
 
 
+def test_progress_fingerprint_counts_p4_accepted_task_state():
+    snap = {
+        "head": "a",
+        "worktree_diff_sha256": "1",
+        "index_diff_sha256": "2",
+        "untracked_sha256": "3",
+        "verification_contract_sha256": "4",
+    }
+    before = {
+        "accepted_tasks": {},
+        "active_task_id": "T1",
+        "active_task_workspace_sha256": "w1",
+        "task_workspace_lifecycle_state": "ACTIVE",
+    }
+    after = {
+        "accepted_tasks": {
+            "T1": {
+                "product_sha": "a",
+                "task_spec_sha256": "t1",
+                "acceptance_sha256": "accepted",
+            },
+        },
+        "active_task_id": None,
+        "active_task_workspace_sha256": None,
+        "task_workspace_lifecycle_state": None,
+    }
+    assert ca.progress_fingerprint("CONTINUE", None, snap, before) != (
+        ca.progress_fingerprint("CONTINUE", None, snap, after)
+    )
+
+
 def test_git_snapshot_changes_when_content_changes_but_status_name_same():
     with tempfile.TemporaryDirectory() as td:
         r=Path(td)
