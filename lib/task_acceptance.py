@@ -1146,6 +1146,24 @@ def validate_task_candidate_worktree(
     }
 
 
+def _rejected_candidate_ref(
+    workspace: dict[str, Any],
+    candidate_sha: str,
+) -> str:
+    candidate_ref = candidate_ref_for_workspace(workspace)
+    prefix = "refs/claude-auto/task-candidates/"
+    if not candidate_ref.startswith(prefix):
+        raise TaskAcceptanceError("package candidate ref namespace is malformed")
+    token = candidate_ref[len(prefix):]
+    digest = candidate_sha.lower()
+    if not (
+        40 <= len(digest) <= 64
+        and all(ch in "0123456789abcdef" for ch in digest)
+    ):
+        raise TaskAcceptanceError("rejected candidate SHA is malformed")
+    return f"refs/claude-auto/task-rejected/{token}/{digest}"
+
+
 def reopen_task_candidate_for_repair(
     coordinator_root: Path,
     *,
@@ -1201,8 +1219,13 @@ def reopen_task_candidate_for_repair(
                 },
             )
 
+        rejected_ref: str | None = None
         if not bool(workspace.get("no_op_candidate")):
             candidate_ref = candidate_ref_for_workspace(workspace)
+            rejected_ref = _rejected_candidate_ref(
+                workspace,
+                candidate_sha,
+            )
             current_ref = _ref_value(
                 coordinator_root,
                 candidate_ref,
@@ -1212,6 +1235,27 @@ def reopen_task_candidate_for_repair(
                 raise TaskAcceptanceError(
                     "candidate ref moved to an unexpected object before repair reopen"
                 )
+
+            archived = _ref_value(
+                coordinator_root,
+                rejected_ref,
+                state_dir=state_root,
+            )
+            if archived is None:
+                zero = "0" * len(candidate_sha)
+                _require_git(
+                    coordinator_root,
+                    "update-ref",
+                    rejected_ref,
+                    candidate_sha,
+                    zero,
+                    state_dir=state_root,
+                )
+            elif archived != candidate_sha:
+                raise TaskAcceptanceError(
+                    "rejected-candidate archive ref points at an unexpected object"
+                )
+
             if current_ref == candidate_sha:
                 _require_git(
                     coordinator_root,
@@ -1239,6 +1283,7 @@ def reopen_task_candidate_for_repair(
                 "acceptance_attestation_sha256": None,
                 "candidate_reopened_at": utcnow(),
                 "last_rejected_candidate_sha": candidate_sha,
+                "last_rejected_candidate_ref": rejected_ref,
             },
             refresh_ref_binding=True,
         )
@@ -1248,6 +1293,9 @@ def reopen_task_candidate_for_repair(
             "rejected_candidate_sha": candidate_sha,
             "task_workspace_sha256": updated["task_workspace_sha256"],
             "repair_findings": updated.get("repair_findings") or [],
+            "rejected_candidate_ref": updated.get(
+                "last_rejected_candidate_ref"
+            ),
         }
 
 
