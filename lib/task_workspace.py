@@ -269,6 +269,18 @@ def load_active_task_workspace(
         raise TaskWorkspaceError(
             "TaskWorkspaceRecord primary baseline binding is invalid"
         )
+
+    refs_digest = record.get("git_ref_binding_sha256")
+    if refs_digest is not None:
+        binding = record.get("git_ref_binding")
+        if not isinstance(binding, dict):
+            raise TaskWorkspaceError(
+                "TaskWorkspaceRecord Git ref binding evidence is missing"
+            )
+        if _ref_binding_digest(binding) != refs_digest:
+            raise TaskWorkspaceError(
+                "TaskWorkspaceRecord Git ref binding integrity check failed"
+            )
     worktree = Path(str(record.get("task_worktree") or ""))
     if not _workspace_path_is_owned(state_root, worktree):
         raise TaskWorkspaceError(
