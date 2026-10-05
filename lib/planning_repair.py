@@ -1367,7 +1367,7 @@ def planning_repair_action(args: Any, *, find_repo_root) -> int:
     try:
         action = getattr(args, "planning_repair_command", None)
         root = find_repo_root(getattr(args, "repo", None))
-        if action in ["configure","begin","architect","reconcile","verify","refresh-base","promote","abort"]:
+        if action in ["configure","begin","architect","reconcile","validate","verify","refresh-base","promote","abort"]:
             require_top_level_operator(root, "Repository planning authority change")
         action = getattr(args, "planning_repair_command", None)
         if action == "status":
@@ -1386,6 +1386,8 @@ def planning_repair_action(args: Any, *, find_repo_root) -> int:
             result = run_planning_repair_architect(root, args)
         elif action == "reconcile":
             result = run_planning_repair_reconcile(root)
+        elif action == "validate":
+            result = validate_planning_repair_candidate(root)
         elif action == "verify":
             result = verify_planning_repair(root, args)
         elif action == "refresh-base":
