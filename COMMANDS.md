@@ -118,16 +118,26 @@ claude-auto governance status --repo /path/to/repo
 
 This is read-only. It reports the exact committed AuthoritySet snapshot, protected control surfaces and snapshot digest, or a fail-closed blocker. A repository may opt into multi-file/multi-domain planning with `.claude-auto/governance.json`.
 
-## Repository-owned TaskSpecs
+## Repository-owned TaskSpecs and execution envelopes
 
 ```bash
 claude-auto tasks status --repo /path/to/repo
 claude-auto tasks resolve --repo /path/to/repo
+claude-auto tasks show TASK_ID --repo /path/to/repo
+claude-auto tasks explain TASK_ID --repo /path/to/repo
+claude-auto tasks activate TASK_ID --repo /path/to/repo
+claude-auto tasks validate-stage --repo /path/to/repo
+claude-auto tasks reconcile --repo /path/to/repo
+claude-auto tasks deactivate --repo /path/to/repo
 ```
 
-`tasks status` is read-only and never executes repository adapters. `tasks resolve` reads built-in JSON/JSONL/TOML/static task sources from the exact committed Git tree. A custom adapter receives only its declared exact-commit inputs in an ephemeral read-only snapshot, with the live repository hidden, network disabled and no host fallback; the adapter must produce the same normalised TaskSpecs in two independent runs.
+`tasks status`, `show`, `explain` and `validate-stage` are inspection/admission commands and do not execute repository adapters. `tasks resolve` reads built-in JSON/JSONL/TOML/static task sources from the exact committed Git tree. A custom adapter receives only its declared exact-commit inputs in an ephemeral read-only snapshot, with the live repository hidden, network disabled and no host fallback; the adapter must produce the same normalised TaskSpecs in two independent runs.
 
-Successful P2 resolution persists a deterministic TaskSourceSet digest but does **not** select or activate a task. Task execution/enforcement begins in later RC4 phases.
+When TaskSources are configured, `claude-auto run` and supervised `start` resolve or reuse the deterministic dependency-safe READY task before launching a mutating worker. The resulting package-owned ExecutionEnvelope binds the exact TaskSourceSet, TaskSpec digest, AuthoritySet snapshot, base commit, direct-edit/promotion selectors, scratch selectors and pre-task WIP identity.
+
+Direct file tools are fenced to task-owned/evidence paths, Bash writes are checked before execution where statically identifiable, and a `PostToolBatch` gate checks actual Git/workspace state after each Claude tool batch. Scratch paths may be used during execution but are never promotable. Staged and `promote-ff` diffs are admitted only when every changed path is inside the active promotion envelope and outside protected/scratch state.
+
+`tasks activate`, `reconcile` and `deactivate` change package task authority and therefore require a top-level operator when invoked through the CLI. The outer supervisor uses the same package functions directly while holding its repository lease. P3 deliberately does not create task worktrees or mark tasks accepted; those exact commit/verification/acceptance semantics are introduced in P4.
 
 ## Repository-owned planning repair
 
