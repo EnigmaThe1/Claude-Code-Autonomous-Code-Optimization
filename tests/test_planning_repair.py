@@ -689,3 +689,146 @@ def test_p5_architect_guard_denies_path_also_owned_by_unselected_authority_set(m
         )
         assert result["permissionDecision"] == "deny"
         assert "unselected AuthoritySet" in result["permissionDecisionReason"]
+
+
+def test_p5_architect_multi_file_candidate_and_package_delete(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "main.md").write_text("main\n")
+        (root / "plans" / "obsolete.md").write_text("obsolete\n")
+        (root / "requirements.md").write_text("immutable\n")
+        _git(root, "add", "plans", "requirements.md")
+        _git(root, "commit", "-qm", "multi plan")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set("a", [
+                _p5_member("plans/*.md", role="source", repair="repairable"),
+                _p5_member(
+                    "requirements.md",
+                    role="contract",
+                    repair="immutable",
+                ),
+            ]),
+        ]))
+
+        monkeypatch.setattr(
+            pr,
+            "provider_from_args",
+            lambda _args: (os.environ.copy(), {"provider": "native"}),
+        )
+
+        def fake_control_model(**kwargs):
+            worktree = kwargs["root"]
+            (worktree / "plans" / "main.md").write_text("main repaired\n")
+            (worktree / "plans" / "new.md").write_text("new planning member\n")
+            cp = subprocess.CompletedProcess(["claude"], 0, "", "")
+            text = (
+                'PLANNING_REPAIR_ARCHITECT: '
+                '{"verdict":"READY","classification":"PLAN_PRESERVING",'
+                '"summary":"repairs selected planning authority",'
+                '"delete_paths":["plans/obsolete.md"]}'
+            )
+            return cp, text, "p5-architect", {}, "SUCCESS", "ok", {}, [], 0.1
+
+        monkeypatch.setattr(pr, "_run_control_model", fake_control_model)
+        args = SimpleNamespace(
+            reason="repair multi-file authority",
+            authority_set=["a"],
+            model=None,
+            max_budget_usd=None,
+            max_turns=20,
+            timeout=0,
+        )
+        result = run_planning_repair_architect(root, args)
+        assert result["status"] == "candidate"
+        active = load_active_repair(root)
+        assert active["schema_version"] == 2
+        assert active["status"] == "CANDIDATE"
+        assert active["repair_envelope_sha256"]
+        assert active["architect_delete_paths"] == ["plans/obsolete.md"]
+        changed = pr._changed_paths(
+            Path(active["worktree"]),
+            active["base_sha"],
+            active["candidate_sha"],
+        )
+        assert changed == {
+            "plans/main.md",
+            "plans/new.md",
+            "plans/obsolete.md",
+        }
+        assert (
+            Path(active["worktree"]) / "requirements.md"
+        ).read_text() == "immutable\n"
+
+
+def test_p5_architect_stops_at_reconciling_when_generated_members_exist(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "main.md").write_text("main\n")
+        (root / "generated").mkdir()
+        (root / "generated" / "index.json").write_text("{}\n")
+        _git(root, "add", "plans", "generated")
+        _git(root, "commit", "-qm", "generated plan")
+        reconciler = _p5_helper(
+            "generate-index",
+            inputs=["plans/*.md"],
+            outputs=["generated/*.json"],
+        )
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [
+                    _p5_member(
+                        "plans/*.md",
+                        role="source",
+                        repair="repairable",
+                    ),
+                    _p5_member(
+                        "generated/*.json",
+                        role="projection",
+                        repair="generated",
+                    ),
+                ],
+                reconcilers=[reconciler],
+            ),
+        ]))
+
+        monkeypatch.setattr(
+            pr,
+            "provider_from_args",
+            lambda _args: (os.environ.copy(), {"provider": "native"}),
+        )
+
+        def fake_control_model(**kwargs):
+            worktree = kwargs["root"]
+            (worktree / "plans" / "main.md").write_text("repaired\n")
+            cp = subprocess.CompletedProcess(["claude"], 0, "", "")
+            text = (
+                'PLANNING_REPAIR_ARCHITECT: '
+                '{"verdict":"READY","classification":"PLAN_PRESERVING",'
+                '"summary":"repair source before regeneration","delete_paths":[]}'
+            )
+            return cp, text, "p5-architect", {}, "SUCCESS", "ok", {}, [], 0.1
+
+        monkeypatch.setattr(pr, "_run_control_model", fake_control_model)
+        args = SimpleNamespace(
+            reason="repair and regenerate",
+            authority_set=["a"],
+            model=None,
+            max_budget_usd=None,
+            max_turns=20,
+            timeout=0,
+        )
+        result = run_planning_repair_architect(root, args)
+        assert result["status"] == "reconcile-required"
+        active = load_active_repair(root)
+        assert active["status"] == "RECONCILING"
+        assert active["candidate_sha"] is None
+        worktree = Path(active["worktree"])
+        assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == active[
+            "base_sha"
+        ]
+        assert pr._worktree_dirty_paths(worktree) == {"plans/main.md"}
