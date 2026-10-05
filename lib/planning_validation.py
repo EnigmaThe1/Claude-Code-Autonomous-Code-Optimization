@@ -153,6 +153,63 @@ def _receipt_generated_paths(
     return output_paths, bundle
 
 
+def load_candidate_authority_evidence(
+    path: Path,
+    *,
+    candidate_sha: str,
+    repair_envelope_sha256: str,
+) -> dict[str, Any]:
+    import json
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PlanningValidationError(
+            f"candidate authority evidence is unreadable or malformed: {exc}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise PlanningValidationError(
+            "candidate authority evidence must be a JSON object"
+        )
+    semantic_keys = (
+        "schema_version",
+        "base_sha",
+        "candidate_sha",
+        "repair_envelope_sha256",
+        "base_authority_content_sha256",
+        "candidate_authority_content_sha256",
+        "candidate_authority_snapshot",
+        "selected_authority_sets",
+        "changed_paths",
+        "reconciler_receipt_bundle_sha256",
+        "candidate_task_sources",
+    )
+    missing = [key for key in semantic_keys if key not in value]
+    if missing:
+        raise PlanningValidationError(
+            "candidate authority evidence is missing field(s): "
+            + ", ".join(missing)
+        )
+    semantic = {key: value[key] for key in semantic_keys}
+    if semantic["schema_version"] != 1:
+        raise PlanningValidationError(
+            "unsupported candidate authority evidence schema"
+        )
+    if semantic["candidate_sha"] != candidate_sha:
+        raise PlanningValidationError(
+            "candidate authority evidence SHA binding is stale"
+        )
+    if semantic["repair_envelope_sha256"] != repair_envelope_sha256:
+        raise PlanningValidationError(
+            "candidate authority evidence RepairEnvelope binding is stale"
+        )
+    if value.get("candidate_authority_evidence_sha256") != _digest(semantic):
+        raise PlanningValidationError(
+            "candidate authority evidence semantic integrity check failed"
+        )
+    return value
+
+
 def validate_planning_candidate(
     root: Path,
     active: dict[str, Any],
@@ -311,12 +368,23 @@ def validate_planning_candidate(
             f"candidate TaskSource validation failed: {exc}"
         ) from exc
 
+    task_graph = [
+        {
+            "id": row["task"]["id"],
+            "depends_on": list(row["task"].get("depends_on") or []),
+            "authority_sets": list(row["task"].get("authority_sets") or []),
+            "task_spec_sha256": row.get("task_spec_sha256"),
+        }
+        for row in task_sources.get("tasks", [])
+        if isinstance(row, dict) and isinstance(row.get("task"), dict)
+    ]
     task_summary = {
         "status": task_sources.get("status"),
         "task_source_set_sha256": task_sources.get("task_source_set_sha256"),
         "merged_tasks_sha256": task_sources.get("merged_tasks_sha256"),
         "external_dependencies": task_sources.get("external_dependencies", []),
         "source_evidence": task_sources.get("source_evidence", []),
+        "task_graph": task_graph,
     }
     candidate_content = authority_content_sha256(candidate_snapshot)
     semantic = {
