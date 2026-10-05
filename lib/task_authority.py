@@ -282,7 +282,6 @@ def _activate_locked(
             root,
             state_dir=state_root,
             authority_root=authority_check_root,
-            git_state_dir=state_root,
         )
     except TaskSourceError as exc:
         raise TaskAuthorityError(str(exc)) from exc
