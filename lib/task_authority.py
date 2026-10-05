@@ -33,6 +33,7 @@ from execution_envelope import (
     prepare_execution_envelope,
     validate_staged_diff,
     workspace_matches_activation_baseline,
+    task_owned_mode,
 )
 from git_trust import trusted_git_env
 from operator_authority import require_top_level_operator
@@ -437,6 +438,93 @@ def reconcile_task_authority(
     )
     with context:
         return _reconcile_locked(root)
+
+
+def ensure_supervisor_task_activation(root: Path) -> dict[str, Any]:
+    """Resolve/reuse one deterministic active task while caller holds the repo lease.
+
+    This is the P3 supervisor integration seam. It deliberately does not acquire
+    another SupervisorLease: do_run/do_start already own the single-writer lease.
+    """
+    root = root.expanduser().resolve()
+    try:
+        governed = task_owned_mode(root)
+    except ExecutionEnvelopeError as exc:
+        raise TaskAuthorityError(str(exc)) from exc
+    if not governed:
+        return {"status": "UNCONFIGURED", "repository": str(root)}
+
+    state = _state(root)
+    _ensure_no_orphan_authority(root, state)
+    if _active_fields_present(state):
+        try:
+            envelope = load_active_execution_envelope(root)
+            violation = load_task_violation(root)
+            evaluated = evaluate_active_workspace(root, envelope=envelope)
+        except ExecutionEnvelopeError as exc:
+            raise TaskAuthorityError(str(exc)) from exc
+        if violation is not None:
+            raise TaskAuthorityError(
+                "active task has an unresolved ExecutionEnvelope violation"
+            )
+        if evaluated["status"] != "VALID":
+            detail = "; ".join(
+                f"{row['path']}: {row['reason']}"
+                for row in evaluated["violations"][:40]
+            )
+            raise TaskAuthorityError(
+                "active task repository state violates its ExecutionEnvelope: "
+                + detail
+            )
+        return {
+            "status": "ACTIVE",
+            "reused": True,
+            "task_id": envelope["task_id"],
+            "task_spec_sha256": envelope["task_spec_sha256"],
+            "execution_envelope_sha256": envelope[
+                "execution_envelope_sha256"
+            ],
+            "product_base_sha": envelope["product_base_sha"],
+        }
+
+    try:
+        resolved = resolve_task_sources(root, persist=True)
+    except TaskSourceError as exc:
+        raise TaskAuthorityError(str(exc)) from exc
+    if resolved.get("status") != "READY":
+        raise TaskAuthorityError(
+            "repository TaskSources did not resolve to a READY TaskSourceSet"
+        )
+
+    state = _state(root)
+    frontier = ready_frontier(root, task_set=resolved, state=state)
+    if not frontier:
+        readiness = task_readiness(root, task_set=resolved, state=state)
+        blockers: list[str] = []
+        for task_id in sorted(readiness):
+            row = readiness[task_id]
+            if row.get("status") == "ACCEPTED":
+                continue
+            for blocker in row.get("blockers") or []:
+                blockers.append(
+                    f"{task_id} <- {blocker.get('dependency')}: "
+                    f"{blocker.get('reason')}"
+                )
+        if not blockers and readiness:
+            raise TaskAuthorityError(
+                "all current TaskSpecs are already durably accepted; "
+                "P3 has no READY product task to activate"
+            )
+        raise TaskAuthorityError(
+            "no dependency-safe READY TaskSpec is available"
+            + (": " + "; ".join(blockers[:40]) if blockers else "")
+        )
+
+    selected = frontier[0]
+    activated = _activate_locked(root, selected)
+    activated["reused"] = False
+    activated["ready_frontier"] = frontier
+    return activated
 
 
 def task_show(root: Path, task_id: str) -> dict[str, Any]:
