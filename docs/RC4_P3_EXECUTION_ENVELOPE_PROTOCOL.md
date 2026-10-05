@@ -1,6 +1,6 @@
 # RC4 P3 — ExecutionEnvelope, Task Activation and Diff Admission Protocol
 
-Status: **FROZEN FOR IMPLEMENTATION**
+Status: **IMPLEMENTED AND QUALIFIED**
 
 Date: 2026-10-05
 
@@ -9,6 +9,19 @@ Branch: `release/1.0.0-rc4`
 P2 closure: `1c63a031387e96ee827f72925c8be02bba85c343`
 
 P2 qualified implementation: `3342f289c4f9903e96e5bd21575af86998c73451`
+
+P3 qualified implementation: `0488dd23b9fe3e2ed65d84877ce411dfb18bf14f`
+
+P3 qualified documentation head: `2cb45905b5f574c8311b67837eec3b71d2427674`
+
+Qualification evidence:
+
+- implementation/topology head: 439/439 tests passed, then 439/439 passed again under coverage;
+- documentation head: 439/439 tests passed, then 439/439 passed again under coverage;
+- critical regression groups: 15/15, 19/19, 25/25, 16/16 and 18/18 passed;
+- package static checks and public-baseline reference audit passed;
+- aggregate measured coverage at closure: 64% across the expanded RC4-P3 code surface;
+- no RC4 promotion, tag or `main` update was performed by P3.
 
 ## 1. Purpose
 
@@ -536,3 +549,33 @@ P3 is complete only when:
 - RC3/P1/P2 behavior remains green.
 
 Only then may P4 move task execution into a package-owned resumable task worktree.
+
+
+## 25. Closure record
+
+RC4-P3 is closed at the protocol/implementation level.
+
+The qualified implementation satisfies the exit criteria above and includes:
+
+- deterministic package-owned selection/activation of a dependency-safe repository TaskSpec;
+- semantic-integrity-checked ExecutionEnvelope persistence bound to current TaskSourceSet, TaskSpec, AuthoritySet, product base, accepted-dependency state and exact pre-task WIP;
+- direct Write/Edit/NotebookEdit and statically visible Bash mutation fencing;
+- profile-independent protection of package semantic state and repository governance/control surfaces;
+- one authoritative PostToolBatch repository-state gate for opaque/parallel tool effects before the next model turn;
+- deterministic violation evidence and non-destructive reconciliation;
+- NUL-safe staged-diff admission for ordinary, rename/copy, deletion, mode-only, binary and path-edge changes;
+- active-envelope promotion-path admission through the existing promote-ff broker;
+- validated promotion handoff that closes stale authority without falsely recording an envelope violation;
+- automatic supervisor activation/reuse before mutating headless or supervised interactive workers;
+- active TaskSpec context in the headless worker checkpoint without treating free-form TaskSpec metadata/model prose as authority;
+- explicit qualification of linked worktrees, detached HEAD, sparse checkout, shallow/missing-history ancestry, missing Git objects, gitlinks/submodules, symlink traversal, Unicode/space/leading-dash paths and large selector sets.
+
+P3 intentionally leaves the following to P4:
+
+- package-owned disposable/resumable task worktree creation and recovery;
+- package-owned task commit creation;
+- exact-SHA independent task verification and acceptance;
+- durable accepted-task records as a completed-task transaction;
+- task-worktree cleanup after accepted or abandoned work.
+
+Therefore the next RC4 phase may begin from the P3 closure without changing P3 semantics.
