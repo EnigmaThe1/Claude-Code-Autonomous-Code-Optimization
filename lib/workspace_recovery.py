@@ -23,6 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from git_trust import trusted_git_env
+from execution_envelope import (
+    ExecutionEnvelopeError,
+    invalidate_task_authority_after_head_change,
+    task_owned_mode,
+    validate_promotion_target_for_active_envelope,
+)
 from promotion_policy import (
     REPOSITORY_PLANNING_REPAIR_CONTRACT,
     require_exact_attestation,
@@ -386,6 +392,29 @@ def promote_fast_forward(
         contract=effective_contract,
     )
 
+    # P3 reuses this broker as the only product-promotion path. A task-owned
+    # repository cannot promote product history without the exact active
+    # ExecutionEnvelope. Repository Planning Repair remains a separate,
+    # exact-attested planning-authority transaction.
+    try:
+        task_governed = task_owned_mode(root)
+        task_gate = validate_promotion_target_for_active_envelope(
+            root,
+            base=before_head,
+            target=target,
+        )
+    except ExecutionEnvelopeError as exc:
+        raise ValueError(str(exc)) from exc
+    if (
+        task_governed
+        and target != before_head
+        and task_gate is None
+        and effective_contract != REPOSITORY_PLANNING_REPAIR_CONTRACT
+    ):
+        raise ValueError(
+            "task-owned repository promotion requires a current active ExecutionEnvelope"
+        )
+
     before_wip = _local_wip_signature(root)
     before_untracked = _visible_untracked(root)
 
@@ -407,6 +436,14 @@ def promote_fast_forward(
             before_wip=before_wip,
             before_untracked=before_untracked,
         )
+        if before_head != target and task_gate is not None:
+            try:
+                invalidate_task_authority_after_head_change(
+                    root,
+                    reason=f"promote-ff advanced HEAD from {before_head} to {target}",
+                )
+            except ExecutionEnvelopeError as exc:
+                raise ValueError(str(exc)) from exc
         return {
             "status": "promoted",
             "branch": branch,
@@ -461,6 +498,14 @@ def promote_fast_forward(
         before_wip=before_wip,
         before_untracked=before_untracked,
     )
+    if before_head != target and task_gate is not None:
+        try:
+            invalidate_task_authority_after_head_change(
+                root,
+                reason=f"promote-ff advanced HEAD from {before_head} to {target}",
+            )
+        except ExecutionEnvelopeError as exc:
+            raise ValueError(str(exc)) from exc
 
     recovered_after_push_error = False
     if remote_before != target:
