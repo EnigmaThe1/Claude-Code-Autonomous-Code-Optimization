@@ -35,6 +35,7 @@ from execution_envelope import (  # noqa: E402
     record_task_violation,
     task_owned_mode,
 )
+from state_store import StateCorruptionError, load_json  # noqa: E402
 
 
 _MUTATING_TOOL_NAMES = {"Write", "Edit", "NotebookEdit", "Bash"}
@@ -131,7 +132,42 @@ def main() -> int:
         if state_dir_raw
         else None
     )
-    active_hint = bool(envelope_file and envelope_file.exists())
+    envelope_exists = bool(envelope_file and envelope_file.exists())
+    state_active = False
+    if state_dir_raw:
+        try:
+            durable = load_json(
+                Path(state_dir_raw).expanduser().resolve() / "state.json",
+                {},
+            )
+            if not isinstance(durable, dict):
+                raise StateCorruptionError("durable state is not an object")
+            state_active = bool(durable.get("active_execution_envelope_sha256"))
+        except (StateCorruptionError, OSError) as exc:
+            record_task_authority_failure(
+                root,
+                reason=f"durable task state could not be verified after tool batch: {exc}",
+                tool_batch=batch,
+            )
+            _block(f"Durable task authority state failed closed: {exc}")
+            return 0
+
+    if state_active != envelope_exists:
+        record_task_authority_failure(
+            root,
+            reason=(
+                "durable active-task binding disagrees with ExecutionEnvelope "
+                f"file presence (state_active={state_active}, "
+                f"envelope_exists={envelope_exists})"
+            ),
+            tool_batch=batch,
+        )
+        _block(
+            "Durable active-task binding and ExecutionEnvelope storage disagree."
+        )
+        return 0
+
+    active_hint = state_active and envelope_exists
 
     # In task-owned mode, mutating worker tools are not permitted to run a
     # product round before activation. PreToolUse blocks the statically visible
