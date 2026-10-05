@@ -54,6 +54,26 @@ def test_status_parser():
     assert ca.parse_status("nothing") == ("CONTINUE", None)
 
 
+def test_task_result_parser_is_bounded_and_fail_closed():
+    parsed = ca.parse_task_result(
+        'AUTONOMY_TASK_RESULT: '
+        '{"task_id":"T1","status":"READY_FOR_ACCEPTANCE",'
+        '"summary":"ready","verification_claims":["unit tests passed"]}'
+    )
+    assert parsed == {
+        "task_id": "T1",
+        "status": "READY_FOR_ACCEPTANCE",
+        "summary": "ready",
+        "verification_claims": ["unit tests passed"],
+    }
+    assert ca.parse_task_result(
+        'AUTONOMY_TASK_RESULT: {"task_id":"T1","status":"COMPLETE"}'
+    ) is None
+    assert ca.parse_task_result(
+        'AUTONOMY_TASK_RESULT: {"status":"CONTINUE"}'
+    ) is None
+
+
 def test_profile_detects_python_and_js():
     with tempfile.TemporaryDirectory() as td:
         r = Path(td)
