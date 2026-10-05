@@ -87,12 +87,13 @@ def _digest(value: Any) -> str:
 def _git(
     root: Path,
     *args: str,
+    state_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(root), *args],
         text=True,
         capture_output=True,
-        env=trusted_git_env(root),
+        env=trusted_git_env(root, state_dir=state_dir),
     )
 
 
@@ -209,9 +210,20 @@ def load_active_task_workspace(
     return record
 
 
-def _branch_exists(root: Path, branch: str) -> bool:
+def _branch_exists(
+    root: Path,
+    branch: str,
+    *,
+    state_dir: Path | None = None,
+) -> bool:
     return (
-        _git(root, "show-ref", "--verify", f"refs/heads/{branch}").returncode
+        _git(
+            root,
+            "show-ref",
+            "--verify",
+            f"refs/heads/{branch}",
+            state_dir=state_dir,
+        ).returncode
         == 0
     )
 
@@ -219,11 +231,17 @@ def _branch_exists(root: Path, branch: str) -> bool:
 def _ensure_exact_worktree(
     coordinator_root: Path,
     record: dict[str, Any],
+    *,
+    state_root: Path,
 ) -> Path:
     branch = str(record["task_branch"])
     base = str(record["product_base_sha"]).lower()
     worktree = Path(str(record["task_worktree"])).expanduser().resolve()
-    branch_exists = _branch_exists(coordinator_root, branch)
+    branch_exists = _branch_exists(
+        coordinator_root,
+        branch,
+        state_dir=state_root,
+    )
 
     if worktree.exists():
         if not branch_exists:
@@ -238,6 +256,7 @@ def _ensure_exact_worktree(
             "add",
             str(worktree),
             branch,
+            state_dir=state_root,
         )
         if cp.returncode != 0:
             detail = (cp.stderr or cp.stdout or "git worktree recovery failed")
@@ -252,6 +271,7 @@ def _ensure_exact_worktree(
             branch,
             str(worktree),
             base,
+            state_dir=state_root,
         )
         if cp.returncode != 0:
             detail = (cp.stderr or cp.stdout or "git worktree add failed")
@@ -267,7 +287,14 @@ def _ensure_exact_worktree(
         raise TaskWorkspaceError(
             "task worktree is not on its exact recorded package branch"
         )
-    status = _git(worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    status = _git(
+        worktree,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        state_dir=state_root,
+    )
     if status.returncode != 0:
         detail = (status.stderr or status.stdout or "git status failed")
         raise TaskWorkspaceError(detail.strip()[:1600])
@@ -332,7 +359,11 @@ def _resume_workspace(
             "coordinator primary checkout changed since task workspace creation"
         )
 
-    worktree = _ensure_exact_worktree(coordinator_root, record)
+    worktree = _ensure_exact_worktree(
+        coordinator_root,
+        record,
+        state_root=state_root,
+    )
     state = load_json(state_root / "state.json", {})
     if not isinstance(state, dict):
         raise TaskWorkspaceError("durable coordinator state is malformed")
@@ -546,7 +577,11 @@ def _begin_locked(
         / "worktree"
     ).resolve()
 
-    if _branch_exists(coordinator_root, task_branch):
+    if _branch_exists(
+        coordinator_root,
+        task_branch,
+        state_dir=state_root,
+    ):
         raise TaskWorkspaceError(
             "stale package task branch exists without a durable workspace record: "
             + task_branch
