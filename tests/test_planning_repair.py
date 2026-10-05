@@ -584,3 +584,108 @@ def test_p5_repair_envelope_persistence_detects_semantic_tamper(monkeypatch):
         path.write_text(json.dumps(raw))
         with pytest.raises(RepairEnvelopeError, match="integrity"):
             load_repair_envelope(root)
+
+
+def test_p5_architect_guard_enforces_repair_envelope_mutability_and_growth(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "main.md").write_text("plan\n")
+        (root / "requirements.md").write_text("immutable\n")
+        (root / "generated").mkdir()
+        (root / "generated" / "index.json").write_text("{}\n")
+        (root / "other.md").write_text("other\n")
+        _git(root, "add", "plans", "requirements.md", "generated", "other.md")
+        _git(root, "commit", "-qm", "multi authority")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set("a", [
+                _p5_member("plans/*.md", role="source", repair="repairable"),
+                _p5_member("requirements.md", role="contract", repair="immutable"),
+                _p5_member("generated/*.json", role="projection", repair="generated"),
+            ]),
+            _p5_set("b", [
+                _p5_member("other.md", role="source", repair="repairable"),
+            ]),
+        ]))
+        persist_repair_envelope(
+            root,
+            derive_repair_envelope(
+                root,
+                reason="repair planning",
+                authority_sets=["a"],
+            ),
+        )
+        env = {
+            "CLAUDE_AUTO_PLAN_REPAIR_ROOT": str(root),
+            "CLAUDE_AUTO_PLAN_REPAIR_ENVELOPE": str(
+                pr.repo_state_dir(root) / "planning-repair" / "repair-envelope.json"
+            ),
+        }
+
+        assert _hook(
+            "Edit",
+            {"file_path": str(root / "plans" / "main.md")},
+            env,
+        )["permissionDecision"] == "allow"
+        assert _hook(
+            "Write",
+            {"file_path": str(root / "plans" / "new.md")},
+            env,
+        )["permissionDecision"] == "allow"
+
+        for denied in (
+            root / "requirements.md",
+            root / "generated" / "index.json",
+            root / "other.md",
+            root / ".claude-auto" / "governance.json",
+        ):
+            assert _hook(
+                "Write",
+                {"file_path": str(denied)},
+                env,
+            )["permissionDecision"] == "deny"
+
+        assert _hook(
+            "Bash",
+            {"command": "rm plans/main.md"},
+            env,
+        )["permissionDecision"] == "deny"
+
+
+def test_p5_architect_guard_denies_path_also_owned_by_unselected_authority_set(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "shared.md").write_text("shared\n")
+        _git(root, "add", "shared.md")
+        _git(root, "commit", "-qm", "shared plan")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set("a", [
+                _p5_member("shared.md", role="source", repair="repairable"),
+            ]),
+            _p5_set("b", [
+                _p5_member("shared.md", role="traceability", repair="repairable"),
+            ]),
+        ]))
+        persist_repair_envelope(
+            root,
+            derive_repair_envelope(
+                root,
+                reason="repair set a",
+                authority_sets=["a"],
+            ),
+        )
+        env = {
+            "CLAUDE_AUTO_PLAN_REPAIR_ROOT": str(root),
+            "CLAUDE_AUTO_PLAN_REPAIR_ENVELOPE": str(
+                pr.repo_state_dir(root) / "planning-repair" / "repair-envelope.json"
+            ),
+        }
+        result = _hook(
+            "Edit",
+            {"file_path": str(root / "shared.md")},
+            env,
+        )
+        assert result["permissionDecision"] == "deny"
+        assert "unselected AuthoritySet" in result["permissionDecisionReason"]
