@@ -2192,6 +2192,532 @@ def cleanup_accepted_task_workspace(
         }
 
 
+
+def _task_abort_dir(state_dir: Path) -> Path:
+    return ensure_private_dir(state_dir / "tasks" / "aborted")
+
+
+def _task_abort_history_dir(state_dir: Path) -> Path:
+    return ensure_private_dir(state_dir / "tasks" / "history")
+
+
+def _preservation_ref_for_workspace(
+    workspace: dict[str, Any],
+    preservation_sha: str,
+) -> str:
+    candidate_ref = candidate_ref_for_workspace(workspace)
+    prefix = "refs/claude-auto/task-candidates/"
+    if not candidate_ref.startswith(prefix):
+        raise TaskAcceptanceError(
+            "package task ref namespace is malformed"
+        )
+    token = candidate_ref[len(prefix):]
+    digest = preservation_sha.lower()
+    if not (
+        40 <= len(digest) <= 64
+        and all(ch in "0123456789abcdef" for ch in digest)
+    ):
+        raise TaskAcceptanceError("preservation SHA is malformed")
+    return f"refs/claude-auto/task-preserved/{token}/{digest}"
+
+
+def _ignored_untracked_paths(
+    task_root: Path,
+    *,
+    state_dir: Path,
+) -> list[str]:
+    cp = _require_git(
+        task_root,
+        "ls-files",
+        "--others",
+        "-i",
+        "--exclude-standard",
+        "-z",
+        state_dir=state_dir,
+        text=False,
+    )
+    return _decode_nul_paths(bytes(cp.stdout))
+
+
+def _persist_abort_record(
+    state_dir: Path,
+    *,
+    workspace: dict[str, Any],
+    reason: str,
+    preservation_sha: str | None,
+    preservation_ref: str | None,
+    scratch_paths: list[str],
+    ignored_scratch_paths: list[str],
+) -> dict[str, Any]:
+    core = {
+        "schema_version": 1,
+        "task_id": workspace["task_id"],
+        "task_spec_sha256": workspace["task_spec_sha256"],
+        "task_source_set_sha256": workspace["task_source_set_sha256"],
+        "execution_envelope_sha256": workspace[
+            "execution_envelope_sha256"
+        ],
+        "base_sha": workspace["product_base_sha"],
+        "reason": str(reason)[:1800],
+        "preservation_sha": preservation_sha,
+        "preservation_ref": preservation_ref,
+        "scratch_paths": scratch_paths,
+        "ignored_scratch_paths": ignored_scratch_paths,
+    }
+    record = {
+        **core,
+        "abort_record_sha256": _digest(core),
+        "recorded_at": utcnow(),
+    }
+    json_dump(
+        _task_abort_dir(state_dir)
+        / f"{record['abort_record_sha256']}.json",
+        record,
+    )
+    return record
+
+
+def _remove_task_worktree_and_branch(
+    coordinator_root: Path,
+    workspace: dict[str, Any],
+    *,
+    state_dir: Path,
+) -> None:
+    worktree = Path(workspace["task_worktree"]).expanduser().resolve()
+    if worktree.exists():
+        cp = _git(
+            coordinator_root,
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+            state_dir=state_dir,
+        )
+        if cp.returncode != 0 and worktree.exists():
+            detail = str(
+                cp.stderr or cp.stdout or "git worktree remove failed"
+            )
+            raise TaskAcceptanceError(detail.strip()[:1600])
+
+    branch = str(workspace["task_branch"])
+    probe = _git(
+        coordinator_root,
+        "show-ref",
+        "--verify",
+        f"refs/heads/{branch}",
+        state_dir=state_dir,
+    )
+    if probe.returncode == 0:
+        _require_git(
+            coordinator_root,
+            "branch",
+            "-D",
+            branch,
+            state_dir=state_dir,
+        )
+
+
+def abort_task_workspace(
+    coordinator_root: Path,
+    *,
+    reason: str = "task workspace aborted by package supervisor",
+    state_dir: Path | None = None,
+    acquire_lease: bool = True,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(coordinator_root)
+    )
+    context = (
+        SupervisorLease(state_root, coordinator_root)
+        if acquire_lease
+        else nullcontext()
+    )
+    with context:
+        workspace = load_active_task_workspace(
+            coordinator_root,
+            state_dir=state_root,
+        )
+        if workspace is None:
+            return {
+                "status": "CLEAN",
+                "active_task_id": None,
+            }
+
+        # The first P4 abort implementation only performs automatic destructive
+        # cleanup from ACTIVE. Later lifecycle stages already have candidate /
+        # verifier / promotion evidence, so refusing automatic cleanup preserves
+        # that evidence rather than guessing which exact snapshot to retire.
+        if workspace["lifecycle_state"] != "ACTIVE":
+            return {
+                "status": "PRESERVED_MANUAL",
+                "task_id": workspace["task_id"],
+                "lifecycle_state": workspace["lifecycle_state"],
+                "task_worktree": workspace["task_worktree"],
+                "reason": (
+                    "automatic abort cleanup is limited to ACTIVE task "
+                    "workspaces; later lifecycle evidence was left intact"
+                ),
+            }
+
+        task_root = Path(workspace["task_worktree"]).expanduser().resolve()
+        boundary = evaluate_task_workspace_boundary(
+            coordinator_root,
+            task_root=task_root,
+            state_dir=state_root,
+        )
+        if boundary["status"] != "VALID":
+            return {
+                "status": "PRESERVED_MANUAL",
+                "task_id": workspace["task_id"],
+                "task_worktree": workspace["task_worktree"],
+                "reason": (
+                    "task workspace boundary drift prevents automatic abort"
+                ),
+                "violations": boundary["violations"],
+            }
+
+        try:
+            envelope = load_active_execution_envelope(
+                task_root,
+                state_dir=state_root,
+                authority_root=coordinator_root,
+                git_state_dir=state_root,
+            )
+        except ExecutionEnvelopeError as exc:
+            return {
+                "status": "PRESERVED_MANUAL",
+                "task_id": workspace["task_id"],
+                "task_worktree": workspace["task_worktree"],
+                "reason": (
+                    "active task authority is not current enough for safe "
+                    "automatic abort: " + str(exc)
+                ),
+            }
+
+        _reset_index(task_root, state_dir=state_root)
+        evaluated = evaluate_active_workspace(
+            task_root,
+            envelope=envelope,
+            state_dir=state_root,
+            authority_root=coordinator_root,
+            git_state_dir=state_root,
+        )
+        if evaluated["status"] != "VALID":
+            return {
+                "status": "PRESERVED_MANUAL",
+                "task_id": workspace["task_id"],
+                "task_worktree": workspace["task_worktree"],
+                "reason": (
+                    "out-of-envelope or unknown task changes prevent "
+                    "automatic abort"
+                ),
+                "violations": evaluated["violations"],
+            }
+
+        ignored = _ignored_untracked_paths(
+            task_root,
+            state_dir=state_root,
+        )
+        ignored_unknown = [
+            path
+            for path in ignored
+            if not path_matches_any(
+                path,
+                envelope["runtime_scratch_paths"],
+            )
+        ]
+        if ignored_unknown:
+            return {
+                "status": "PRESERVED_MANUAL",
+                "task_id": workspace["task_id"],
+                "task_worktree": workspace["task_worktree"],
+                "reason": (
+                    "ignored untracked files outside declared runtime scratch "
+                    "prevent automatic abort"
+                ),
+                "paths": ignored_unknown,
+            }
+
+        changed = _changed_paths(task_root, state_dir=state_root)
+        promotable = [
+            path
+            for path in changed
+            if path_matches_any(path, envelope["promotion_paths"])
+            and not path_matches_any(
+                path,
+                envelope["runtime_scratch_paths"],
+            )
+        ]
+        scratch = [
+            path
+            for path in changed
+            if path_matches_any(
+                path,
+                envelope["runtime_scratch_paths"],
+            )
+        ]
+
+        preservation_sha: str | None = None
+        preservation_ref: str | None = None
+        if promotable:
+            _stage_exact_paths(
+                task_root,
+                promotable,
+                state_dir=state_root,
+            )
+            try:
+                stage = validate_staged_diff(
+                    task_root,
+                    envelope=envelope,
+                    state_dir=state_root,
+                    authority_root=coordinator_root,
+                    git_state_dir=state_root,
+                )
+            except ExecutionEnvelopeError as exc:
+                _reset_index(task_root, state_dir=state_root)
+                return {
+                    "status": "PRESERVED_MANUAL",
+                    "task_id": workspace["task_id"],
+                    "task_worktree": workspace["task_worktree"],
+                    "reason": str(exc),
+                }
+
+            tree = str(
+                _require_git(
+                    task_root,
+                    "write-tree",
+                    state_dir=state_root,
+                ).stdout
+            ).strip().lower()
+            base = str(workspace["product_base_sha"]).lower()
+            base_tree = str(
+                _require_git(
+                    task_root,
+                    "rev-parse",
+                    f"{base}^{{tree}}",
+                    state_dir=state_root,
+                ).stdout
+            ).strip().lower()
+            if tree != base_tree:
+                identity = _git_identity(
+                    task_root,
+                    state_dir=state_root,
+                )
+                stable_date = str(workspace.get("created_at") or "")
+                if stable_date:
+                    identity.update({
+                        "GIT_AUTHOR_DATE": stable_date,
+                        "GIT_COMMITTER_DATE": stable_date,
+                    })
+                preservation_sha = str(
+                    _require_git(
+                        task_root,
+                        "commit-tree",
+                        tree,
+                        "-p",
+                        base,
+                        state_dir=state_root,
+                        input_data=(
+                            "Preserve aborted task "
+                            + str(workspace["task_id"])
+                            + "\n"
+                        ),
+                        extra_env=identity,
+                    ).stdout
+                ).strip().lower()
+                try:
+                    admitted = validate_promotion_target_for_active_envelope(
+                        task_root,
+                        base=base,
+                        target=preservation_sha,
+                        state_dir=state_root,
+                        authority_root=coordinator_root,
+                        git_state_dir=state_root,
+                    )
+                except ExecutionEnvelopeError as exc:
+                    _reset_index(task_root, state_dir=state_root)
+                    return {
+                        "status": "PRESERVED_MANUAL",
+                        "task_id": workspace["task_id"],
+                        "task_worktree": workspace["task_worktree"],
+                        "reason": str(exc),
+                    }
+                if not isinstance(admitted, dict) or admitted.get(
+                    "status"
+                ) != "VALID":
+                    _reset_index(task_root, state_dir=state_root)
+                    return {
+                        "status": "PRESERVED_MANUAL",
+                        "task_id": workspace["task_id"],
+                        "task_worktree": workspace["task_worktree"],
+                        "reason": (
+                            "preservation commit did not pass task-envelope "
+                            "promotion admission"
+                        ),
+                    }
+
+                preservation_ref = _preservation_ref_for_workspace(
+                    workspace,
+                    preservation_sha,
+                )
+                workspace = update_task_workspace_package_state(
+                    coordinator_root,
+                    state_dir=state_root,
+                    expected_states={"ACTIVE"},
+                    updates={
+                        "lifecycle_state": "ABANDONED_PRESERVED",
+                        "preservation_sha": preservation_sha,
+                        "preservation_ref": preservation_ref,
+                        "preservation_ref_pending": True,
+                        "abort_reason": str(reason)[:1800],
+                        "abort_preserve_started_at": utcnow(),
+                        "preserved_stage_entries": stage[
+                            "staged_entries"
+                        ],
+                    },
+                )
+                current = _ref_value(
+                    coordinator_root,
+                    preservation_ref,
+                    state_dir=state_root,
+                )
+                if current is None:
+                    zero = "0" * len(preservation_sha)
+                    _require_git(
+                        coordinator_root,
+                        "update-ref",
+                        preservation_ref,
+                        preservation_sha,
+                        zero,
+                        state_dir=state_root,
+                    )
+                elif current != preservation_sha:
+                    raise TaskAcceptanceError(
+                        "task preservation ref points at an unexpected object"
+                    )
+                workspace = update_task_workspace_package_state(
+                    coordinator_root,
+                    state_dir=state_root,
+                    expected_states={"ABANDONED_PRESERVED"},
+                    updates={
+                        "preservation_ref_pending": False,
+                        "preserved_at": utcnow(),
+                    },
+                    refresh_ref_binding=True,
+                )
+            _reset_index(task_root, state_dir=state_root)
+
+        abort_record = _persist_abort_record(
+            state_root,
+            workspace=workspace,
+            reason=reason,
+            preservation_sha=preservation_sha,
+            preservation_ref=preservation_ref,
+            scratch_paths=scratch,
+            ignored_scratch_paths=ignored,
+        )
+        json_dump(
+            _task_abort_history_dir(state_root)
+            / (
+                "workspace-aborted-"
+                + abort_record["abort_record_sha256"][:24]
+                + ".json"
+            ),
+            workspace,
+        )
+
+        _remove_task_worktree_and_branch(
+            coordinator_root,
+            workspace,
+            state_dir=state_root,
+        )
+        invalidate_task_authority_after_head_change(
+            coordinator_root,
+            reason=(
+                "task workspace aborted without product acceptance: "
+                + str(workspace["task_id"])
+            ),
+            state_dir=state_root,
+        )
+
+        active_path = state_root / "tasks" / "workspace-active.json"
+        try:
+            active_path.unlink()
+        except FileNotFoundError:
+            pass
+
+        state = load_json(state_root / "state.json", {})
+        if not isinstance(state, dict):
+            raise TaskAcceptanceError(
+                "durable coordinator state is malformed after abort"
+            )
+        for key in (
+            "active_task_workspace_sha256",
+            "active_task_worktree",
+            "active_task_branch",
+            "active_task_candidate_sha",
+            "active_task_verified_sha",
+        ):
+            state[key] = None
+        state["task_workspace_lifecycle_state"] = None
+        state["last_aborted_task_id"] = workspace["task_id"]
+        state["last_abort_record_sha256"] = abort_record[
+            "abort_record_sha256"
+        ]
+        json_dump(state_root / "state.json", state)
+
+        try:
+            task_set = resolve_task_sources(
+                coordinator_root,
+                persist=True,
+            )
+        except TaskSourceError as exc:
+            raise TaskAcceptanceError(str(exc)) from exc
+        state = load_json(state_root / "state.json", {})
+        try:
+            readiness = task_readiness(
+                coordinator_root,
+                task_set=task_set,
+                state=state,
+                state_dir=state_root,
+                authority_root=coordinator_root,
+            )
+            frontier = ready_frontier(
+                coordinator_root,
+                task_set=task_set,
+                state=state,
+                state_dir=state_root,
+                authority_root=coordinator_root,
+            )
+        except Exception as exc:
+            raise TaskAcceptanceError(
+                "unable to recompute task readiness after abort: "
+                + str(exc)
+            ) from exc
+
+        return {
+            "status": (
+                "ABANDONED_PRESERVED"
+                if preservation_sha is not None
+                else "ABORTED_CLEAN"
+            ),
+            "task_id": workspace["task_id"],
+            "abort_record_sha256": abort_record[
+                "abort_record_sha256"
+            ],
+            "preservation_sha": preservation_sha,
+            "preservation_ref": preservation_ref,
+            "discarded_runtime_scratch_paths": scratch,
+            "discarded_ignored_scratch_paths": ignored,
+            "ready_frontier": frontier,
+            "next_task_id": frontier[0] if frontier else None,
+            "readiness": readiness,
+        }
+
+
 def validate_task_candidate_worktree(
     coordinator_root: Path,
     *,
