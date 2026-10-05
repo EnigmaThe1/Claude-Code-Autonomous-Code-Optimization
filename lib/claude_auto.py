@@ -1297,6 +1297,34 @@ def _revalidate_authoritative_plan(
 
 
 
+def _p4_supervisor_completion_result(plan: dict[str, Any]) -> str:
+    task_rows = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
+    completed = sorted(
+        {
+            str(row.get("id")).strip()
+            for row in task_rows
+            if isinstance(row, dict)
+            and isinstance(row.get("id"), str)
+            and str(row.get("id")).strip()
+        }
+    )
+    progress = {
+        "completed_task_ids": completed,
+        "remaining_task_ids": [],
+        "verification": {"repository_tasks": "PASS"},
+        "external_checkpoint": None,
+    }
+    return (
+        "AUTONOMY_STATUS: COMPLETE\n"
+        "AUTONOMY_SUMMARY: All repository-owned TaskSpecs are durably accepted; "
+        "begin supervisor-owned final whole-system qualification.\n"
+        "AUTONOMY_PLAN_IMPACT: NONE\n"
+        "AUTONOMY_PHASE_BOUNDARY: NO\n"
+        "AUTONOMY_PROGRESS: "
+        + json.dumps(progress, sort_keys=True, separators=(",", ":"))
+    )
+
+
 def _p4_prepare_supervisor_task(
     coordinator_root: Path,
     sd: Path,
@@ -2060,20 +2088,64 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
             task_context=task_context,
         )
         args._effective_max_budget_usd = effective_invocation_budget(args, state)
-        cp, before, after, log, result_text, session_id, raw_obj = _run_one_goal(
-            root=worker_root,
-            sd=sd,
-            args=args,
-            prompt=prompt,
-            env=main_env,
-            provider_detail=main_provider,
-            model=args.model,
-            verifier_model=args.verifier_model,
-            researcher_model=args.researcher_model,
-            cycle=cycle,
-            settings_path_override=task_settings,
-            force_hermetic_settings=task_settings is not None,
-        )
+        if cycle_task_activation.get("status") == "COMPLETE":
+            before = git_snapshot(root)
+            after = git_snapshot(root)
+            result_text = _p4_supervisor_completion_result(plan)
+            raw_obj = {
+                "result": result_text,
+                "session_id": None,
+                "usage": {},
+                "num_turns": 0,
+                "total_cost_usd": 0.0,
+            }
+            cp = subprocess.CompletedProcess(
+                ["claude-auto", "p4-final-qualification"],
+                0,
+                json.dumps(raw_obj),
+                "",
+            )
+            session_id = None
+            now = utcnow()
+            log = compact_run_log(
+                cycle=cycle,
+                started_at=now,
+                finished_at=now,
+                provider=main_provider,
+                model=args.model,
+                returncode=0,
+                result_text=result_text,
+                session_id=None,
+                raw_obj=raw_obj,
+                stderr="",
+                git_before=before,
+                git_after=after,
+                env=main_env,
+                retain_transcripts=args.retain_transcripts,
+                stdout=cp.stdout,
+            )
+            log["runtime_events"] = []
+            log["outcome"] = "SUCCESS"
+            log["outcome_reason"] = (
+                "all repository-owned TaskSpecs are durably accepted"
+            )
+            log["wall_seconds"] = 0.0
+            log["supervisor_generated_completion_candidate"] = True
+        else:
+            cp, before, after, log, result_text, session_id, raw_obj = _run_one_goal(
+                root=worker_root,
+                sd=sd,
+                args=args,
+                prompt=prompt,
+                env=main_env,
+                provider_detail=main_provider,
+                model=args.model,
+                verifier_model=args.verifier_model,
+                researcher_model=args.researcher_model,
+                cycle=cycle,
+                settings_path_override=task_settings,
+                force_hermetic_settings=task_settings is not None,
+            )
         effective_env = main_env
         effective_provider_detail = main_provider
         effective_model = args.model
@@ -2094,7 +2166,12 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
         # Claude session through --fallback-model.
         first_route_log = log
         route_failure = log.get("outcome") in {"TRANSIENT_PROVIDER", "PROVIDER_ERROR", "MODEL_UNAVAILABLE", "EXTERNAL_BLOCKER"}
-        if route_failure and args.fallback_model and not _same_provider_route(args):
+        if (
+            cycle_task_activation.get("status") != "COMPLETE"
+            and route_failure
+            and args.fallback_model
+            and not _same_provider_route(args)
+        ):
             fb_env, fb_detail = provider_from_args(args, prefix="fallback_")
             fb_verifier = getattr(args, "fallback_verifier_model", None)
             fb_researcher = getattr(args, "fallback_researcher_model", None)
