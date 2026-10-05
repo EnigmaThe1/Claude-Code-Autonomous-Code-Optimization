@@ -203,6 +203,49 @@ def progress_evidence(state: dict[str, Any], snap: dict[str, Any]) -> dict[str, 
         "last_security_review_verdict": state.get("last_security_review_verdict"),
         "security_review_findings_sha256": sha256_text(json.dumps(state.get("last_security_review_findings"), sort_keys=True, default=str)) if state.get("last_security_review_findings") is not None else None,
         "progress_checkpoint_sha256": sha256_text(json.dumps(state.get("progress_checkpoint"), sort_keys=True, default=str)) if state.get("progress_checkpoint") is not None else None,
+        # P4 task progress can be real even when the product tree is unchanged
+        # (for example an independently verified no-op task). Include only
+        # durable package-owned task state, never model prose, so stagnation
+        # remains deterministic while accepted/scheduled task transitions count.
+        "active_task_id": state.get("active_task_id"),
+        "active_task_workspace_sha256": state.get(
+            "active_task_workspace_sha256"
+        ),
+        "task_workspace_lifecycle_state": state.get(
+            "task_workspace_lifecycle_state"
+        ),
+        "accepted_tasks_sha256": sha256_text(
+            json.dumps(
+                state.get("accepted_tasks") or {},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        ),
+        "last_task_result_sha256": (
+            sha256_text(
+                json.dumps(
+                    state.get("last_task_result"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
+            if state.get("last_task_result") is not None
+            else None
+        ),
+        "last_task_acceptance_checkpoint_sha256": (
+            sha256_text(
+                json.dumps(
+                    state.get("last_task_acceptance_checkpoint"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
+            if state.get("last_task_acceptance_checkpoint") is not None
+            else None
+        ),
     }
 
 
