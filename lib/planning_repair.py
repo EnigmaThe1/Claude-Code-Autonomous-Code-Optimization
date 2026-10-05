@@ -1596,11 +1596,433 @@ def verify_planning_repair(root: Path, args: Any) -> dict[str, Any]:
     }
 
 
+def _p5_envelope_contract_shape(envelope: dict[str, Any]) -> dict[str, Any]:
+    member_shape = [
+        {
+            "set_id": row.get("set_id"),
+            "path": row.get("path"),
+            "role": row.get("role"),
+            "repair": row.get("repair"),
+            "required": bool(row.get("required")),
+            "git_mode": row.get("git_mode"),
+        }
+        for row in envelope.get("base_members", [])
+        if isinstance(row, dict)
+    ]
+    return {
+        "product_branch": envelope.get("product_branch"),
+        "governance_blob": envelope.get("governance_blob"),
+        "source_mode": envelope.get("source_mode"),
+        "selected_authority_sets": envelope.get("selected_authority_sets"),
+        "base_member_shape": sorted(
+            member_shape,
+            key=lambda row: (str(row["set_id"]), str(row["path"])),
+        ),
+        "repairable_paths": envelope.get("repairable_paths"),
+        "immutable_paths": envelope.get("immutable_paths"),
+        "generated_paths": envelope.get("generated_paths"),
+        "repairable_selectors": envelope.get("repairable_selectors"),
+        "immutable_selectors": envelope.get("immutable_selectors"),
+        "generated_selectors": envelope.get("generated_selectors"),
+        "allowed_new_repairable_selectors": envelope.get(
+            "allowed_new_repairable_selectors"
+        ),
+        "allowed_new_generated_selectors": envelope.get(
+            "allowed_new_generated_selectors"
+        ),
+        "validator_contracts": envelope.get("validator_contracts"),
+        "reconciler_contracts": envelope.get("reconciler_contracts"),
+        "task_source_contract_digest": envelope.get(
+            "task_source_contract_digest"
+        ),
+        "protected_control_paths": envelope.get("protected_control_paths"),
+    }
+
+
+def _rebase_in_progress(worktree: Path) -> bool:
+    for name in ("rebase-merge", "rebase-apply"):
+        cp = _git(worktree, "rev-parse", "--git-path", name)
+        if cp.returncode != 0 or not cp.stdout.strip():
+            continue
+        path = Path(cp.stdout.strip())
+        if not path.is_absolute():
+            path = (worktree / path).resolve()
+        if path.exists():
+            return True
+    return False
+
+
+def _persist_fresh_p5_base(
+    root: Path,
+    active: dict[str, Any],
+    fresh_envelope: dict[str, Any],
+    *,
+    status: str,
+    candidate_sha: str | None,
+) -> dict[str, Any]:
+    persisted = persist_repair_envelope(root, fresh_envelope)
+    _clear_p5_candidate_evidence(active)
+    active.update({
+        "status": status,
+        "base_sha": persisted["base_sha"],
+        "repair_envelope_sha256": persisted["repair_envelope_sha256"],
+        "selected_authority_sets": persisted["selected_authority_sets"],
+        "candidate_sha": candidate_sha,
+        "verified_sha": None,
+        "refresh": None,
+        "refresh_failure": None,
+        "refreshed_at": utcnow(),
+    })
+    json_dump(_active_path(root), active)
+    return active
+
+
+def _refresh_p5_planning_repair_base(
+    root: Path,
+    active: dict[str, Any],
+) -> dict[str, Any]:
+    product_branch = str(active.get("product_branch") or "")
+    if not product_branch:
+        raise ValueError("P5 planning repair is missing product-branch identity")
+    if _current_branch(root) != product_branch:
+        raise ValueError(
+            f"P5 refresh-base must run from product branch {product_branch!r}"
+        )
+    old_base = str(active["base_sha"])
+    new_base = _rev(root, product_branch)
+    if _rev(root, "HEAD") != new_base:
+        raise ValueError(
+            "P5 refresh-base requires coordinator HEAD at the exact product-branch tip"
+        )
+
+    worktree = Path(active["worktree"]).expanduser().resolve()
+    branch = str(active["repair_branch"])
+    candidate = _rev(worktree, branch)
+
+    refresh = active.get("refresh") if isinstance(active.get("refresh"), dict) else None
+    if refresh and refresh.get("in_progress") and refresh.get("schema_version") == 2:
+        recorded_new = str(refresh.get("new_base") or "")
+        if recorded_new != new_base:
+            if _rebase_in_progress(worktree):
+                _git(worktree, "rebase", "--abort")
+            original = str(refresh.get("candidate_before") or "")
+            if original:
+                _git(worktree, "checkout", "-q", branch)
+                _git(worktree, "reset", "--hard", "-q", original)
+            active["refresh"] = None
+            active["refresh_failure"] = None
+            json_dump(_active_path(root), active)
+            return _refresh_p5_planning_repair_base(root, active)
+
+    if new_base == old_base and not refresh:
+        return {
+            "status": "unchanged",
+            "base_sha": old_base,
+            "candidate_sha": active.get("candidate_sha"),
+            "repair_envelope_sha256": active.get("repair_envelope_sha256"),
+        }
+
+    old_to_new = _git(
+        root,
+        "merge-base",
+        "--is-ancestor",
+        old_base,
+        new_base,
+    )
+    if old_to_new.returncode != 0:
+        raise ValueError(
+            "new product base is not a descendant of the P5 planning repair base"
+        )
+
+    old_envelope = load_repair_envelope(root)
+    if (
+        not isinstance(old_envelope, dict)
+        or old_envelope.get("repair_envelope_sha256")
+        != active.get("repair_envelope_sha256")
+    ):
+        raise ValueError("active P5 repair is not bound to its current RepairEnvelope")
+
+    try:
+        fresh_envelope = derive_repair_envelope(
+            root,
+            reason=str(active.get("reason") or ""),
+            authority_sets=list(active.get("selected_authority_sets") or []),
+        )
+    except RepairEnvelopeError as exc:
+        raise ValueError(
+            f"unable to derive fresh RepairEnvelope at advanced product base: {exc}"
+        ) from exc
+    if _p5_envelope_contract_shape(old_envelope) != _p5_envelope_contract_shape(
+        fresh_envelope
+    ):
+        raise ValueError(
+            "product-base advancement changed selected planning authority, "
+            "mutability/helper contracts, TaskSource contract or control authority; "
+            "the old RepairEnvelope is invalid and automatic refresh is refused"
+        )
+
+    candidate_before = str(active.get("candidate_sha") or "")
+    if candidate_before and candidate_before != candidate:
+        raise ValueError(
+            "active P5 candidate SHA does not match the repair-branch HEAD"
+        )
+
+    if refresh and refresh.get("in_progress"):
+        recorded_fresh = refresh.get("fresh_repair_envelope")
+        if (
+            not isinstance(recorded_fresh, dict)
+            or recorded_fresh.get("repair_envelope_sha256")
+            != fresh_envelope.get("repair_envelope_sha256")
+        ):
+            raise ValueError(
+                "interrupted P5 refresh is bound to a different fresh RepairEnvelope"
+            )
+        mode = str(refresh.get("mode") or "")
+        candidate_before = str(refresh.get("candidate_before") or candidate_before)
+        if _rebase_in_progress(worktree):
+            _git(worktree, "rebase", "--abort")
+            if candidate_before:
+                _git(worktree, "checkout", "-q", branch)
+                _git(worktree, "reset", "--hard", "-q", candidate_before)
+            candidate = _rev(worktree, branch)
+
+        current_head = _rev(worktree, "HEAD")
+        if mode == "advance-empty" and current_head == new_base:
+            active = _persist_fresh_p5_base(
+                root,
+                active,
+                fresh_envelope,
+                status="ACTIVE",
+                candidate_sha=None,
+            )
+            return {
+                "status": "advanced-empty",
+                "base_sha": new_base,
+                "candidate_sha": None,
+                "repair_envelope_sha256": active["repair_envelope_sha256"],
+            }
+        if mode in {"absorbed-reconcile", "rebase-reconcile"} and current_head == new_base:
+            active = _persist_fresh_p5_base(
+                root,
+                active,
+                fresh_envelope,
+                status="RECONCILING",
+                candidate_sha=None,
+            )
+            return {
+                "status": (
+                    "already-absorbed-reconcile"
+                    if mode == "absorbed-reconcile"
+                    else "rebased-reconcile"
+                ),
+                "base_sha": new_base,
+                "candidate_sha": None,
+                "repair_envelope_sha256": active["repair_envelope_sha256"],
+            }
+        if mode in {"absorbed-candidate", "rebase-candidate"}:
+            desc = _git(
+                worktree,
+                "merge-base",
+                "--is-ancestor",
+                new_base,
+                current_head,
+            )
+            if desc.returncode == 0:
+                active = _persist_fresh_p5_base(
+                    root,
+                    active,
+                    fresh_envelope,
+                    status="CANDIDATE",
+                    candidate_sha=current_head,
+                )
+                return {
+                    "status": (
+                        "already-absorbed"
+                        if mode == "absorbed-candidate"
+                        else "rebased"
+                    ),
+                    "base_sha": new_base,
+                    "candidate_sha": current_head,
+                    "repair_envelope_sha256": active[
+                        "repair_envelope_sha256"
+                    ],
+                }
+
+    if not candidate_before:
+        if candidate != old_base:
+            raise ValueError(
+                "P5 repair has no candidate record but repair branch moved from its base"
+            )
+        if _worktree_dirty_paths(worktree):
+            raise ValueError(
+                "P5 planning repair worktree must be clean before refreshing an empty repair base"
+            )
+        mode = "advance-empty"
+    else:
+        new_in_candidate = _git(
+            worktree,
+            "merge-base",
+            "--is-ancestor",
+            new_base,
+            candidate,
+        )
+        if new_in_candidate.returncode == 0:
+            mode = (
+                "absorbed-reconcile"
+                if fresh_envelope.get("reconciler_contracts")
+                else "absorbed-candidate"
+            )
+        else:
+            mode = (
+                "rebase-reconcile"
+                if fresh_envelope.get("reconciler_contracts")
+                else "rebase-candidate"
+            )
+
+    active["refresh"] = {
+        "schema_version": 2,
+        "in_progress": True,
+        "mode": mode,
+        "old_base": old_base,
+        "new_base": new_base,
+        "candidate_before": candidate_before,
+        "old_repair_envelope_sha256": old_envelope[
+            "repair_envelope_sha256"
+        ],
+        "fresh_repair_envelope": fresh_envelope,
+        "started_at": utcnow(),
+    }
+    json_dump(_active_path(root), active)
+
+    if mode == "advance-empty":
+        reset = _git(worktree, "reset", "--hard", "-q", new_base)
+        if reset.returncode != 0:
+            raise ValueError(
+                "unable to advance empty P5 repair worktree to the new product base"
+            )
+        active = _persist_fresh_p5_base(
+            root,
+            active,
+            fresh_envelope,
+            status="ACTIVE",
+            candidate_sha=None,
+        )
+        return {
+            "status": "advanced-empty",
+            "base_sha": new_base,
+            "candidate_sha": None,
+            "repair_envelope_sha256": active["repair_envelope_sha256"],
+        }
+
+    if mode == "absorbed-candidate":
+        active = _persist_fresh_p5_base(
+            root,
+            active,
+            fresh_envelope,
+            status="CANDIDATE",
+            candidate_sha=candidate,
+        )
+        return {
+            "status": "already-absorbed",
+            "base_sha": new_base,
+            "candidate_sha": candidate,
+            "repair_envelope_sha256": active["repair_envelope_sha256"],
+        }
+
+    if mode == "absorbed-reconcile":
+        reset = _git(worktree, "reset", "--mixed", new_base)
+        if reset.returncode != 0:
+            raise ValueError(
+                "unable to reopen absorbed P5 candidate for deterministic reconciliation"
+            )
+        active = _persist_fresh_p5_base(
+            root,
+            active,
+            fresh_envelope,
+            status="RECONCILING",
+            candidate_sha=None,
+        )
+        return {
+            "status": "already-absorbed-reconcile",
+            "base_sha": new_base,
+            "candidate_sha": None,
+            "repair_envelope_sha256": active["repair_envelope_sha256"],
+        }
+
+    if _worktree_dirty_paths(worktree):
+        raise ValueError(
+            "P5 planning repair worktree must be clean before rebasing its candidate"
+        )
+    if _rebase_in_progress(worktree):
+        _git(worktree, "rebase", "--abort")
+        _git(worktree, "checkout", "-q", branch)
+        _git(worktree, "reset", "--hard", "-q", candidate_before)
+
+    cp = _git(
+        worktree,
+        "rebase",
+        "--onto",
+        new_base,
+        old_base,
+        branch,
+    )
+    if cp.returncode != 0:
+        detail = (cp.stderr or cp.stdout or "git rebase failed").strip()
+        active = load_active_repair(root)
+        active["refresh_failure"] = detail[:1600]
+        json_dump(_active_path(root), active)
+        raise ValueError(
+            "P5 planning repair base refresh was interrupted/failed; rerun "
+            "refresh-base to abort/reconcile/retry: "
+            + detail[:1200]
+        )
+
+    candidate_after = _rev(worktree, branch)
+    if mode == "rebase-reconcile":
+        reset = _git(worktree, "reset", "--mixed", new_base)
+        if reset.returncode != 0:
+            raise ValueError(
+                "unable to reopen rebased P5 candidate for deterministic reconciliation"
+            )
+        active = _persist_fresh_p5_base(
+            root,
+            active,
+            fresh_envelope,
+            status="RECONCILING",
+            candidate_sha=None,
+        )
+        return {
+            "status": "rebased-reconcile",
+            "base_sha": new_base,
+            "candidate_sha": None,
+            "prior_candidate_sha": candidate_after,
+            "repair_envelope_sha256": active["repair_envelope_sha256"],
+        }
+
+    active = _persist_fresh_p5_base(
+        root,
+        active,
+        fresh_envelope,
+        status="CANDIDATE",
+        candidate_sha=candidate_after,
+    )
+    return {
+        "status": "rebased",
+        "base_sha": new_base,
+        "candidate_sha": candidate_after,
+        "repair_envelope_sha256": active["repair_envelope_sha256"],
+    }
+
+
 def refresh_planning_repair_base(root: Path) -> dict[str, Any]:
     root = root.expanduser().resolve()
     policy = load_planning_repair_policy(root)
     active = load_active_repair(root)
-    if not policy or not active:
+    if not active:
+        raise ValueError("no active planning repair exists")
+    if active.get("schema_version") == 2:
+        return _refresh_p5_planning_repair_base(root, active)
+    if not policy:
         raise ValueError("no configured active planning repair exists")
     worktree = Path(active["worktree"]).resolve()
     branch = str(active["repair_branch"])
