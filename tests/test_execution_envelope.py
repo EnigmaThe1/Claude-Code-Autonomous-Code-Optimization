@@ -56,6 +56,7 @@ from task_acceptance import (
     reconcile_task_candidate,
     reopen_task_candidate_for_repair,
     seal_task_candidate,
+    verify_task_candidate_deterministic,
 )
 from task_workspace import (
     begin_task_workspace,
@@ -1927,6 +1928,199 @@ def test_p4_rejected_candidate_reopens_and_reseals_replacement(monkeypatch):
         ).stdout.strip() == second_sha
 
         _run(primary, "git", "update-ref", "-d", second_ref)
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def _configured_with_verification(
+    root: Path,
+    tasks: list[dict],
+    command: str,
+) -> Path:
+    control = root / ".claude-auto"
+    control.mkdir(parents=True, exist_ok=True)
+    (control / "verification.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "commands": {"test": [command]},
+        }, indent=2)
+        + "\n"
+    )
+    _run(root, "git", "add", ".claude-auto/verification.json")
+    _run(root, "git", "commit", "-qm", "verification contract")
+    return _configured(root, tasks)
+
+
+def test_p4_deterministic_verification_executes_contract_not_taskspec_claim(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        claim_marker = Path(td) / "TASKSPEC_CLAIM_MUST_NOT_EXECUTE"
+        task = _task("T1")
+        task["verification"] = [
+            "python -c \"from pathlib import Path; "
+            f"Path({str(claim_marker)!r}).write_text('ran')\""
+        ]
+        explicit = "python -c \"print('EXPLICIT-P4-VERIFY')\""
+        primary = _configured_with_verification(root, [task], explicit)
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "candidate.txt").write_text(
+            "candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        result = verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=30,
+        )
+
+        assert result["status"] == "PASS"
+        assert result["candidate_sha"] == candidate["candidate_sha"]
+        assert result["command_count"] == 1
+        assert result["receipts"][0]["command"] == explicit
+        assert result["receipts"][0]["verdict"] == "PASS"
+        assert result["baseline_receipts"][0]["command"] == explicit
+        assert not claim_marker.exists()
+        assert result["receipts"][0]["git_before"]["head"] == candidate[
+            "candidate_sha"
+        ]
+        assert result["baseline_receipts"][0]["git_before"]["head"] == record[
+            "product_base_sha"
+        ]
+
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "VERIFYING"
+        assert workspace["deterministic_verification_verdict"] == "PASS"
+        assert workspace["deterministic_verification_sha256"] == result[
+            "verification_bundle_sha256"
+        ]
+        verification_root = (
+            repo_state_dir(primary)
+            / "tasks"
+            / "verification-worktrees"
+            / candidate["candidate_sha"][:24]
+        )
+        assert not (verification_root / "base").exists()
+        assert not (verification_root / "candidate").exists()
+
+        _run(
+            primary,
+            "git",
+            "update-ref",
+            "-d",
+            candidate_ref_for_workspace(workspace),
+        )
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_deterministic_verification_preserves_unchanged_baseline_failure(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        command = (
+            "python -c \"import sys; print('same-baseline-failure'); "
+            "sys.exit(3)\""
+        )
+        primary = _configured_with_verification(
+            _repo(Path(td) / "repo"),
+            [_task("T1")],
+            command,
+        )
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "candidate.txt").write_text(
+            "candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        result = verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=30,
+        )
+
+        assert result["status"] == "PASS"
+        assert result["baseline_receipts"][0]["exit_code"] == 3
+        assert result["baseline_receipts"][0]["verdict"] == "BASELINE_FAILURE"
+        assert result["receipts"][0]["exit_code"] == 3
+        assert result["receipts"][0]["verdict"] == "BASELINE_FAILURE_UNCHANGED"
+
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        _run(
+            primary,
+            "git",
+            "update-ref",
+            "-d",
+            candidate_ref_for_workspace(workspace),
+        )
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_deterministic_candidate_only_failure_blocks_acceptance(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        command = (
+            "python -c \"from pathlib import Path; import sys; "
+            "sys.exit(7 if Path('src/task/candidate.txt').exists() else 0)\""
+        )
+        primary = _configured_with_verification(
+            _repo(Path(td) / "repo"),
+            [_task("T1")],
+            command,
+        )
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "candidate.txt").write_text(
+            "candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        result = verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=30,
+        )
+
+        assert result["status"] == "FAIL"
+        assert result["baseline_receipts"][0]["verdict"] == "PASS"
+        assert result["receipts"][0]["exit_code"] == 7
+        assert result["receipts"][0]["verdict"] == "FAIL"
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "BLOCKED"
+        assert workspace["candidate_sha"] == candidate["candidate_sha"]
+        assert workspace["verified_candidate_sha"] is None
+        assert workspace["acceptance_attestation_sha256"] is None
+
+        reopened = reopen_task_candidate_for_repair(
+            primary,
+            findings=result["findings"],
+        )
+        assert reopened["status"] == "ACTIVE"
+
         _run(
             primary,
             "git",
