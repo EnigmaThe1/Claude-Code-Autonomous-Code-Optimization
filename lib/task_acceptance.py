@@ -537,6 +537,112 @@ def reconcile_task_candidate(
         return workspace
 
 
+
+def reopen_task_candidate_for_repair(
+    coordinator_root: Path,
+    *,
+    findings: list[str] | None = None,
+    state_dir: Path | None = None,
+    acquire_lease: bool = True,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(coordinator_root)
+    )
+    context = (
+        SupervisorLease(state_root, coordinator_root)
+        if acquire_lease
+        else nullcontext()
+    )
+    with context:
+        workspace = load_active_task_workspace(
+            coordinator_root,
+            state_dir=state_root,
+        )
+        if workspace is None:
+            raise TaskAcceptanceError("no active TaskWorkspaceRecord exists")
+        if workspace["lifecycle_state"] not in {"CANDIDATE", "VERIFYING", "BLOCKED"}:
+            raise TaskAcceptanceError(
+                "candidate repair reopen requires CANDIDATE, VERIFYING or BLOCKED "
+                f"state, found {workspace['lifecycle_state']!r}"
+            )
+        candidate_sha = str(workspace.get("candidate_sha") or "").lower()
+        if not candidate_sha:
+            raise TaskAcceptanceError(
+                "candidate repair reopen requires an exact candidate SHA"
+            )
+        task_root = Path(workspace["task_worktree"]).expanduser().resolve()
+
+        # Persist intent before mutating the package candidate ref so a crash
+        # after ref deletion can be reconciled by calling this operation again.
+        if not bool(workspace.get("candidate_ref_release_pending")):
+            workspace = update_task_workspace_package_state(
+                coordinator_root,
+                state_dir=state_root,
+                expected_states={"CANDIDATE", "VERIFYING", "BLOCKED"},
+                updates={
+                    "candidate_ref_release_pending": True,
+                    "repair_findings": [
+                        str(item)[:1800]
+                        for item in (findings or [])
+                        if str(item).strip()
+                    ][:100],
+                    "candidate_reopen_started_at": utcnow(),
+                },
+            )
+
+        if not bool(workspace.get("no_op_candidate")):
+            candidate_ref = candidate_ref_for_workspace(workspace)
+            current_ref = _ref_value(
+                coordinator_root,
+                candidate_ref,
+                state_dir=state_root,
+            )
+            if current_ref is not None and current_ref != candidate_sha:
+                raise TaskAcceptanceError(
+                    "candidate ref moved to an unexpected object before repair reopen"
+                )
+            if current_ref == candidate_sha:
+                _require_git(
+                    coordinator_root,
+                    "update-ref",
+                    "-d",
+                    candidate_ref,
+                    candidate_sha,
+                    state_dir=state_root,
+                )
+
+        _reset_index(task_root, state_dir=state_root)
+        updated = update_task_workspace_package_state(
+            coordinator_root,
+            state_dir=state_root,
+            expected_states={"CANDIDATE", "VERIFYING", "BLOCKED"},
+            updates={
+                "lifecycle_state": "ACTIVE",
+                "candidate_sha": None,
+                "candidate_tree_sha": None,
+                "candidate_ref": None,
+                "candidate_ref_pending": False,
+                "candidate_ref_release_pending": False,
+                "no_op_candidate": False,
+                "verified_candidate_sha": None,
+                "acceptance_attestation_sha256": None,
+                "candidate_reopened_at": utcnow(),
+                "last_rejected_candidate_sha": candidate_sha,
+            },
+            refresh_ref_binding=True,
+        )
+        return {
+            "status": "ACTIVE",
+            "task_id": updated["task_id"],
+            "rejected_candidate_sha": candidate_sha,
+            "task_workspace_sha256": updated["task_workspace_sha256"],
+            "repair_findings": updated.get("repair_findings") or [],
+        }
+
+
 def _seal_locked(
     coordinator_root: Path,
     *,
