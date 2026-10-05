@@ -372,8 +372,46 @@ def make_settings(
             ):
                 if rule not in deny:
                     deny.append(rule)
+
+        # P4 task workspaces may name additional absolute semantic/control
+        # surfaces that remain non-writable even when Unattended deliberately
+        # widens ordinary host filesystem authority.
+        external_semantic = (
+            repo_profile.get("semantic_protected_paths")
+            if isinstance(repo_profile, dict)
+            else None
+        )
+        if isinstance(external_semantic, list):
+            for raw in external_semantic:
+                if not isinstance(raw, str) or not raw.strip():
+                    continue
+                try:
+                    protected = Path(raw).expanduser().resolve(strict=False)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                text = str(protected)
+                if text not in protected_abs:
+                    protected_abs.append(text)
+
+        if isinstance(repo_profile, dict) and repo_profile.get("task_workspace"):
+            template["env"]["CLAUDE_AUTO_TASK_WORKSPACE"] = "1"
+        authority_root = (
+            repo_profile.get("authority_root")
+            if isinstance(repo_profile, dict)
+            else None
+        )
+        if isinstance(authority_root, str) and authority_root.strip():
+            try:
+                template["env"]["CLAUDE_AUTO_AUTHORITY_ROOT"] = str(
+                    Path(authority_root).expanduser().resolve(strict=False)
+                )
+            except (OSError, RuntimeError, ValueError):
+                pass
+
         if protected_abs:
-            template["env"]["CLAUDE_AUTO_PROTECTED_REPO_PATHS"] = json.dumps(protected_abs)
+            template["env"]["CLAUDE_AUTO_PROTECTED_REPO_PATHS"] = json.dumps(
+                sorted(set(protected_abs))
+            )
         if profile["isolated_full"] or unrestricted:
             # Preserve semantic planning/task/control authority even when the
             # operator deliberately grants broad host/runtime write authority.
