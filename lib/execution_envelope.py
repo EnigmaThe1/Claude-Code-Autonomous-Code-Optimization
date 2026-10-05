@@ -997,6 +997,12 @@ def task_owned_mode(root: Path) -> bool:
     try:
         contract = load_governance_contract(root)
     except GovernanceContractError as exc:
+        # The write guard is also used by RC3-compatible/non-Git project roots.
+        # Absence of any repository governance contract means task-owned mode is
+        # simply not configured. If a contract file is present but Git-backed
+        # governance cannot be verified, fail closed instead.
+        if not (root / ".claude-auto" / "governance.json").exists():
+            return False
         raise ExecutionEnvelopeError(str(exc)) from exc
     if not isinstance(contract, dict):
         return False
