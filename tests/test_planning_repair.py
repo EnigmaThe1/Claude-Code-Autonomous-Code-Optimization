@@ -1366,3 +1366,197 @@ def test_p5_planning_validate_cli_surface_exists():
 
     args = build_parser("test").parse_args(["planning-repair", "validate"])
     assert args.planning_repair_command == "validate"
+
+
+def _p5_validator_candidate_fixture(
+    root: Path,
+    *,
+    validator: dict,
+) -> tuple[dict, Path, str]:
+    (root / "plans").mkdir(exist_ok=True)
+    (root / "plans" / "main.md").write_text("base\n")
+    _git(root, "add", "plans/main.md")
+    _git(root, "commit", "-qm", "validator planning input")
+    _p5_write_governance(root, _p5_contract([
+        _p5_set(
+            "a",
+            [_p5_member(
+                "plans/main.md",
+                role="source",
+                repair="repairable",
+            )],
+            validators=[validator],
+        ),
+    ]))
+    active = begin_planning_repair(
+        root,
+        reason="validate repaired planning",
+        authority_sets=["a"],
+    )
+    worktree = Path(active["worktree"])
+    (worktree / "plans" / "main.md").write_text("repaired\n")
+    candidate = _p5_candidate_commit(
+        root,
+        worktree,
+        active=active,
+        paths=["plans/main.md"],
+    )
+    return load_active_repair(root), worktree, candidate
+
+
+def test_p5_validator_runs_twice_against_exact_candidate_inputs(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        validator = _p5_helper(
+            "validate-plan",
+            inputs=["plans/main.md"],
+            outputs=[],
+        )
+        active, _worktree, candidate = _p5_validator_candidate_fixture(
+            root,
+            validator=validator,
+        )
+        seen: list[str] = []
+
+        def runner(*args, **kwargs):
+            view = Path(args[0])
+            seen.append((view / "plans" / "main.md").read_text())
+            return _p5_test_runner(*args, **kwargs)
+
+        result = validate_planning_repair_candidate(
+            root,
+            validator_runner=runner,
+        )
+        assert result["status"] == "valid"
+        assert seen == ["repaired\n", "repaired\n"]
+        assert result["validator_receipt_bundle_sha256"]
+        active = load_active_repair(root)
+        assert active["validated_candidate_sha"] == candidate
+        assert active["validator_receipt_bundle_sha256"] == result[
+            "validator_receipt_bundle_sha256"
+        ]
+        bundle = json.loads(Path(active["validator_receipt_path"]).read_text())
+        assert bundle["candidate_sha"] == candidate
+        assert len(bundle["receipts"]) == 1
+        assert len(bundle["receipts"][0]["determinism_runs"]) == 2
+
+
+def test_p5_validator_nonzero_exit_rejects_candidate(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        validator = _p5_helper(
+            "validate-plan",
+            inputs=["plans/main.md"],
+            outputs=[],
+        )
+        validator["argv"] = ["python3", "-c", "raise SystemExit(3)"]
+        _p5_validator_candidate_fixture(root, validator=validator)
+
+        with pytest.raises(ValueError, match="failed with exit 3"):
+            validate_planning_repair_candidate(
+                root,
+                validator_runner=_p5_test_runner,
+            )
+        assert load_active_repair(root)["validated_candidate_sha"] is None if "validated_candidate_sha" in load_active_repair(root) else True
+
+
+def test_p5_validator_timeout_or_unavailable_boundary_rejects(monkeypatch):
+    for mode in ("timeout", "unavailable"):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+            root = _repo(Path(td) / "repo")
+            monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+            validator = _p5_helper(
+                "validate-plan",
+                inputs=["plans/main.md"],
+                outputs=[],
+            )
+            _p5_validator_candidate_fixture(root, validator=validator)
+
+            def runner(*args, **kwargs):
+                if mode == "timeout":
+                    return {
+                        "returncode": 124,
+                        "stdout": "",
+                        "stderr": "timed out",
+                        "timed_out": True,
+                        "wall_seconds": 30.0,
+                        "execution_boundary": "test-sandbox",
+                        "sandboxed": True,
+                        "environment_scrubbed": True,
+                    }
+                return {
+                    "returncode": 125,
+                    "stdout": "",
+                    "stderr": "no sandbox",
+                    "timed_out": False,
+                    "wall_seconds": 0.0,
+                    "execution_boundary": "unavailable",
+                    "sandboxed": False,
+                    "environment_scrbed": True,
+                    "environment_scrubbed": True,
+                }
+
+            with pytest.raises(ValueError, match="timed out|verified isolation boundary"):
+                validate_planning_repair_candidate(
+                    root,
+                    validator_runner=runner,
+                )
+
+
+def test_p5_validator_cannot_mutate_exact_candidate_input(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        validator = _p5_helper(
+            "validate-plan",
+            inputs=["plans/main.md"],
+            outputs=[],
+        )
+        validator["argv"] = [
+            "python3",
+            "-c",
+            "from pathlib import Path;Path('plans/main.md').write_text('tampered\\n')",
+        ]
+        _p5_validator_candidate_fixture(root, validator=validator)
+
+        with pytest.raises(ValueError, match="mutated exact candidate input"):
+            validate_planning_repair_candidate(
+                root,
+                validator_runner=_p5_test_runner,
+            )
+
+
+def test_p5_validator_nondeterministic_pass_fail_is_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        validator = _p5_helper(
+            "validate-plan",
+            inputs=["plans/main.md"],
+            outputs=[],
+        )
+        _p5_validator_candidate_fixture(root, validator=validator)
+        calls = 0
+
+        def runner(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return {
+                "returncode": 0 if calls == 1 else 1,
+                "stdout": "",
+                "stderr": "",
+                "timed_out": False,
+                "wall_seconds": 0.01,
+                "execution_boundary": "test-sandbox",
+                "sandboxed": True,
+                "environment_scrubbed": True,
+            }
+
+        with pytest.raises(ValueError, match="nondeterministic pass/fail"):
+            validate_planning_repair_candidate(
+                root,
+                validator_runner=runner,
+            )
+        assert calls == 2
