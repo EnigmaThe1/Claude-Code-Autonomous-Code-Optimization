@@ -66,12 +66,19 @@ def _inside_container() -> bool:
     return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists() or os.environ.get("container") in {"docker", "podman"}
 
 
-def _append_command_hook(settings: dict[str, Any], event: str, script: Path, matcher: str | None = None) -> None:
+def _append_command_hook(
+    settings: dict[str, Any],
+    event: str,
+    script: Path,
+    matcher: str | None = None,
+    *,
+    timeout: int = 5,
+) -> None:
     entry: dict[str, Any] = {
         "hooks": [{
             "type": "command",
             "command": f"python3 -B {shlex.quote(str(script))}",
-            "timeout": 5,
+            "timeout": int(timeout),
         }]
     }
     if matcher:
@@ -536,6 +543,7 @@ def make_settings(
             "PreToolUse",
             package_root() / "hooks" / "write_boundary_guard.py",
             matcher="Write|Edit|NotebookEdit|Bash",
+            timeout=30,
         )
     if repo_root:
         # One authoritative repository-state check after every parallel tool
@@ -544,6 +552,7 @@ def make_settings(
             template,
             "PostToolBatch",
             package_root() / "hooks" / "task_post_batch_guard.py",
+            timeout=60,
         )
     if autonomy_profile != "isolated-full" and not unrestricted:
         # Container runtimes are a host-authority boundary even in repositories
