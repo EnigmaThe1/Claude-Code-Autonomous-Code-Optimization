@@ -1297,6 +1297,54 @@ def _revalidate_authoritative_plan(
 
 
 
+def _p4_prepare_supervisor_task(
+    coordinator_root: Path,
+    sd: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Reconcile interruption checkpoints, then return the current P4 worker state."""
+    for _ in range(8):
+        activation = ensure_supervisor_task_workspace(
+            coordinator_root,
+            state_dir=sd,
+        )
+        if activation.get("status") != "CHECKPOINT":
+            return activation
+        checkpoint = _p4_advance_acceptance_checkpoint(
+            coordinator_root,
+            sd,
+            args,
+        )
+        status = str(checkpoint.get("status") or "")
+        if status == "BLOCKED":
+            return {
+                "status": "BLOCKED",
+                "reason": checkpoint.get("reason")
+                or "P4 acceptance checkpoint is blocked",
+                "checkpoint": checkpoint,
+            }
+        if status in {
+            "ACTIVE",
+            "REPAIR",
+            "NEXT_READY",
+            "TASKS_COMPLETE",
+            "CLEAN",
+        }:
+            continue
+        return {
+            "status": "BLOCKED",
+            "reason": (
+                "P4 acceptance checkpoint returned an unsupported state: "
+                + status
+            ),
+            "checkpoint": checkpoint,
+        }
+    return {
+        "status": "BLOCKED",
+        "reason": "P4 supervisor task preparation exceeded bounded reconciliation steps",
+    }
+
+
 def _p4_worker_execution_context(
     coordinator_root: Path,
     sd: Path,
