@@ -538,6 +538,129 @@ def reconcile_task_candidate(
 
 
 
+
+def validate_task_candidate_worktree(
+    coordinator_root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(coordinator_root)
+    )
+    workspace = load_active_task_workspace(
+        coordinator_root,
+        state_dir=state_root,
+    )
+    if workspace is None:
+        raise TaskAcceptanceError("no active TaskWorkspaceRecord exists")
+    if workspace["lifecycle_state"] not in {
+        "CANDIDATE",
+        "VERIFYING",
+        "VERIFIED_PENDING_PROMOTION",
+    }:
+        raise TaskAcceptanceError(
+            "candidate worktree validation requires a sealed candidate state"
+        )
+    candidate_sha = str(workspace.get("candidate_sha") or "").lower()
+    candidate_tree = str(workspace.get("candidate_tree_sha") or "").lower()
+    if not candidate_sha or not candidate_tree:
+        raise TaskAcceptanceError(
+            "sealed candidate identity/tree is missing from workspace state"
+        )
+
+    task_root = Path(workspace["task_worktree"]).expanduser().resolve()
+    boundary = evaluate_task_workspace_boundary(
+        coordinator_root,
+        task_root=task_root,
+        state_dir=state_root,
+    )
+    if boundary["status"] != "VALID":
+        detail = "; ".join(
+            f"{row['path']}: {row['reason']}"
+            for row in boundary["violations"][:40]
+        )
+        raise TaskAcceptanceError(
+            "candidate worktree boundary changed: " + detail
+        )
+    try:
+        envelope = load_active_execution_envelope(
+            task_root,
+            state_dir=state_root,
+            authority_root=coordinator_root,
+            git_state_dir=state_root,
+        )
+    except ExecutionEnvelopeError as exc:
+        raise TaskAcceptanceError(str(exc)) from exc
+
+    _reset_index(task_root, state_dir=state_root)
+    try:
+        evaluated = evaluate_active_workspace(
+            task_root,
+            envelope=envelope,
+            state_dir=state_root,
+            authority_root=coordinator_root,
+            git_state_dir=state_root,
+        )
+        if evaluated["status"] != "VALID":
+            detail = "; ".join(
+                f"{row['path']}: {row['reason']}"
+                for row in evaluated["violations"][:40]
+            )
+            raise TaskAcceptanceError(
+                "candidate worktree violates its ExecutionEnvelope: "
+                + detail
+            )
+        changed = _changed_paths(task_root, state_dir=state_root)
+        promotable = [
+            path
+            for path in changed
+            if path_matches_any(path, envelope["promotion_paths"])
+            and not path_matches_any(
+                path,
+                envelope["runtime_scratch_paths"],
+            )
+        ]
+        _stage_exact_paths(
+            task_root,
+            promotable,
+            state_dir=state_root,
+        )
+        try:
+            validate_staged_diff(
+                task_root,
+                envelope=envelope,
+                state_dir=state_root,
+                authority_root=coordinator_root,
+                git_state_dir=state_root,
+            )
+        except ExecutionEnvelopeError as exc:
+            raise TaskAcceptanceError(str(exc)) from exc
+        current_tree = str(
+            _require_git(
+                task_root,
+                "write-tree",
+                state_dir=state_root,
+            ).stdout
+        ).strip().lower()
+    finally:
+        _reset_index(task_root, state_dir=state_root)
+
+    if current_tree != candidate_tree:
+        raise TaskAcceptanceError(
+            "task worktree promotable tree changed after candidate sealing"
+        )
+    return {
+        "status": "VALID",
+        "task_id": workspace["task_id"],
+        "candidate_sha": candidate_sha,
+        "candidate_tree_sha": candidate_tree,
+        "task_workspace_sha256": workspace["task_workspace_sha256"],
+    }
+
+
 def reopen_task_candidate_for_repair(
     coordinator_root: Path,
     *,
