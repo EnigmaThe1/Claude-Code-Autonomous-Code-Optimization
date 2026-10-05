@@ -1,6 +1,6 @@
 # RC4 P4 — Task Worktree, Exact Candidate Verification and Acceptance Protocol
 
-Status: **FROZEN FOR IMPLEMENTATION**
+Status: **IMPLEMENTED AND QUALIFIED**
 
 Date: 2026-10-05
 
@@ -14,7 +14,22 @@ P3 qualified documentation head: `2cb45905b5f574c8311b67837eec3b71d2427674`
 
 P3 formal closure: `3495f2651579e58523b80977c4893bdbf58886bf`
 
+P4 qualified runtime implementation: `e7fbd7ea8b3e079c26197f8e9a432cd0cdc61d32`
+
+P4 qualified tests/documentation head: `3e287b61a1ba8fe1084fada3766616dabc62633c`
+
 P4 protocol red-team closure: candidate snapshots use `write-tree` + `commit-tree` without moving task HEAD; TaskSpec verification prose is non-executable acceptance authority; coordinator Git refs and primary checkout are semantic protected state; no-op acceptance and promotion crash ordering are explicit.
+
+Qualification evidence:
+
+- runtime implementation head: 471/471 tests passed, then 471/471 passed again under coverage;
+- final hostile/recovery head: 479/479 tests passed, then 479/479 passed again under coverage;
+- critical regression groups on the final head: 15/15, 19/19, 25/25, 16/16 and 18/18 passed;
+- package static checks and public-baseline reference audit passed;
+- aggregate measured coverage at final P4 qualification: 65% across the expanded RC4 surface;
+- explicit final recovery tests cover all three PREPARING interruption points, exact worktree recreation, missing-branch fail-closed handling, workspace-path containment, AcceptedTaskRecord/compact-index integrity and refusal to accept an unverified candidate;
+- operator lifecycle routing is exposed through the same package-authority functions used by the autonomous supervisor;
+- no RC4 promotion, release tag or `main` update was performed by P4.
 
 ## 1. Purpose
 
@@ -996,3 +1011,37 @@ P4 is complete only when:
 - all existing RC3/P1/P2/P3 behavior remains green.
 
 Only then may a later RC4 phase generalise multi-file planning repair/session migration/concurrency or move toward final RC4 release qualification.
+
+
+## 41. Closure record
+
+RC4-P4 is closed at the protocol/implementation level.
+
+The qualified implementation satisfies the P4 exit criteria and includes:
+
+- one coordinator lease/state authority with a package-owned resumable linked task worktree;
+- explicit separation of coordinator authority root, task execution root and coordinator Git-trust state;
+- crash-recoverable `PREPARING` -> `ACTIVE` workspace creation and exact branch/worktree reconciliation;
+- preservation of primary-checkout WIP as a separately fingerprinted semantic boundary;
+- worker fencing against the primary checkout, coordinator semantic state and unexpected Git-ref mutation in every runtime profile, including Unattended;
+- P3 ExecutionEnvelope semantics applied to task-worktree mutation while AuthoritySet/TaskSource currentness remains anchored to the coordinator root;
+- package-owned candidate sealing that discards worker staging authority, excludes runtime scratch, uses exact Git plumbing and keeps task HEAD pinned to the product base;
+- crash-recoverable package candidate refs and rejected-candidate repair/reseal on the same task;
+- deterministic exact-base/exact-candidate verification using existing executable verification authority rather than TaskSpec prose;
+- independent read-only exact-SHA Task Verifier protocol and versioned task-acceptance attestation;
+- exact verified promotion through the existing `promote-ff` broker only;
+- verified no-op acceptance without synthetic commits;
+- crash-recoverable/idempotent promotion + AcceptedTaskRecord persistence;
+- full AcceptedTaskRecord integrity validation plus compact accepted-task index validation for dependency readiness;
+- post-acceptance cleanup/re-resolution and deterministic next READY task selection;
+- supervisor-owned task progression through worker `AUTONOMY_TASK_RESULT`, acceptance checkpoints and final whole-objective qualification;
+- top-level operator surfaces for workspace status, begin, candidate sealing, verification, acceptance, cleanup and safe abort/preservation.
+
+P4 intentionally leaves the following to later RC4 phases:
+
+- multi-file Planning Repair / RepairEnvelope generalisation (P5);
+- migration of legacy/in-flight state and Claude session adoption/resume/shadow mode (P6);
+- full release-wide adversarial/topology/performance/installer qualification (P7);
+- concurrent active product writers and cross-task Claude-session migration.
+
+Therefore RC4-P5 may begin from this closure without changing P4 task-worktree/acceptance semantics.
