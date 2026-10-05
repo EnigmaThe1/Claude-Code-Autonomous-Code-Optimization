@@ -27,6 +27,7 @@ import pytest
 import task_workspace as task_workspace_module
 
 from accepted_task import (
+    accepted_task_path,
     load_accepted_task_record,
     persist_accepted_task_record,
 )
@@ -72,6 +73,7 @@ from task_acceptance import (
     verify_task_candidate_independent,
 )
 from task_workspace import (
+    TaskWorkspaceError,
     begin_task_workspace,
     candidate_ref_for_workspace,
     load_active_task_workspace,
