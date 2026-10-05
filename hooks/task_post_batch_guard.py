@@ -331,8 +331,15 @@ def main() -> int:
             root,
             state_dir=state_dir,
             authority_root=authority_root,
+            git_state_dir=state_dir,
         )
-        result = evaluate_active_workspace(root, envelope=envelope)
+        result = evaluate_active_workspace(
+            root,
+            envelope=envelope,
+            state_dir=state_dir,
+            authority_root=authority_root,
+            git_state_dir=state_dir,
+        )
         if result["status"] == "VALID":
             return 0
 
