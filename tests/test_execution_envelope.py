@@ -2483,11 +2483,12 @@ def test_p4_independent_verifier_sha_mismatch_blocks_without_attestation(monkeyp
         assert workspace["lifecycle_state"] == "BLOCKED"
         assert workspace["verified_candidate_sha"] is None
         assert workspace["acceptance_attestation_sha256"] is None
-        assert require_exact_attestation(
-            primary,
-            candidate["candidate_sha"],
-            contract=TASK_ACCEPTANCE_CONTRACT,
-        ) is None
+        with pytest.raises(ValueError, match="attestation required"):
+            require_exact_attestation(
+                primary,
+                candidate["candidate_sha"],
+                contract=TASK_ACCEPTANCE_CONTRACT,
+            )
 
         reopened = reopen_task_candidate_for_repair(
             primary,
