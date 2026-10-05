@@ -1021,14 +1021,26 @@ def path_has_symlink_component(root: Path, rel: str) -> bool:
 
 def task_owned_mode(root: Path) -> bool:
     root = root.expanduser().resolve()
+    governance_path = root / ".claude-auto" / "governance.json"
     try:
         contract = load_governance_contract(root)
     except GovernanceContractError as exc:
-        # The write guard is also used by RC3-compatible/non-Git project roots.
-        # Absence of any repository governance contract means task-owned mode is
-        # simply not configured. If a contract file is present but Git-backed
-        # governance cannot be verified, fail closed instead.
-        if not (root / ".claude-auto" / "governance.json").exists():
+        # The guard also serves RC3-compatible/non-Git roots. Distinguish
+        # "governance is not configured" from "committed governance was made
+        # unreadable/missing/divergent". Git HEAD is the authority for that
+        # distinction so an opaque deletion cannot turn task-owned mode off.
+        head = _git(root, "rev-parse", "--verify", "HEAD^{commit}")
+        if head.returncode != 0:
+            if not governance_path.exists():
+                return False
+            raise ExecutionEnvelopeError(str(exc)) from exc
+        committed = _git(
+            root,
+            "cat-file",
+            "-e",
+            f"{head.stdout.strip()}:.claude-auto/governance.json",
+        )
+        if committed.returncode != 0 and not governance_path.exists():
             return False
         raise ExecutionEnvelopeError(str(exc)) from exc
     if not isinstance(contract, dict):
