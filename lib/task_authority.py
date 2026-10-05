@@ -282,6 +282,7 @@ def _activate_locked(
             root,
             state_dir=state_root,
             authority_root=authority_check_root,
+            git_state_dir=state_root,
         )
     except TaskSourceError as exc:
         raise TaskAuthorityError(str(exc)) from exc
@@ -323,6 +324,7 @@ def _activate_locked(
             task_source_set=task_set,
             state=state,
             authority_root=authority_check_root,
+            git_state_dir=state_root,
         )
     except ExecutionEnvelopeError as exc:
         raise TaskAuthorityError(str(exc)) from exc
