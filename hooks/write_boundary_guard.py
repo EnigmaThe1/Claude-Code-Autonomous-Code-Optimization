@@ -109,6 +109,16 @@ def _protected_paths() -> set[Path]:
         try:
             state_dir = Path(state_raw).expanduser().resolve()
             root = Path(root_raw).expanduser().resolve()
+            # Package-owned semantic state is never worker mutation authority,
+            # including in Unattended/Isolated Full semantic-only mode.
+            out.add(state_dir)
+            package_raw = os.environ.get("CLAUDE_AUTO_PACKAGE_ROOT")
+            if package_raw:
+                package_path = Path(package_raw).expanduser().resolve()
+                try:
+                    package_path.relative_to(root)
+                except ValueError:
+                    out.add(package_path)
             snapshot_path = state_dir / "governance" / "snapshot.json"
             if snapshot_path.exists():
                 snapshot = json.loads(snapshot_path.read_text())
@@ -304,6 +314,156 @@ def _resolve_target(
         return None
 
 
+def _lexical_target(
+    cwd: Path,
+    raw: str,
+    variables: dict[str, str | None],
+) -> Path | None:
+    expanded = _expand_shell_value(raw, variables)
+    if expanded is None:
+        return None
+    target = Path(expanded)
+    try:
+        combined = target if target.is_absolute() else cwd / target
+        return Path(os.path.abspath(str(combined)))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _direct_lexical_target(root: Path, raw: str) -> Path | None:
+    expanded = os.path.expandvars(os.path.expanduser(str(raw)))
+    try:
+        target = Path(expanded)
+        combined = target if target.is_absolute() else root / target
+        return Path(os.path.abspath(str(combined)))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _task_module():
+    lib_dir = Path(__file__).resolve().parents[1] / "lib"
+    if str(lib_dir) not in sys.path:
+        sys.path.insert(0, str(lib_dir))
+    import execution_envelope
+    return execution_envelope
+
+
+def _task_owned_mode(root: Path) -> bool:
+    try:
+        return bool(_task_module().task_owned_mode(root))
+    except Exception:
+        # A task-governance read failure is not evidence that repository-wide
+        # mutation authority should be restored.
+        state_raw = os.environ.get("CLAUDE_AUTONOMY_STATE_DIR")
+        if state_raw:
+            try:
+                state = json.loads(
+                    (Path(state_raw).expanduser().resolve() / "state.json").read_text()
+                )
+                return bool(
+                    isinstance(state, dict)
+                    and (
+                        state.get("task_source_sha256")
+                        or state.get("active_execution_envelope_sha256")
+                    )
+                )
+            except Exception:
+                pass
+        return False
+
+
+def _active_task_envelope_present() -> bool:
+    state_raw = os.environ.get("CLAUDE_AUTONOMY_STATE_DIR")
+    if not state_raw:
+        return False
+    state_dir = Path(state_raw).expanduser().resolve()
+    if (state_dir / "tasks" / "execution-envelope.json").exists():
+        return True
+    try:
+        state = json.loads((state_dir / "state.json").read_text())
+        return bool(
+            isinstance(state, dict)
+            and state.get("active_execution_envelope_sha256")
+        )
+    except Exception:
+        return False
+
+
+def _task_mutation_reason(
+    root: Path,
+    lexical_target: Path,
+    *,
+    allow_scratch: bool,
+) -> str | None:
+    try:
+        rel = lexical_target.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    try:
+        return _task_module().direct_repository_mutation_reason(
+            root,
+            rel=rel if rel else ".",
+            allow_scratch=allow_scratch,
+        )
+    except Exception as exc:
+        return f"task authority could not be verified fail-closed: {type(exc).__name__}: {str(exc)[:500]}"
+
+
+def _git_subcommand(args: list[str]) -> tuple[str | None, int]:
+    takes_value = {
+        "-C",
+        "-c",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--config-env",
+        "--exec-path",
+    }
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            index += 1
+            break
+        if token in takes_value:
+            index += 2
+            continue
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--config-env=", "--exec-path=")):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return Path(token).name, index
+    return None, index
+
+
+_HEAD_MUTATING_GIT = {
+    "commit",
+    "push",
+    "pull",
+    "reset",
+    "rebase",
+    "merge",
+    "checkout",
+    "switch",
+    "cherry-pick",
+    "revert",
+    "stash",
+    "clean",
+    "worktree",
+    "update-ref",
+    "symbolic-ref",
+    "tag",
+}
+_NO_ENVELOPE_MUTATING_GIT = _HEAD_MUTATING_GIT | {
+    "add",
+    "rm",
+    "mv",
+    "apply",
+}
+
+
 def _unwrap_command(seg: list[str], idx: int) -> int:
     while idx < len(seg):
         base = Path(seg[idx]).name
@@ -373,10 +533,18 @@ def _segment_write_targets(seg: list[str], cmd_idx: int) -> list[str]:
         for token in args:
             if token.startswith(("--git-dir=", "--work-tree=")):
                 out.append(token.split("=", 1)[1])
-        if "clone" in args and operands:
-            out.append(operands[-1])
-        if "worktree" in args and "add" in args and operands:
-            out.append(operands[-1])
+        subcommand, sub_index = _git_subcommand(args)
+        sub_args = args[sub_index + 1 :] if subcommand is not None else []
+        sub_operands = [
+            token for token in sub_args
+            if token != "--" and not token.startswith("-")
+        ]
+        if subcommand == "clone" and sub_operands:
+            out.append(sub_operands[-1])
+        if subcommand == "worktree" and "add" in sub_args and sub_operands:
+            out.append(sub_operands[-1])
+        if subcommand in {"add", "rm", "mv"}:
+            out.extend(sub_operands)
         for i, token in enumerate(args[:-1]):
             if token in {"-o", "--output"}:
                 out.append(args[i + 1])
@@ -477,6 +645,24 @@ def _guard_bash(
                 variables["PWD"] = str(cwd)
             continue
 
+        if cmd == "git" and _task_owned_mode(root):
+            subcommand, _sub_index = _git_subcommand(args)
+            if (
+                subcommand in _HEAD_MUTATING_GIT
+                and _active_task_envelope_present()
+            ):
+                return "deny", (
+                    f"raw git {subcommand} is denied while a P3 ExecutionEnvelope is active; "
+                    "HEAD/promotion authority is package-owned"
+                )
+            if (
+                subcommand in _NO_ENVELOPE_MUTATING_GIT
+                and not _active_task_envelope_present()
+            ):
+                return "deny", (
+                    f"git {subcommand} is denied in task-owned mode without an active ExecutionEnvelope"
+                )
+
         # Recursively inspect quoted nested shell payloads.
         if cmd in NESTED_SHELLS:
             for i, token in enumerate(args[:-1]):
@@ -496,7 +682,18 @@ def _guard_bash(
             if target is None:
                 return "deny", f"Claude Auto could not safely resolve Bash write target: {raw}"
             if _protected_target(target):
-                return "deny", f"Bash mutation of a protected repository path is denied: {target}"
+                return "deny", f"Bash mutation of a protected repository/package path is denied: {target}"
+            lexical = _lexical_target(cwd, raw, effective_vars)
+            if lexical is None and not _outside(root, target) and _task_owned_mode(root):
+                return "deny", f"Claude Auto could not derive task authority for Bash write target: {raw}"
+            if lexical is not None:
+                task_reason = _task_mutation_reason(
+                    root,
+                    lexical,
+                    allow_scratch=True,
+                )
+                if task_reason:
+                    return "deny", f"Bash task-envelope denial for {lexical}: {task_reason}"
             if (
                 _outside(root, target)
                 and not semantic_only
@@ -551,8 +748,21 @@ def main() -> int:
             return 0
         root, target = _root_and_target(root_raw, str(raw))
         if _protected_target(target):
-            decision("deny", f"Direct mutation of a protected repository path is denied: {target}")
+            decision("deny", f"Direct mutation of a protected repository/package path is denied: {target}")
             return 0
+        lexical = _direct_lexical_target(root, str(raw))
+        if lexical is None and not _outside(root, target) and _task_owned_mode(root):
+            decision("deny", "Direct mutation path could not be mapped into active task authority.")
+            return 0
+        if lexical is not None:
+            task_reason = _task_mutation_reason(
+                root,
+                lexical,
+                allow_scratch=False,
+            )
+            if task_reason:
+                decision("deny", f"Direct task-envelope denial for {lexical}: {task_reason}")
+                return 0
         if (
             _outside(root, target)
             and not semantic_only
