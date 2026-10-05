@@ -1421,3 +1421,143 @@ def test_p4_post_batch_uses_coordinator_git_trust_and_state(monkeypatch):
             str(worktree),
         )
         _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def _p4_post_batch_event(root: Path) -> dict:
+    return {
+        "session_id": "p4-boundary-test",
+        "cwd": str(root),
+        "permission_mode": "bypassPermissions",
+        "hook_event_name": "PostToolBatch",
+        "tool_calls": [{
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status --short"},
+            "tool_use_id": "tool-boundary",
+            "tool_response": "omitted",
+        }],
+    }
+
+
+def _run_p4_post_batch(
+    task_root: Path,
+    primary: Path,
+    coordinator_state: Path,
+) -> dict | None:
+    env = _hook_env(
+        task_root,
+        state_dir=coordinator_state,
+        authority_root=primary,
+        task_workspace=True,
+        protected_paths=[primary, coordinator_state],
+    )
+    cp = subprocess.run(
+        [sys.executable, str(POST_BATCH_GUARD)],
+        input=json.dumps(_p4_post_batch_event(task_root)),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=True,
+    )
+    return json.loads(cp.stdout) if cp.stdout.strip() else None
+
+
+def test_p4_post_batch_primary_drift_becomes_durable_primary_drift(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        coordinator_state = repo_state_dir(primary)
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+
+        # Simulate a human/out-of-band change in the user's checkout while the
+        # worker is active. P4 must preserve it and stop, not reset/stash it.
+        changed = primary / "unrelated.txt"
+        changed.write_text("human drift\n")
+
+        result = _run_p4_post_batch(
+            worktree,
+            primary,
+            coordinator_state,
+        )
+        assert result is not None
+        assert result["decision"] == "block"
+        assert "PRIMARY" in result["reason"]
+
+        durable = load_active_task_workspace(primary)
+        assert durable is not None
+        assert durable["lifecycle_state"] == "PRIMARY_DRIFT"
+        assert changed.read_text() == "human drift\n"
+
+        violation = load_task_violation(
+            worktree,
+            state_dir=coordinator_state,
+        )
+        assert violation is not None
+        assert any(
+            "P4 task workspace boundary failed" in row["reason"]
+            for row in violation["violations"]
+        )
+        assert not (
+            repo_state_dir(worktree) / "tasks" / "violation.json"
+        ).exists()
+
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_post_batch_unexpected_git_ref_becomes_durable_block(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        coordinator_state = repo_state_dir(primary)
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        rogue_branch = "p4-out-of-band-ref"
+
+        _run(
+            primary,
+            "git",
+            "branch",
+            rogue_branch,
+            record["product_base_sha"],
+        )
+
+        result = _run_p4_post_batch(
+            worktree,
+            primary,
+            coordinator_state,
+        )
+        assert result is not None
+        assert result["decision"] == "block"
+        assert "GIT_REFS" in result["reason"]
+
+        durable = load_active_task_workspace(primary)
+        assert durable is not None
+        assert durable["lifecycle_state"] == "BLOCKED"
+
+        violation = load_task_violation(
+            worktree,
+            state_dir=coordinator_state,
+        )
+        assert violation is not None
+        assert not (
+            repo_state_dir(worktree) / "tasks" / "violation.json"
+        ).exists()
+
+        _run(primary, "git", "branch", "-D", rogue_branch)
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
