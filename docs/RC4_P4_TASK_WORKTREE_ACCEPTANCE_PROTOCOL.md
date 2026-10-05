@@ -112,7 +112,7 @@ Canonical semantic fields:
   "task_source_set_sha256": "...",
   "task_spec_sha256": "...",
   "authority_snapshot_sha256": "...",
-  "execution_envelope_sha256": "...",
+  "execution_envelope_sha256": null,
   "coordinator_repo_id": "...",
   "product_base_sha": "...",
   "product_branch": "main",
@@ -132,6 +132,7 @@ The semantic digest is persisted as `task_workspace_sha256`.
 
 Allowed lifecycle states are deliberately finite:
 
+- `PREPARING`
 - `ACTIVE`
 - `CANDIDATE`
 - `VERIFYING`
@@ -144,6 +145,8 @@ Allowed lifecycle states are deliberately finite:
 - `ABANDONED_PRESERVED`
 
 Unknown states fail closed.
+
+`PREPARING` is the only state in which `execution_envelope_sha256` may be null. All later states require the exact active/archived envelope digest.
 
 ## 6. Package-owned task workspace location
 
@@ -175,12 +178,15 @@ Normal begin sequence while the coordinator lease is held:
 4. capture the coordinator primary checkout baseline;
 5. resolve exact current product branch and HEAD;
 6. prove no conflicting active TaskWorkspaceRecord exists;
-7. create a dedicated branch at the exact product base;
-8. create a linked task worktree for that branch;
-9. prove the task worktree is clean and on the exact expected branch/base;
-10. create the P3 ExecutionEnvelope against the **task root**, with semantic state persisted in coordinator state;
-11. persist TaskWorkspaceRecord;
-12. only then launch a mutating worker in the task root.
+7. derive the exact package task branch/worktree names and persist a digest-bound `PREPARING` TaskWorkspaceRecord **before** creating either;
+8. create/reconcile the dedicated branch at the exact product base;
+9. create/reconcile the linked task worktree for that branch;
+10. prove the task worktree is clean and on the exact expected branch/base;
+11. create/persist the P3 ExecutionEnvelope against the **task root**, with semantic state persisted in coordinator state;
+12. atomically rewrite the TaskWorkspaceRecord as `ACTIVE`, binding the exact ExecutionEnvelope digest;
+13. only then launch a mutating worker in the task root.
+
+This ordering intentionally leaves a durable recovery intent before the first Git topology mutation. A crash may leave a `PREPARING` record with neither, either or both of branch/worktree present; resume reconciles only the exact recorded identities.
 
 P4 worktree creation uses package-owned Git execution with hooks/fsmonitor/recursive submodule surprises disabled under the existing trusted Git policy.
 
@@ -190,10 +196,14 @@ If durable active task-workspace state already exists, P4 reconciles rather than
 
 Recovery cases:
 
-- record + worktree + branch exist and identities match: reuse;
+- `PREPARING` record + neither branch nor worktree: continue exact recorded creation;
+- `PREPARING` record + branch only: create the exact recorded worktree;
+- `PREPARING` record + branch + worktree: validate them, persist/reconcile the envelope and transition to `ACTIVE`;
+- `PREPARING` record + worktree without its exact branch: fail closed;
+- `ACTIVE` record + worktree + branch exist and identities match: reuse;
 - record + branch exist but package worktree path is missing: re-add the worktree at the recorded branch, then revalidate;
 - record + worktree exists but branch is missing/mismatched: fail closed;
-- worktree/branch exists without durable active state: treat as orphaned package workspace and require exact reconciliation, never silently adopt;
+- worktree/branch exists without a matching durable `PREPARING`/`ACTIVE` record: treat as orphaned package workspace and require exact reconciliation, never silently adopt;
 - durable record is malformed or digest-invalid: fail closed;
 - recorded candidate/verified SHA is missing from local Git objects: fail closed;
 - primary HEAD changed since recorded base: enter `STALE_BASE` unless the transaction can be proven already promoted as described below.
@@ -858,7 +868,10 @@ P4 should prefer failing closed with preserved task evidence over destructive re
 
 P4 must test at least:
 
-- begin one READY task creates one package task worktree;
+- begin one READY task persists PREPARING before Git topology mutation and then creates one package task worktree;
+- crash/retry with PREPARING before branch creation resumes safely;
+- crash/retry with PREPARING after branch but before worktree resumes safely;
+- crash/retry with PREPARING after worktree but before envelope resumes safely;
 - deterministic task token/branch naming;
 - worktree state is owned by coordinator state, not linked-worktree repo state;
 - second begin reuses valid active workspace;
