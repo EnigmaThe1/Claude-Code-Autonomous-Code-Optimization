@@ -60,6 +60,7 @@ from task_sources import (
 from task_acceptance import (
     TASK_ACCEPTANCE_CONTRACT,
     TaskAcceptanceError,
+    abort_task_workspace,
     accept_verified_task,
     cleanup_accepted_task_workspace,
     reconcile_task_candidate,
@@ -2774,3 +2775,130 @@ def test_p4_crash_after_fast_forward_reconciles_acceptance_idempotently(monkeypa
         cleaned = acceptance.cleanup_accepted_task_workspace(primary)
         assert cleaned["status"] == "CLEAN"
         assert not worktree.exists()
+
+
+def test_p4_abort_scratch_only_cleans_disposable_workspace(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        scratch = worktree / ".scratch" / "T1" / "runtime.txt"
+        scratch.parent.mkdir(parents=True)
+        scratch.write_text("disposable runtime output\n")
+
+        result = abort_task_workspace(
+            primary,
+            reason="operator cancelled task before acceptance",
+        )
+        assert result["status"] == "ABORTED_CLEAN"
+        assert result["preservation_sha"] is None
+        assert result["preservation_ref"] is None
+        assert result["ready_frontier"] == ["T1"]
+        assert result["next_task_id"] == "T1"
+        assert ".scratch/T1/runtime.txt" in result[
+            "discarded_runtime_scratch_paths"
+        ]
+        assert not worktree.exists()
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            f"refs/heads/{record['task_branch']}",
+            check=False,
+        ).returncode != 0
+        durable = load_json(repo_state_dir(primary) / "state.json", {})
+        assert durable["active_task_id"] is None
+        assert "T1" not in durable.get("accepted_tasks", {})
+        assert task_readiness(primary)["T1"]["status"] == "READY"
+
+
+def test_p4_abort_preserves_admitted_product_changes_without_accepting(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        target = worktree / "src" / "task" / "preserve-me.txt"
+        target.write_text("valuable unfinished work\n")
+
+        result = abort_task_workspace(
+            primary,
+            reason="stop task but preserve unfinished work",
+        )
+        assert result["status"] == "ABANDONED_PRESERVED"
+        preservation_sha = result["preservation_sha"]
+        preservation_ref = result["preservation_ref"]
+        assert preservation_sha
+        assert preservation_ref
+        assert not worktree.exists()
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            "--hash",
+            preservation_ref,
+        ).stdout.strip() == preservation_sha
+        parents = _run(
+            primary,
+            "git",
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            preservation_sha,
+        ).stdout.strip().split()
+        assert parents == [preservation_sha, record["product_base_sha"]]
+        assert _run(
+            primary,
+            "git",
+            "diff",
+            "--name-only",
+            record["product_base_sha"],
+            preservation_sha,
+        ).stdout.splitlines() == ["src/task/preserve-me.txt"]
+        assert _run(
+            primary,
+            "git",
+            "show",
+            f"{preservation_sha}:src/task/preserve-me.txt",
+        ).stdout == "valuable unfinished work\n"
+
+        durable = load_json(repo_state_dir(primary) / "state.json", {})
+        assert durable["active_task_id"] is None
+        assert "T1" not in durable.get("accepted_tasks", {})
+        assert result["ready_frontier"] == ["T1"]
+        assert result["next_task_id"] == "T1"
+        assert task_readiness(primary)["T1"]["status"] == "READY"
+
+        _run(primary, "git", "update-ref", "-d", preservation_ref)
+
+
+def test_p4_abort_refuses_unknown_ignored_file_and_leaves_workspace(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _repo(Path(td) / "repo")
+        (primary / ".gitignore").write_text("ignored.tmp\n")
+        _run(primary, "git", "add", ".gitignore")
+        _run(primary, "git", "commit", "-qm", "ignore runtime file")
+        primary = _configured(primary, [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        ignored = worktree / "ignored.tmp"
+        ignored.write_text("unknown ignored state\n")
+
+        result = abort_task_workspace(primary)
+        assert result["status"] == "PRESERVED_MANUAL"
+        assert "ignored untracked files" in result["reason"]
+        assert result["paths"] == ["ignored.tmp"]
+        assert worktree.exists()
+        assert ignored.read_text() == "unknown ignored state\n"
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "ACTIVE"
+        assert load_json(
+            repo_state_dir(primary) / "state.json",
+            {},
+        )["active_task_id"] == "T1"
