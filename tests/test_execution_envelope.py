@@ -2130,3 +2130,99 @@ def test_p4_deterministic_candidate_only_failure_blocks_acceptance(monkeypatch):
             str(worktree),
         )
         _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_deterministic_verification_rejects_candidate_source_mutation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        command = (
+            "python -c \"from pathlib import Path; "
+            "p=Path('src/task/candidate.txt'); "
+            "e=Path('src/task/existing.txt'); "
+            "e.write_text('verification mutated\\n') if p.exists() else None\""
+        )
+        primary = _configured_with_verification(
+            _repo(Path(td) / "repo"),
+            [_task("T1")],
+            command,
+        )
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "candidate.txt").write_text(
+            "candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        result = verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=30,
+        )
+
+        assert result["status"] == "FAIL"
+        assert result["baseline_receipts"][0]["tracked_source_unchanged"] is True
+        assert result["receipts"][0]["tracked_source_unchanged"] is False
+        assert result["receipts"][0]["verdict"] == "FAIL"
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "BLOCKED"
+        assert workspace["candidate_sha"] == candidate["candidate_sha"]
+
+        reopened = reopen_task_candidate_for_repair(
+            primary,
+            findings=result["findings"],
+        )
+        assert reopened["status"] == "ACTIVE"
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_deterministic_verification_timeout_is_unverified(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        command = "python -c \"import time; time.sleep(2)\""
+        primary = _configured_with_verification(
+            _repo(Path(td) / "repo"),
+            [_task("T1")],
+            command,
+        )
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "candidate.txt").write_text(
+            "candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        result = verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=1,
+        )
+
+        assert result["status"] == "UNVERIFIED"
+        assert result["receipts"][0]["timed_out"] is True
+        assert result["receipts"][0]["verdict"] == "UNVERIFIED"
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "BLOCKED"
+        assert workspace["candidate_sha"] == candidate["candidate_sha"]
+
+        reopened = reopen_task_candidate_for_repair(
+            primary,
+            findings=result["findings"],
+        )
+        assert reopened["status"] == "ACTIVE"
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
