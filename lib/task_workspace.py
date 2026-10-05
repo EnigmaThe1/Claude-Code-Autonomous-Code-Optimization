@@ -59,6 +59,7 @@ _SEMANTIC_KEYS = (
     "task_branch",
     "task_worktree",
     "primary_baseline_sha256",
+    "git_ref_binding_sha256",
     "candidate_sha",
     "verified_candidate_sha",
     "acceptance_attestation_sha256",
@@ -131,6 +132,7 @@ def _semantic(record: dict[str, Any]) -> dict[str, Any]:
             f"TaskWorkspaceRecord has unknown lifecycle state: {state!r}"
         )
     envelope = out["execution_envelope_sha256"]
+    refs_digest = out["git_ref_binding_sha256"]
     if state == "PREPARING":
         if envelope is not None and (
             not isinstance(envelope, str) or len(envelope) != 64
@@ -138,10 +140,21 @@ def _semantic(record: dict[str, Any]) -> dict[str, Any]:
             raise TaskWorkspaceError(
                 "PREPARING TaskWorkspaceRecord envelope digest is invalid"
             )
-    elif not isinstance(envelope, str) or len(envelope) != 64:
-        raise TaskWorkspaceError(
-            "TaskWorkspaceRecord requires an ExecutionEnvelope digest"
-        )
+        if refs_digest is not None and (
+            not isinstance(refs_digest, str) or len(refs_digest) != 64
+        ):
+            raise TaskWorkspaceError(
+                "PREPARING TaskWorkspaceRecord ref binding digest is invalid"
+            )
+    else:
+        if not isinstance(envelope, str) or len(envelope) != 64:
+            raise TaskWorkspaceError(
+                "TaskWorkspaceRecord requires an ExecutionEnvelope digest"
+            )
+        if not isinstance(refs_digest, str) or len(refs_digest) != 64:
+            raise TaskWorkspaceError(
+                "TaskWorkspaceRecord requires a Git ref binding digest"
+            )
     return out
 
 
