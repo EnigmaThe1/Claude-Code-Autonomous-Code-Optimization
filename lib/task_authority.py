@@ -346,6 +346,7 @@ def _activate_locked(
             root,
             state_dir=state_root,
             authority_root=authority_check_root,
+            git_state_dir=state_root,
         )
     except ExecutionEnvelopeError as exc:
         raise TaskAuthorityError(f"persisted task activation did not verify: {exc}") from exc
