@@ -2641,6 +2641,12 @@ def test_p4_verified_acceptance_records_full_evidence_and_unlocks_dependency(mon
 
         cleaned = cleanup_accepted_task_workspace(primary)
         assert cleaned["status"] == "CLEAN"
+        assert cleaned["scheduler_status"] == "NEXT_READY"
+        assert cleaned["ready_frontier"] == ["T2"]
+        assert cleaned["next_task_id"] == "T2"
+        assert cleaned["unresolved_task_ids"] == ["T2"]
+        assert cleaned["readiness"]["T1"]["status"] == "ACCEPTED"
+        assert cleaned["readiness"]["T2"]["status"] == "READY"
         assert not worktree.exists()
         assert _run(
             primary,
@@ -2689,6 +2695,11 @@ def test_p4_verified_noop_acceptance_uses_unchanged_product_sha(monkeypatch):
 
         cleaned = cleanup_accepted_task_workspace(primary)
         assert cleaned["status"] == "CLEAN"
+        assert cleaned["scheduler_status"] == "COMPLETE"
+        assert cleaned["ready_frontier"] == []
+        assert cleaned["next_task_id"] is None
+        assert cleaned["unresolved_task_ids"] == []
+        assert cleaned["readiness"]["T1"]["status"] == "ACCEPTED"
         assert not worktree.exists()
         assert task_readiness(primary)["T1"]["status"] == "ACCEPTED"
 
