@@ -1049,6 +1049,7 @@ def test_linked_task_root_can_use_primary_coordinator_state(monkeypatch):
                 "T1",
                 acquire_lease=False,
                 state_dir=coordinator_state,
+                authority_root=primary,
             )
             assert selected["status"] == "ACTIVE"
             assert selected["task_id"] == "T1"
@@ -1056,6 +1057,7 @@ def test_linked_task_root_can_use_primary_coordinator_state(monkeypatch):
             envelope = load_active_execution_envelope(
                 linked,
                 state_dir=coordinator_state,
+                authority_root=primary,
             )
             assert envelope["task_id"] == "T1"
             assert envelope["product_base_sha"] == _run(
@@ -1068,6 +1070,7 @@ def test_linked_task_root_can_use_primary_coordinator_state(monkeypatch):
             context = active_task_prompt_context(
                 linked,
                 state_dir=coordinator_state,
+                authority_root=primary,
             )
             assert context is not None
             assert context["id"] == "T1"
