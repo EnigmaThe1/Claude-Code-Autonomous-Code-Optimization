@@ -58,6 +58,7 @@ from task_sources import (
     load_resolved_task_source_set,
     resolve_task_sources,
 )
+from task_authority import ready_frontier, task_readiness
 from verification import _run_verification_command, _verification_commands
 from workspace_recovery import promote_fast_forward
 from task_workspace import (
@@ -2130,8 +2131,51 @@ def cleanup_accepted_task_workspace(
             )
         except TaskSourceError as exc:
             raise TaskAcceptanceError(str(exc)) from exc
+
+        state = load_json(state_root / "state.json", {})
+        if not isinstance(state, dict):
+            raise TaskAcceptanceError(
+                "durable coordinator state is malformed after task cleanup"
+            )
+        try:
+            readiness = task_readiness(
+                coordinator_root,
+                task_set=task_set,
+                state=state,
+                state_dir=state_root,
+                authority_root=coordinator_root,
+            )
+            frontier = ready_frontier(
+                coordinator_root,
+                task_set=task_set,
+                state=state,
+                state_dir=state_root,
+                authority_root=coordinator_root,
+            )
+        except Exception as exc:
+            raise TaskAcceptanceError(
+                "unable to recompute post-acceptance task readiness: "
+                + str(exc)
+            ) from exc
+
+        unresolved = [
+            task_id
+            for task_id, row in sorted(readiness.items())
+            if row.get("status") != "ACCEPTED"
+        ]
+        if frontier:
+            scheduler_status = "NEXT_READY"
+            next_task_id: str | None = frontier[0]
+        elif unresolved:
+            scheduler_status = "BLOCKED"
+            next_task_id = None
+        else:
+            scheduler_status = "COMPLETE"
+            next_task_id = None
+
         return {
             "status": "CLEAN",
+            "scheduler_status": scheduler_status,
             "accepted_task_id": accepted["task_id"],
             "accepted_product_sha": accepted[
                 "accepted_product_sha"
@@ -2141,6 +2185,10 @@ def cleanup_accepted_task_workspace(
                 "task_source_set_sha256"
             ),
             "task_count": len(task_set.get("tasks") or []),
+            "ready_frontier": frontier,
+            "next_task_id": next_task_id,
+            "unresolved_task_ids": unresolved,
+            "readiness": readiness,
         }
 
 
