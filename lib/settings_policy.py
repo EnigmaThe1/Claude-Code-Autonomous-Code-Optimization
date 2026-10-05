@@ -243,6 +243,7 @@ def make_settings(
         "CLAUDE_AUTONOMY_STATE_DIR": str(state_dir),
         "CLAUDE_AUTONOMY_ENABLED": "1",
         "CLAUDE_AUTONOMY_PROFILE": autonomy_profile,
+        "CLAUDE_AUTO_PACKAGE_ROOT": str(package_root().resolve()),
         "PYTHONDONTWRITEBYTECODE": "1",
     })
 
@@ -535,6 +536,14 @@ def make_settings(
             "PreToolUse",
             package_root() / "hooks" / "write_boundary_guard.py",
             matcher="Write|Edit|NotebookEdit|Bash",
+        )
+    if repo_root:
+        # One authoritative repository-state check after every parallel tool
+        # batch. It is a cheap no-op unless P3 task authority is active.
+        _append_command_hook(
+            template,
+            "PostToolBatch",
+            package_root() / "hooks" / "task_post_batch_guard.py",
         )
     if autonomy_profile != "isolated-full" and not unrestricted:
         # Container runtimes are a host-authority boundary even in repositories
