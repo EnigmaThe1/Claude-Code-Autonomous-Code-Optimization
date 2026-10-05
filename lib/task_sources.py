@@ -608,8 +608,14 @@ def load_resolved_task_source_set(
     require_current: bool = True,
     require_state_binding: bool = True,
     state_dir: Path | None = None,
+    authority_root: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
+    authority_check_root = (
+        authority_root.expanduser().resolve()
+        if authority_root is not None
+        else root
+    )
     state_root = (
         state_dir.expanduser().resolve()
         if state_dir is not None
@@ -670,7 +676,7 @@ def load_resolved_task_source_set(
 
     if require_current:
         try:
-            snapshot = build_authority_snapshot(root)
+            snapshot = build_authority_snapshot(authority_check_root)
         except AuthoritySetError as exc:
             raise TaskSourceError(str(exc)) from exc
         if not isinstance(snapshot, dict):
