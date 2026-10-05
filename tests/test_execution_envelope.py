@@ -33,6 +33,7 @@ from execution_envelope import (
 from repo_identity import repo_state_dir
 from repo_runtime import activate
 from runtime_paths import package_root
+from settings_policy import make_settings
 from state_store import json_dump, load_json
 from task_authority import (
     TaskAuthorityError,
@@ -502,3 +503,161 @@ def test_post_batch_without_envelope_blocks_mutating_tool_in_task_owned_mode(mon
         blocked = _post_batch(root, ["Bash"])
         assert blocked and blocked["decision"] == "block"
         assert load_task_violation(root) is not None
+
+
+def test_envelope_semantic_tamper_and_state_binding_mismatch_fail_closed(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        activate_task(root, "T1")
+        path = repo_state_dir(root) / "tasks" / "execution-envelope.json"
+        raw = json.loads(path.read_text())
+        raw["direct_edit_paths"] = ["**"]
+        path.write_text(json.dumps(raw))
+        with pytest.raises(ExecutionEnvelopeError, match="semantic integrity"):
+            load_active_execution_envelope(root)
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        activate_task(root, "T1")
+        state_path = repo_state_dir(root) / "state.json"
+        state_obj = load_json(state_path, {})
+        state_obj["active_execution_envelope_sha256"] = "f" * 64
+        json_dump(state_path, state_obj)
+        with pytest.raises(ExecutionEnvelopeError, match="semantic integrity|durable state"):
+            load_active_execution_envelope(root)
+
+
+def test_post_batch_head_movement_blocks_and_preserves_original_envelope_identity(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        activated = activate_task(root, "T1")
+        base = activated["product_base_sha"]
+        _run(root, "git", "commit", "--allow-empty", "-qm", "out-of-band head move")
+        moved = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+        assert moved != base
+
+        blocked = _post_batch(root, ["Bash"])
+        assert blocked and blocked["decision"] == "block"
+        violation = load_task_violation(root)
+        assert violation is not None
+        assert violation["task_id"] == "T1"
+        assert violation["product_base_sha"] == base
+        assert violation["observed_head"] == moved
+        assert violation["execution_envelope_sha256"] == activated["execution_envelope_sha256"]
+
+
+def test_unattended_symlink_traversal_is_denied_by_task_authority(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state, tempfile.TemporaryDirectory() as outside_td:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        activate_task(root, "T1")
+        link = root / "src" / "task" / "link"
+        link.symlink_to(Path(outside_td), target_is_directory=True)
+
+        result = _pretool(root, {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(link / "escape.txt")},
+        }, semantic_only=True)
+        assert _decision(result) == "deny"
+
+        result = _pretool(root, {
+            "tool_name": "Bash",
+            "tool_input": {"command": "touch src/task/link/escape.txt"},
+        }, semantic_only=True)
+        assert _decision(result) == "deny"
+
+
+def test_gitlink_owned_selector_is_blocked_at_activation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+        _run(
+            root,
+            "git",
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{head},nested",
+        )
+        _run(root, "git", "commit", "-qm", "add synthetic gitlink")
+        _write_contract(
+            root,
+            [_task("T1", owned_paths=["nested/**"], evidence_paths=[], scratch_paths=[])],
+        )
+        result = resolve_task_sources(root, persist=True)
+        assert result["status"] == "READY"
+        with pytest.raises(TaskAuthorityError, match="gitlink/submodule"):
+            activate_task(root, "T1")
+
+
+def test_detached_head_and_sparse_checkout_block_activation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        _run(root, "git", "checkout", "--detach", "-q")
+        with pytest.raises(TaskAuthorityError, match="named branch"):
+            activate_task(root, "T1")
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        _run(root, "git", "config", "core.sparseCheckout", "true")
+        with pytest.raises(TaskAuthorityError, match="sparse"):
+            activate_task(root, "T1")
+
+
+def test_stage_gate_handles_deletion_mode_only_and_binary_changes(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        activate_task(root, "T1")
+
+        _run(root, "git", "rm", "-q", "src/task/existing.txt")
+        assert validate_staged_diff(root)["status"] == "VALID"
+        _run(root, "git", "reset", "--hard", "-q", "HEAD")
+
+        existing = root / "src" / "task" / "existing.txt"
+        existing.chmod(existing.stat().st_mode | 0o111)
+        _run(root, "git", "add", "src/task/existing.txt")
+        assert validate_staged_diff(root)["status"] == "VALID"
+        _run(root, "git", "reset", "--hard", "-q", "HEAD")
+
+        binary = root / "src" / "task" / "binary.dat"
+        binary.write_bytes(bytes(range(256)))
+        _run(root, "git", "add", "src/task/binary.dat")
+        assert validate_staged_diff(root)["status"] == "VALID"
+
+
+def test_settings_install_post_batch_guard_for_every_runtime_profile(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        profile = {"repo_root": str(root), "languages": [], "container_files": []}
+        for name in ("balanced", "strict", "isolated-full", "unattended"):
+            rendered = make_settings(Path(state), "external", name, profile)
+            hooks = rendered.get("hooks", {}).get("PostToolBatch", [])
+            assert any(
+                "task_post_batch_guard.py" in hook.get("command", "")
+                for group in hooks
+                for hook in group.get("hooks", [])
+            ), name
+
+
+def test_task_cli_parser_exposes_p3_authority_actions():
+    from cli_schema import build_parser
+
+    parser = build_parser("test")
+    for argv, expected in (
+        (["tasks", "show", "T1"], "show"),
+        (["tasks", "explain", "T1"], "explain"),
+        (["tasks", "activate", "T1"], "activate"),
+        (["tasks", "validate-stage"], "validate-stage"),
+        (["tasks", "reconcile"], "reconcile"),
+        (["tasks", "deactivate"], "deactivate"),
+    ):
+        args = parser.parse_args(argv)
+        assert args.tasks_command == expected
