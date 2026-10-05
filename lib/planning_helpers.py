@@ -860,6 +860,46 @@ def run_planning_validators(
     }
 
 
+def load_validator_bundle(
+    path: Path,
+    *,
+    repair_envelope_sha256: str,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PlanningHelperError(
+            f"validator receipt bundle is unreadable or malformed: {exc}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise PlanningHelperError("validator receipt bundle must be a JSON object")
+    semantic = {
+        "schema_version": value.get("schema_version"),
+        "repair_envelope_sha256": value.get("repair_envelope_sha256"),
+        "candidate_sha": value.get("candidate_sha"),
+        "receipts": value.get("receipts"),
+    }
+    if semantic["schema_version"] != 1:
+        raise PlanningHelperError("unsupported validator receipt bundle schema")
+    if semantic["repair_envelope_sha256"] != repair_envelope_sha256:
+        raise PlanningHelperError(
+            "validator receipt bundle RepairEnvelope binding is stale"
+        )
+    if semantic["candidate_sha"] != candidate_sha:
+        raise PlanningHelperError(
+            "validator receipt bundle candidate SHA binding is stale"
+        )
+    if not isinstance(semantic["receipts"], list):
+        raise PlanningHelperError("validator receipt bundle receipts are malformed")
+    actual = _digest(semantic)
+    if value.get("validator_receipt_bundle_sha256") != actual:
+        raise PlanningHelperError(
+            "validator receipt bundle semantic integrity check failed"
+        )
+    return value
+
+
 def load_reconciler_bundle(
     path: Path,
     *,
