@@ -245,6 +245,7 @@ def main() -> int:
             reason=f"unable to resolve task-owned governance after tool batch: {exc}",
             tool_batch=batch,
             state_dir=state_dir,
+            git_state_dir=state_dir,
         )
         _block(f"Task governance could not be verified after the tool batch: {exc}")
         return 0
@@ -290,6 +291,7 @@ def main() -> int:
             ),
             tool_batch=batch,
             state_dir=state_dir,
+            git_state_dir=state_dir,
         )
         _block(
             "Durable active-task binding and ExecutionEnvelope storage disagree."
@@ -349,6 +351,7 @@ def main() -> int:
             violations=result["violations"],
             tool_batch=batch,
             state_dir=state_dir,
+            git_state_dir=state_dir,
         )
         summary = "; ".join(
             f"{row['path']}: {row['reason']}"
@@ -362,6 +365,7 @@ def main() -> int:
             reason=f"task authority integrity/current-state check failed after tool batch: {exc}",
             tool_batch=batch,
             state_dir=state_dir,
+            git_state_dir=state_dir,
         )
         _block(f"Task authority failed closed after the tool batch: {exc}")
         return 0
@@ -371,6 +375,7 @@ def main() -> int:
             reason=f"unexpected PostToolBatch task guard failure: {type(exc).__name__}: {exc}",
             tool_batch=batch,
             state_dir=state_dir,
+            git_state_dir=state_dir,
         )
         _block(
             f"Task authority guard failed closed after the tool batch: {type(exc).__name__}"
