@@ -50,6 +50,7 @@ from task_sources import (
     load_resolved_task_source_set,
     resolve_task_sources,
 )
+from task_workspace import begin_task_workspace, load_active_task_workspace
 from workspace_recovery import promote_fast_forward
 
 
@@ -1095,3 +1096,78 @@ def test_linked_task_root_can_use_primary_coordinator_state(monkeypatch):
                 str(linked),
                 check=False,
             )
+
+
+def test_p4_task_workspace_is_external_resumable_and_primary_wip_isolated(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(
+            _repo(Path(td) / "repo"),
+            [_task("T2", depends_on=["T1"]), _task("T1")],
+        )
+        coordinator_state = repo_state_dir(primary)
+
+        # P4 deliberately permits primary-checkout WIP, including WIP that would
+        # overlap the selected task envelope in P3. It is frozen as coordinator
+        # baseline evidence and is not copied into the clean task worktree.
+        primary_wip = primary / "src" / "task" / "primary-only-wip.txt"
+        primary_wip.write_text("human primary wip\n")
+
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        assert record["lifecycle_state"] == "ACTIVE"
+        assert record["task_id"] == "T1"
+        assert record["execution_envelope_sha256"]
+        assert worktree.is_dir()
+        assert worktree.is_relative_to(
+            coordinator_state / "tasks" / "workspaces"
+        )
+        assert not (worktree / "src" / "task" / "primary-only-wip.txt").exists()
+        assert primary_wip.read_text() == "human primary wip\n"
+        assert _run(worktree, "git", "rev-parse", "HEAD").stdout.strip() == record[
+            "product_base_sha"
+        ]
+        assert _run(
+            worktree,
+            "git",
+            "branch",
+            "--show-current",
+        ).stdout.strip() == record["task_branch"]
+
+        task_state = repo_state_dir(worktree)
+        assert task_state != coordinator_state
+        assert not (task_state / "state.json").exists()
+        assert not (task_state / "tasks" / "execution-envelope.json").exists()
+
+        envelope = load_active_execution_envelope(
+            worktree,
+            state_dir=coordinator_state,
+            authority_root=primary,
+        )
+        assert envelope["task_id"] == "T1"
+        assert envelope["execution_envelope_sha256"] == record[
+            "execution_envelope_sha256"
+        ]
+        durable = load_json(coordinator_state / "state.json", {})
+        assert durable["active_task_id"] == "T1"
+        assert durable["active_task_worktree"] == str(worktree)
+        assert durable["active_task_branch"] == record["task_branch"]
+
+        # Re-entry is a reconciliation/reuse operation, not a second workspace.
+        reused = begin_task_workspace(primary)
+        assert reused["task_workspace_sha256"] == record["task_workspace_sha256"]
+        assert reused["task_worktree"] == record["task_worktree"]
+        assert reused["task_branch"] == record["task_branch"]
+        loaded = load_active_task_workspace(primary)
+        assert loaded is not None
+        assert loaded["task_workspace_sha256"] == record["task_workspace_sha256"]
+
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
