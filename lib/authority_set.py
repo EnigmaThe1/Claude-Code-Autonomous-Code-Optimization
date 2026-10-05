@@ -264,6 +264,51 @@ def _helper_control_selectors(contract: dict[str, Any]) -> list[str]:
     return sorted(selectors)
 
 
+def _helper_executable_selectors(contract: dict[str, Any]) -> list[str]:
+    selectors: set[str] = set()
+    for authority_set in contract["planning_authority"]["sets"]:
+        for category in ("validators", "reconcilers"):
+            for helper in authority_set[category]:
+                argv = helper.get("argv", [])
+                for candidate in argv[:2]:
+                    if (
+                        isinstance(candidate, str)
+                        and candidate
+                        and not candidate.startswith("-")
+                        and not candidate.startswith("/")
+                        and candidate not in {
+                            "python", "python3", "bash", "sh", "node",
+                            "ruby", "perl",
+                        }
+                    ):
+                        try:
+                            normalised = normalise_repo_selector(candidate)
+                        except GovernanceContractError:
+                            continue
+                        if "/" in normalised:
+                            selectors.add(normalised)
+    for source in contract["tasks"]["sources"]:
+        if source.get("kind") != "adapter":
+            continue
+        argv = source.get("argv")
+        if not isinstance(argv, list):
+            continue
+        for candidate in argv[:2]:
+            if (
+                isinstance(candidate, str)
+                and candidate
+                and not candidate.startswith("-")
+                and not candidate.startswith("/")
+            ):
+                try:
+                    normalised = normalise_repo_selector(candidate)
+                except GovernanceContractError:
+                    continue
+                if "/" in normalised:
+                    selectors.add(normalised)
+    return sorted(selectors)
+
+
 def _blob_text(root: Path, object_id: str, *, maximum: int = 2 * 1024 * 1024) -> str:
     size = _git(root, "cat-file", "-s", object_id)
     if size.returncode != 0:
@@ -370,6 +415,38 @@ def _resolve_control_surfaces(
                 continue
             records[path] = {"path": path, "git_mode": entry["mode"], "object": entry["object"]}
     return [records[path] for path in sorted(records)]
+
+
+def planning_repair_control_paths(
+    root: Path,
+    ref: str = "HEAD",
+) -> list[str]:
+    """Control/config/executable paths Planning Repair may never edit directly.
+
+    P1 intentionally protects helper/task-source data inputs from product workers.
+    P5 Planning Repair may legitimately repair those data inputs when they are
+    selected repairable planning members, so this narrower set excludes data
+    inputs while retaining governance, verification and executable controls.
+    """
+    root = root.expanduser().resolve()
+    commit = _rev(root, ref)
+    tree = _tree(root, commit)
+    try:
+        contract = load_governance_contract(root, commit)
+    except GovernanceContractError as exc:
+        raise AuthoritySetError(str(exc)) from exc
+    if contract is None:
+        return []
+
+    selectors = set(_MANDATORY_CONTROL_SELECTORS)
+    selectors.update(contract.get("control_surfaces", []))
+    selectors.update(_helper_executable_selectors(contract))
+    selectors.update(_verification_control_selectors(root, tree))
+    paths: set[str] = set()
+    for selector in sorted(selectors):
+        for entry in _resolve_selector(selector, tree, required=False):
+            paths.add(unicodedata.normalize("NFC", entry["path"]))
+    return sorted(paths)
 
 
 def _build_contract_sets(
