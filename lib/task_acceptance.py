@@ -25,9 +25,15 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from accepted_task import (
+    AcceptedTaskError,
+    load_accepted_task_record,
+    persist_accepted_task_record,
+)
 from execution_envelope import (
     ExecutionEnvelopeError,
     evaluate_active_workspace,
+    invalidate_task_authority_after_head_change,
     load_active_execution_envelope,
     path_matches_any,
     validate_promotion_target_for_active_envelope,
@@ -37,15 +43,23 @@ from git_trust import trusted_git_env
 from governance_contract import canonical_json_bytes
 from repo_identity import SupervisorLease, repo_state_dir
 from control_plane import run_readonly_plan_agent
-from promotion_policy import record_promotion_attestation
+from promotion_policy import (
+    record_promotion_attestation,
+    require_exact_attestation,
+)
 from protocols import parse_json_protocol
 from provider_config import provider_from_args
 from repo_profile import profile_repo
 from runtime_paths import ensure_private_dir, utcnow
 from settings_policy import make_readonly_settings
 from state_store import json_dump, load_json
-from task_sources import TaskSourceError, load_resolved_task_source_set
+from task_sources import (
+    TaskSourceError,
+    load_resolved_task_source_set,
+    resolve_task_sources,
+)
 from verification import _run_verification_command, _verification_commands
+from workspace_recovery import promote_fast_forward
 from task_workspace import (
     TaskWorkspaceError,
     candidate_ref_for_workspace,
@@ -1525,6 +1539,602 @@ def verify_task_candidate_independent(
             "acceptance_attestation_sha256": attestation_sha256,
             "summary": summary,
             "findings": findings,
+        }
+
+
+
+def load_independent_verifier_record(
+    coordinator_root: Path,
+    *,
+    candidate_sha: str | None = None,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(coordinator_root)
+    )
+    workspace = load_active_task_workspace(
+        coordinator_root,
+        state_dir=state_root,
+    )
+    if workspace is None:
+        raise TaskAcceptanceError("no active TaskWorkspaceRecord exists")
+    candidate = str(
+        candidate_sha or workspace.get("candidate_sha") or ""
+    ).lower()
+    if not candidate:
+        raise TaskAcceptanceError("candidate SHA is missing")
+    obj = load_json(
+        _task_verifier_record_path(state_root, candidate),
+        {},
+    )
+    if not isinstance(obj, dict) or not obj:
+        raise TaskAcceptanceError(
+            "independent Task Verifier record does not exist"
+        )
+    semantic = {
+        key: obj.get(key)
+        for key in (
+            "schema_version",
+            "task_id",
+            "task_spec_sha256",
+            "candidate_sha",
+            "base_sha",
+            "deterministic_verification_sha256",
+            "verdict",
+            "summary",
+            "findings",
+            "provider",
+            "model",
+            "repository_unchanged",
+        )
+    }
+    if obj.get("task_verifier_evidence_sha256") != _digest(semantic):
+        raise TaskAcceptanceError(
+            "independent Task Verifier record integrity check failed"
+        )
+    if (
+        semantic["task_id"] != workspace["task_id"]
+        or semantic["task_spec_sha256"] != workspace["task_spec_sha256"]
+        or str(semantic["candidate_sha"]).lower() != candidate
+        or str(semantic["base_sha"]).lower()
+        != str(workspace["product_base_sha"]).lower()
+    ):
+        raise TaskAcceptanceError(
+            "independent Task Verifier record is not bound to the "
+            "current exact task candidate"
+        )
+    return obj
+
+
+def _accepted_history_dir(state_dir: Path) -> Path:
+    return ensure_private_dir(state_dir / "tasks" / "history")
+
+
+def _accepted_workspace_history_path(
+    state_dir: Path,
+    acceptance_sha256: str,
+) -> Path:
+    return (
+        _accepted_history_dir(state_dir)
+        / f"workspace-accepted-{acceptance_sha256[:24]}.json"
+    )
+
+
+def _current_head(root: Path, *, state_dir: Path) -> str:
+    return str(
+        _require_git(
+            root,
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+            state_dir=state_dir,
+        ).stdout
+    ).strip().lower()
+
+
+def _persist_acceptance_after_exact_product(
+    coordinator_root: Path,
+    *,
+    workspace: dict[str, Any],
+    state_dir: Path,
+) -> dict[str, Any]:
+    candidate_sha = str(workspace["candidate_sha"]).lower()
+    if _current_head(coordinator_root, state_dir=state_dir) != candidate_sha:
+        raise TaskAcceptanceError(
+            "accepted-task recording requires product HEAD at the exact "
+            "verified candidate SHA"
+        )
+
+    bundle = load_deterministic_verification_bundle(
+        coordinator_root,
+        candidate_sha=candidate_sha,
+        state_dir=state_dir,
+    )
+    if bundle.get("verdict") != "PASS":
+        raise TaskAcceptanceError(
+            "accepted-task recording requires deterministic PASS evidence"
+        )
+    verifier = load_independent_verifier_record(
+        coordinator_root,
+        candidate_sha=candidate_sha,
+        state_dir=state_dir,
+    )
+    if verifier.get("verdict") != "VERIFIED":
+        raise TaskAcceptanceError(
+            "accepted-task recording requires independent VERIFIED evidence"
+        )
+
+    try:
+        attestation = require_exact_attestation(
+            coordinator_root,
+            candidate_sha,
+            contract=TASK_ACCEPTANCE_CONTRACT,
+        )
+    except ValueError as exc:
+        raise TaskAcceptanceError(str(exc)) from exc
+    if not isinstance(attestation, dict):
+        raise TaskAcceptanceError(
+            "task acceptance attestation is missing"
+        )
+    attestation_sha256 = _attestation_digest(attestation)
+    if attestation_sha256 != workspace.get(
+        "acceptance_attestation_sha256"
+    ):
+        raise TaskAcceptanceError(
+            "task acceptance attestation digest does not match workspace state"
+        )
+    if attestation.get("evidence_sha256") != verifier.get(
+        "task_verifier_evidence_sha256"
+    ):
+        raise TaskAcceptanceError(
+            "task acceptance attestation does not bind the independent "
+            "verifier evidence"
+        )
+    metadata = attestation.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get(
+        "deterministic_verification_sha256"
+    ) != bundle.get("verification_bundle_sha256"):
+        raise TaskAcceptanceError(
+            "task acceptance attestation does not bind deterministic "
+            "verification evidence"
+        )
+
+    semantic = {
+        "schema_version": 1,
+        "task_id": workspace["task_id"],
+        "task_spec_sha256": workspace["task_spec_sha256"],
+        "task_source_set_sha256": workspace[
+            "task_source_set_sha256"
+        ],
+        "authority_snapshot_sha256": workspace[
+            "authority_snapshot_sha256"
+        ],
+        "execution_envelope_sha256": workspace[
+            "execution_envelope_sha256"
+        ],
+        "base_sha": workspace["product_base_sha"],
+        "candidate_sha": candidate_sha,
+        "accepted_product_sha": candidate_sha,
+        "no_op": bool(workspace.get("no_op_candidate")),
+        "verification_bundle_sha256": bundle[
+            "verification_bundle_sha256"
+        ],
+        "verifier_attestation_sha256": attestation_sha256,
+        "attestation_contract": TASK_ACCEPTANCE_CONTRACT,
+    }
+    try:
+        accepted = persist_accepted_task_record(
+            state_dir,
+            semantic,
+        )
+    except AcceptedTaskError as exc:
+        raise TaskAcceptanceError(str(exc)) from exc
+
+    state = load_json(state_dir / "state.json", {})
+    if not isinstance(state, dict):
+        raise TaskAcceptanceError("durable coordinator state is malformed")
+    accepted_index = state.get("accepted_tasks")
+    if not isinstance(accepted_index, dict):
+        accepted_index = {}
+    accepted_index = dict(accepted_index)
+    accepted_index[workspace["task_id"]] = {
+        "task_spec_sha256": workspace["task_spec_sha256"],
+        "accepted_product_sha": candidate_sha,
+        "acceptance_sha256": accepted["acceptance_sha256"],
+    }
+    state["accepted_tasks"] = accepted_index
+    state["last_accepted_task_id"] = workspace["task_id"]
+    state["last_accepted_product_sha"] = candidate_sha
+    state["last_acceptance_sha256"] = accepted[
+        "acceptance_sha256"
+    ]
+    json_dump(state_dir / "state.json", state)
+
+    updated = update_task_workspace_package_state(
+        coordinator_root,
+        state_dir=state_dir,
+        expected_states={"PROMOTING", "VERIFIED_PENDING_PROMOTION"},
+        updates={
+            "lifecycle_state": "ACCEPTED_PENDING_CLEANUP",
+            "accepted_product_sha": candidate_sha,
+            "acceptance_sha256": accepted["acceptance_sha256"],
+            "accepted_at": utcnow(),
+        },
+        refresh_ref_binding=True,
+    )
+    return {
+        "status": "ACCEPTED_PENDING_CLEANUP",
+        "task_id": updated["task_id"],
+        "candidate_sha": candidate_sha,
+        "acceptance_sha256": accepted["acceptance_sha256"],
+        "accepted_record": accepted,
+    }
+
+
+def accept_verified_task(
+    coordinator_root: Path,
+    *,
+    remote: str | None = None,
+    remote_branch: str | None = None,
+    expected_remote: str | None = None,
+    state_dir: Path | None = None,
+    acquire_lease: bool = True,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(coordinator_root)
+    )
+    context = (
+        SupervisorLease(state_root, coordinator_root)
+        if acquire_lease
+        else nullcontext()
+    )
+    with context:
+        workspace = load_active_task_workspace(
+            coordinator_root,
+            state_dir=state_root,
+        )
+        if workspace is None:
+            raise TaskAcceptanceError(
+                "no active TaskWorkspaceRecord exists"
+            )
+        if workspace["lifecycle_state"] == "ACCEPTED_PENDING_CLEANUP":
+            try:
+                accepted = load_accepted_task_record(
+                    state_root,
+                    workspace["task_id"],
+                )
+            except AcceptedTaskError as exc:
+                raise TaskAcceptanceError(str(exc)) from exc
+            return {
+                "status": "ACCEPTED_PENDING_CLEANUP",
+                "task_id": workspace["task_id"],
+                "candidate_sha": workspace["candidate_sha"],
+                "acceptance_sha256": accepted["acceptance_sha256"],
+                "accepted_record": accepted,
+            }
+
+        if workspace["lifecycle_state"] not in {
+            "VERIFIED_PENDING_PROMOTION",
+            "PROMOTING",
+        }:
+            raise TaskAcceptanceError(
+                "task acceptance requires VERIFIED_PENDING_PROMOTION "
+                f"or PROMOTING state, found {workspace['lifecycle_state']!r}"
+            )
+        candidate_sha = str(workspace.get("candidate_sha") or "").lower()
+        verified_sha = str(
+            workspace.get("verified_candidate_sha") or ""
+        ).lower()
+        base_sha = str(workspace["product_base_sha"]).lower()
+        if not candidate_sha or candidate_sha != verified_sha:
+            raise TaskAcceptanceError(
+                "task acceptance requires candidate_sha == verified_candidate_sha"
+            )
+
+        # Re-validate exact verifier/attestation evidence before any product
+        # mutation, even though their digests are already bound to workspace.
+        bundle = load_deterministic_verification_bundle(
+            coordinator_root,
+            candidate_sha=candidate_sha,
+            state_dir=state_root,
+        )
+        verifier = load_independent_verifier_record(
+            coordinator_root,
+            candidate_sha=candidate_sha,
+            state_dir=state_root,
+        )
+        if bundle.get("verdict") != "PASS" or verifier.get(
+            "verdict"
+        ) != "VERIFIED":
+            raise TaskAcceptanceError(
+                "verified promotion evidence is no longer valid"
+            )
+        try:
+            attestation = require_exact_attestation(
+                coordinator_root,
+                candidate_sha,
+                contract=TASK_ACCEPTANCE_CONTRACT,
+            )
+        except ValueError as exc:
+            raise TaskAcceptanceError(str(exc)) from exc
+        if _attestation_digest(attestation or {}) != workspace.get(
+            "acceptance_attestation_sha256"
+        ):
+            raise TaskAcceptanceError(
+                "exact task promotion attestation digest is stale"
+            )
+
+        current_head = _current_head(
+            coordinator_root,
+            state_dir=state_root,
+        )
+        if workspace["lifecycle_state"] == "VERIFIED_PENDING_PROMOTION":
+            if current_head != base_sha:
+                updated = update_task_workspace_package_state(
+                    coordinator_root,
+                    state_dir=state_root,
+                    expected_states={"VERIFIED_PENDING_PROMOTION"},
+                    updates={
+                        "lifecycle_state": "STALE_BASE",
+                        "promotion_last_error": (
+                            "product HEAD moved before verified promotion"
+                        ),
+                    },
+                )
+                return {
+                    "status": "STALE_BASE",
+                    "task_id": updated["task_id"],
+                    "head": current_head,
+                    "base_sha": base_sha,
+                    "candidate_sha": candidate_sha,
+                }
+            if not bool(workspace.get("no_op_candidate")):
+                validate_task_candidate_worktree(
+                    coordinator_root,
+                    state_dir=state_root,
+                )
+            workspace = update_task_workspace_package_state(
+                coordinator_root,
+                state_dir=state_root,
+                expected_states={"VERIFIED_PENDING_PROMOTION"},
+                updates={
+                    "lifecycle_state": "PROMOTING",
+                    "promotion_started_at": utcnow(),
+                },
+            )
+
+        current_head = _current_head(
+            coordinator_root,
+            state_dir=state_root,
+        )
+        if bool(workspace.get("no_op_candidate")):
+            if candidate_sha != base_sha or current_head != base_sha:
+                raise TaskAcceptanceError(
+                    "verified no-op acceptance requires unchanged exact "
+                    "product base"
+                )
+            # No HEAD movement occurs, but old task authority still must be
+            # retired before the next task source generation is selected.
+            invalidate_task_authority_after_head_change(
+                coordinator_root,
+                reason=(
+                    "verified no-op task acceptance at "
+                    + candidate_sha
+                ),
+                state_dir=state_root,
+            )
+        elif current_head == base_sha:
+            try:
+                promote_fast_forward(
+                    coordinator_root,
+                    candidate_sha,
+                    attestation_contract=TASK_ACCEPTANCE_CONTRACT,
+                    remote=remote,
+                    remote_branch=remote_branch,
+                    expected_remote=expected_remote,
+                )
+            except (OSError, ValueError) as exc:
+                observed = _current_head(
+                    coordinator_root,
+                    state_dir=state_root,
+                )
+                if observed == base_sha:
+                    update_task_workspace_package_state(
+                        coordinator_root,
+                        state_dir=state_root,
+                        expected_states={"PROMOTING"},
+                        updates={
+                            "lifecycle_state": "VERIFIED_PENDING_PROMOTION",
+                            "promotion_last_error": str(exc)[:1800],
+                        },
+                    )
+                elif observed != candidate_sha:
+                    update_task_workspace_package_state(
+                        coordinator_root,
+                        state_dir=state_root,
+                        expected_states={"PROMOTING"},
+                        updates={
+                            "lifecycle_state": "STALE_BASE",
+                            "promotion_last_error": str(exc)[:1800],
+                        },
+                    )
+                raise TaskAcceptanceError(str(exc)) from exc
+        elif current_head != candidate_sha:
+            updated = update_task_workspace_package_state(
+                coordinator_root,
+                state_dir=state_root,
+                expected_states={"PROMOTING"},
+                updates={
+                    "lifecycle_state": "STALE_BASE",
+                    "promotion_last_error": (
+                        "product HEAD differs from both base and exact candidate"
+                    ),
+                },
+            )
+            return {
+                "status": "STALE_BASE",
+                "task_id": updated["task_id"],
+                "head": current_head,
+                "base_sha": base_sha,
+                "candidate_sha": candidate_sha,
+            }
+
+        return _persist_acceptance_after_exact_product(
+            coordinator_root,
+            workspace=workspace,
+            state_dir=state_root,
+        )
+
+
+def cleanup_accepted_task_workspace(
+    coordinator_root: Path,
+    *,
+    state_dir: Path | None = None,
+    acquire_lease: bool = True,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(coordinator_root)
+    )
+    context = (
+        SupervisorLease(state_root, coordinator_root)
+        if acquire_lease
+        else nullcontext()
+    )
+    with context:
+        workspace = load_active_task_workspace(
+            coordinator_root,
+            state_dir=state_root,
+        )
+        if workspace is None:
+            return {"status": "CLEAN", "active_task_id": None}
+        if workspace["lifecycle_state"] != "ACCEPTED_PENDING_CLEANUP":
+            raise TaskAcceptanceError(
+                "accepted-task cleanup requires ACCEPTED_PENDING_CLEANUP state"
+            )
+        try:
+            accepted = load_accepted_task_record(
+                state_root,
+                workspace["task_id"],
+            )
+        except AcceptedTaskError as exc:
+            raise TaskAcceptanceError(str(exc)) from exc
+        if accepted["acceptance_sha256"] != workspace.get(
+            "acceptance_sha256"
+        ):
+            raise TaskAcceptanceError(
+                "accepted workspace does not match full AcceptedTaskRecord"
+            )
+
+        worktree = Path(workspace["task_worktree"]).expanduser().resolve()
+        candidate_ref = candidate_ref_for_workspace(workspace)
+        current_ref = _ref_value(
+            coordinator_root,
+            candidate_ref,
+            state_dir=state_root,
+        )
+        candidate_sha = str(workspace["candidate_sha"]).lower()
+        if current_ref is not None and current_ref != candidate_sha:
+            raise TaskAcceptanceError(
+                "candidate ref moved before accepted-task cleanup"
+            )
+        if current_ref == candidate_sha:
+            _require_git(
+                coordinator_root,
+                "update-ref",
+                "-d",
+                candidate_ref,
+                candidate_sha,
+                state_dir=state_root,
+            )
+
+        if worktree.exists():
+            cp = _git(
+                coordinator_root,
+                "worktree",
+                "remove",
+                "--force",
+                str(worktree),
+                state_dir=state_root,
+            )
+            if cp.returncode != 0 and worktree.exists():
+                detail = str(
+                    cp.stderr or cp.stdout or "git worktree remove failed"
+                )
+                raise TaskAcceptanceError(detail.strip()[:1600])
+
+        branch = str(workspace["task_branch"])
+        branch_probe = _git(
+            coordinator_root,
+            "show-ref",
+            "--verify",
+            f"refs/heads/{branch}",
+            state_dir=state_root,
+        )
+        if branch_probe.returncode == 0:
+            _require_git(
+                coordinator_root,
+                "branch",
+                "-D",
+                branch,
+                state_dir=state_root,
+            )
+
+        json_dump(
+            _accepted_workspace_history_path(
+                state_root,
+                accepted["acceptance_sha256"],
+            ),
+            workspace,
+        )
+        active_path = state_root / "tasks" / "workspace-active.json"
+        try:
+            active_path.unlink()
+        except FileNotFoundError:
+            pass
+
+        state = load_json(state_root / "state.json", {})
+        if not isinstance(state, dict):
+            raise TaskAcceptanceError(
+                "durable coordinator state is malformed"
+            )
+        for key in (
+            "active_task_workspace_sha256",
+            "active_task_worktree",
+            "active_task_branch",
+            "active_task_candidate_sha",
+            "active_task_verified_sha",
+        ):
+            state[key] = None
+        state["task_workspace_lifecycle_state"] = None
+        json_dump(state_root / "state.json", state)
+
+        try:
+            task_set = resolve_task_sources(
+                coordinator_root,
+                persist=True,
+            )
+        except TaskSourceError as exc:
+            raise TaskAcceptanceError(str(exc)) from exc
+        return {
+            "status": "CLEAN",
+            "accepted_task_id": accepted["task_id"],
+            "accepted_product_sha": accepted[
+                "accepted_product_sha"
+            ],
+            "acceptance_sha256": accepted["acceptance_sha256"],
+            "task_source_set_sha256": task_set.get(
+                "task_source_set_sha256"
+            ),
+            "task_count": len(task_set.get("tasks") or []),
         }
 
 
