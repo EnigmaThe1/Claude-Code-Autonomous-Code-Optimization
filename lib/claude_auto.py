@@ -254,6 +254,7 @@ from task_authority import (
 )
 from task_workspace import (
     TaskWorkspaceError,
+    begin_task_workspace,
     ensure_supervisor_task_workspace,
     load_active_task_workspace,
     task_workspace_status,
@@ -3344,6 +3345,48 @@ def _p4_task_cli_action(args: argparse.Namespace) -> int:
                     or "task workspace aborted by operator"
                 ),
             )
+        elif action == "begin":
+            require_top_level_operator(root, "P4 task workspace begin")
+            result = begin_task_workspace(
+                root,
+                task_id=getattr(args, "task_id", None),
+            )
+        elif action == "candidate":
+            require_top_level_operator(root, "P4 task candidate sealing")
+            result = seal_task_candidate(root)
+        elif action == "verify":
+            require_top_level_operator(root, "P4 task candidate verification")
+            deterministic = verify_task_candidate_deterministic(
+                root,
+                timeout=int(getattr(args, "timeout", 900) or 900),
+                trust_repo_scripts=bool(getattr(args, "trust_repo_scripts", False)),
+                unrestricted_host=bool(getattr(args, "unrestricted_host", False)),
+            )
+            if deterministic.get("status") != "PASS":
+                result = {
+                    "status": deterministic.get("status") or "BLOCKED",
+                    "stage": "deterministic",
+                    "deterministic": deterministic,
+                }
+            else:
+                independent = verify_task_candidate_independent(root, args)
+                result = {
+                    "status": independent.get("status") or "BLOCKED",
+                    "stage": "independent",
+                    "deterministic": deterministic,
+                    "independent": independent,
+                }
+        elif action == "accept":
+            require_top_level_operator(root, "P4 task candidate acceptance")
+            result = accept_verified_task(
+                root,
+                remote=getattr(args, "remote", None),
+                remote_branch=getattr(args, "remote_branch", None),
+                expected_remote=getattr(args, "expected_remote", None),
+            )
+        elif action == "cleanup":
+            require_top_level_operator(root, "P4 accepted task cleanup")
+            result = cleanup_accepted_task_workspace(root)
         else:
             return task_action(args, find_repo_root=find_repo_root)
     except (TaskWorkspaceError, TaskAcceptanceError, OSError, ValueError) as exc:
@@ -3354,7 +3397,15 @@ def _p4_task_cli_action(args: argparse.Namespace) -> int:
         }, indent=2))
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 2 if result.get("status") in {"BLOCKED", "PRESERVED_MANUAL"} else 0
+    return 2 if result.get("status") in {
+        "BLOCKED",
+        "PRESERVED_MANUAL",
+        "FAIL",
+        "UNVERIFIED",
+        "REJECTED",
+        "STALE_BASE",
+        "PRIMARY_DRIFT",
+    } else 0
 
 
 def main(argv: list[str] | None = None) -> int:
