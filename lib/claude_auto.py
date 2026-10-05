@@ -2133,6 +2133,11 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
         log["route_attempts"] = route_attempts
         json_dump(sd / "logs" / f"goal-{cycle:04d}.json", log)
         status, summary = parse_status(result_text)
+        task_result = (
+            parse_task_result(result_text)
+            if task_context is not None
+            else None
+        )
         plan_impact, plan_change, phase_boundary = parse_plan_impact(result_text)
         progress_checkpoint = parse_progress_checkpoint(result_text)
         progress_errors: list[str] = []
@@ -2295,6 +2300,51 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
             # a completion candidate.
             status = "CONTINUE"
 
+        if task_context is not None and outcome == "SUCCESS":
+            if task_result is None:
+                state.update({
+                    "updated_at": utcnow(),
+                    "cycle": cycle,
+                    "status": "BLOCKED",
+                    "last_result_status": "BLOCKED",
+                    "last_session_id": session_id,
+                    "last_task_result": None,
+                    "blocker": (
+                        "Task-governed headless worker completed without the "
+                        "required AUTONOMY_TASK_RESULT protocol record."
+                    ),
+                })
+                json_dump(sd / "state.json", state)
+                return 3
+            if task_result["task_id"] != task_context["id"]:
+                state.update({
+                    "updated_at": utcnow(),
+                    "cycle": cycle,
+                    "status": "BLOCKED",
+                    "last_result_status": "BLOCKED",
+                    "last_session_id": session_id,
+                    "last_task_result": task_result,
+                    "blocker": (
+                        "AUTONOMY_TASK_RESULT task_id does not match the "
+                        "package-selected active TaskSpec."
+                    ),
+                })
+                json_dump(sd / "state.json", state)
+                return 3
+            if task_result["status"] == "BLOCKED":
+                status = "BLOCKED"
+                summary = (
+                    task_result.get("summary")
+                    or "active repository task is blocked"
+                )
+            elif task_result["status"] in {
+                "CONTINUE",
+                "READY_FOR_ACCEPTANCE",
+            }:
+                # Task-level readiness/continuation can never make the overall
+                # objective COMPLETE before package acceptance and scheduling.
+                status = "CONTINUE"
+
         state["transient_failures"] = 0
         state.pop("next_retry_delay_seconds", None)
         state.update({
@@ -2307,6 +2357,7 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
             "last_result_status": status,
             "last_plan_impact": plan_impact,
             "last_plan_change": plan_change,
+            "last_task_result": task_result,
             "progress_checkpoint": progress_checkpoint or state.get("progress_checkpoint"),
             # A previously approved remediation was available to this worker turn;
             # consume it now unless a new gate below approves another one.
@@ -2317,6 +2368,104 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
             state.update({"status": "LIMIT_REACHED", "blocker": limit_reason})
             json_dump(sd / "state.json", state)
             return 4
+
+        if (
+            task_context is not None
+            and isinstance(task_result, dict)
+            and task_result.get("status") == "READY_FOR_ACCEPTANCE"
+            and plan_impact not in {"MATERIAL", "REQUIREMENT"}
+        ):
+            try:
+                sealed = seal_task_candidate(
+                    root,
+                    state_dir=sd,
+                    acquire_lease=False,
+                )
+                checkpoint = _p4_advance_acceptance_checkpoint(
+                    root,
+                    sd,
+                    args,
+                )
+            except (TaskAcceptanceError, TaskWorkspaceError) as exc:
+                state = load_json(sd / "state.json", state)
+                state.update({
+                    "status": "BLOCKED",
+                    "last_result_status": "BLOCKED",
+                    "blocker": (
+                        "P4 task acceptance checkpoint failed closed: "
+                        + str(exc)
+                    )[:2000],
+                    "updated_at": utcnow(),
+                })
+                json_dump(sd / "state.json", state)
+                return 3
+
+            state = load_json(sd / "state.json", state)
+            checkpoint_status = str(checkpoint.get("status") or "")
+            state["last_task_candidate_sha"] = sealed.get("candidate_sha")
+            state["last_task_acceptance_checkpoint"] = checkpoint
+            if checkpoint_status == "BLOCKED":
+                state.update({
+                    "status": "BLOCKED",
+                    "last_result_status": "BLOCKED",
+                    "blocker": str(
+                        checkpoint.get("reason")
+                        or "P4 task acceptance is blocked"
+                    )[:2000],
+                    "updated_at": utcnow(),
+                })
+                json_dump(sd / "state.json", state)
+                return 3
+            if checkpoint_status == "REPAIR":
+                status = "CONTINUE"
+                phase_boundary = False
+                findings = [
+                    str(item)
+                    for item in (checkpoint.get("findings") or [])
+                ]
+                summary = (
+                    "Task candidate was rejected by package acceptance gates; "
+                    "the same task was reopened for repair."
+                    + (
+                        " Findings: " + "; ".join(findings[:8])[:1200]
+                        if findings
+                        else ""
+                    )
+                )
+                state["last_result_status"] = "CONTINUE"
+                state["last_summary"] = summary
+                state["blocker"] = None
+                json_dump(sd / "state.json", state)
+            elif checkpoint_status in {
+                "NEXT_READY",
+                "TASKS_COMPLETE",
+                "CLEAN",
+            }:
+                status = "CONTINUE"
+                summary = (
+                    "Repository task accepted and cleaned up. "
+                    + (
+                        f"Next READY task: {checkpoint.get('next_task_id')}."
+                        if checkpoint_status == "NEXT_READY"
+                        else "All current repository TaskSpecs are accepted."
+                    )
+                )
+                state["last_result_status"] = "CONTINUE"
+                state["last_summary"] = summary
+                state["blocker"] = None
+                json_dump(sd / "state.json", state)
+            else:
+                state.update({
+                    "status": "BLOCKED",
+                    "last_result_status": "BLOCKED",
+                    "blocker": (
+                        "P4 task acceptance reached an unsupported checkpoint "
+                        f"state: {checkpoint_status}"
+                    ),
+                    "updated_at": utcnow(),
+                })
+                json_dump(sd / "state.json", state)
+                return 3
 
         # Material remediation is deliberately two-stage: diagnose/propose first, then
         # re-plan + simulate + red-team before the worker may implement the remediation.
