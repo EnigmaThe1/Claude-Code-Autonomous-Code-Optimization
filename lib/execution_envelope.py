@@ -1343,6 +1343,7 @@ def promotion_target_entries(
     *,
     base: str,
     target: str,
+    git_state_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     payload = _git_bytes(
         root,
@@ -1354,6 +1355,7 @@ def promotion_target_entries(
         base,
         target,
         "--",
+        state_dir=git_state_dir,
     )
     fields = [item for item in payload.split(b"\0") if item]
     out: list[dict[str, Any]] = []
@@ -1381,13 +1383,22 @@ def validate_promotion_target_for_active_envelope(
     *,
     base: str,
     target: str,
+    state_dir: Path | None = None,
+    authority_root: Path | None = None,
+    git_state_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     root = root.expanduser().resolve()
-    state = load_json(repo_state_dir(root) / "state.json", {})
+    state_root = _state_root(root, state_dir)
+    state = load_json(state_root / "state.json", {})
     if not isinstance(state, dict) or not state.get("active_execution_envelope_sha256"):
         return None
-    envelope = load_active_execution_envelope(root)
-    violation = load_task_violation(root)
+    envelope = load_active_execution_envelope(
+        root,
+        state_dir=state_root,
+        authority_root=authority_root,
+        git_state_dir=git_state_dir,
+    )
+    violation = load_task_violation(root, state_dir=state_root)
     if violation is not None:
         raise ExecutionEnvelopeError("task promotion is blocked by an unresolved task-envelope violation")
     if base.lower() != envelope["product_base_sha"]:
@@ -1395,15 +1406,30 @@ def validate_promotion_target_for_active_envelope(
             "active task promotion must start at the exact ExecutionEnvelope base"
         )
 
-    entries = promotion_target_entries(root, base=base, target=target)
+    entries = promotion_target_entries(
+        root,
+        base=base,
+        target=target,
+        git_state_dir=git_state_dir,
+    )
     problems: list[str] = []
     for entry in entries:
         for rel in entry["paths"]:
             reason = _admission_reason(envelope, rel)
             if reason:
                 problems.append(f"{rel}: {reason}")
-            base_mode = _mode_at(root, base, rel)
-            target_mode = _mode_at(root, target, rel)
+            base_mode = _mode_at(
+                root,
+                base,
+                rel,
+                state_dir=git_state_dir,
+            )
+            target_mode = _mode_at(
+                root,
+                target,
+                rel,
+                state_dir=git_state_dir,
+            )
             if base_mode == "160000" or target_mode == "160000":
                 problems.append(f"{rel}: gitlink/submodule changes are not supported by P3")
     if problems:
