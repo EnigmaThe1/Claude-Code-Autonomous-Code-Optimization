@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from authority_set import authority_content_sha256, build_authority_snapshot
 from git_trust import (
     configure_trusted_excludes,
     trusted_git_env,
@@ -444,3 +446,229 @@ def test_remote_promotion_does_not_execute_pre_push_hook(monkeypatch):
         )
         assert result["status"] == "promoted-remote"
         assert result["remote_head"] == target
+
+
+def _p5_authority_repo(root: Path) -> None:
+    plans = root / "plans"
+    plans.mkdir(exist_ok=True)
+    (plans / "base.md").write_text("base plan\n")
+    governance = {
+        "schema_version": 1,
+        "planning_authority": {
+            "sets": [{
+                "id": "a",
+                "members": [{
+                    "path": "plans/*.md",
+                    "role": "source",
+                    "repair": "repairable",
+                    "required": True,
+                }],
+                "validators": [],
+                "reconcilers": [],
+            }],
+        },
+        "tasks": {
+            "sources": [],
+            "execution_mode": "single-writer",
+            "strict_dependencies": True,
+        },
+        "control_surfaces": [],
+    }
+    target = root / ".claude-auto" / "governance.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(governance, indent=2) + "\n")
+    _run(
+        "git",
+        "-C",
+        str(root),
+        "add",
+        "plans/base.md",
+        ".claude-auto/governance.json",
+    )
+    _run("git", "-C", str(root), "commit", "-qm", "planning authority")
+
+
+def _p5_attestation_metadata(
+    root: Path,
+    base: str,
+    target: str,
+    *,
+    candidate_content_override: str | None = None,
+) -> dict:
+    base_snapshot = build_authority_snapshot(root, base)
+    target_snapshot = build_authority_snapshot(root, target)
+    assert base_snapshot is not None
+    assert target_snapshot is not None
+    return {
+        "repair_envelope_sha256": _evidence("repair-envelope"),
+        "selected_authority_sets": ["a"],
+        "base_authority_content_sha256": authority_content_sha256(
+            base_snapshot
+        ),
+        "candidate_authority_content_sha256": (
+            candidate_content_override
+            or authority_content_sha256(target_snapshot)
+        ),
+        "candidate_authority_evidence_sha256": _evidence(
+            "candidate-authority"
+        ),
+        "candidate_task_source_set_sha256": None,
+        "reconciler_receipt_bundle_sha256": None,
+        "validator_receipt_bundle_sha256": _evidence("validators"),
+        "repository_unchanged": True,
+        "findings": [],
+    }
+
+
+def test_p5_generic_promote_existing_authority_member_requires_enriched_attestation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _p5_authority_repo(root)
+        base = _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip()
+
+        (root / "plans" / "base.md").write_text("repaired plan\n")
+        _run("git", "-C", str(root), "add", "plans/base.md")
+        _run("git", "-C", str(root), "commit", "-qm", "repair authority member")
+        target = _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip()
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+
+        with pytest.raises(ValueError, match="attestation required"):
+            promote_fast_forward(root, target)
+
+        record_promotion_attestation(
+            root,
+            target_sha=target,
+            contract=REPOSITORY_PLANNING_REPAIR_CONTRACT,
+            verifier="independent-planning-verifier",
+            evidence_sha256=_evidence("legacy-shaped"),
+        )
+        with pytest.raises(ValueError, match="enriched planning attestation"):
+            promote_fast_forward(root, target)
+
+        record_promotion_attestation(
+            root,
+            target_sha=target,
+            contract=REPOSITORY_PLANNING_REPAIR_CONTRACT,
+            verifier="independent-planning-verifier",
+            evidence_sha256=_evidence("p5"),
+            metadata=_p5_attestation_metadata(root, base, target),
+        )
+        result = promote_fast_forward(root, target)
+        assert result["status"] == "promoted"
+        assert result["head"] == target
+
+
+def test_p5_generic_promote_new_selector_member_requires_attestation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _p5_authority_repo(root)
+        base = _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip()
+
+        (root / "plans" / "new.md").write_text("new planning member\n")
+        _run("git", "-C", str(root), "add", "plans/new.md")
+        _run("git", "-C", str(root), "commit", "-qm", "add planning member")
+        target = _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip()
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+
+        with pytest.raises(ValueError, match="attestation required"):
+            promote_fast_forward(root, target)
+
+        record_promotion_attestation(
+            root,
+            target_sha=target,
+            contract=REPOSITORY_PLANNING_REPAIR_CONTRACT,
+            verifier="independent-planning-verifier",
+            evidence_sha256=_evidence("p5-new-member"),
+            metadata=_p5_attestation_metadata(root, base, target),
+        )
+        assert promote_fast_forward(root, target)["status"] == "promoted"
+
+
+def test_p5_generic_promote_rejects_stale_candidate_authority_digest(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _p5_authority_repo(root)
+        base = _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip()
+
+        (root / "plans" / "base.md").write_text("repaired plan\n")
+        _run("git", "-C", str(root), "add", "plans/base.md")
+        _run("git", "-C", str(root), "commit", "-qm", "repair authority")
+        target = _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip()
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+
+        record_promotion_attestation(
+            root,
+            target_sha=target,
+            contract=REPOSITORY_PLANNING_REPAIR_CONTRACT,
+            verifier="independent-planning-verifier",
+            evidence_sha256=_evidence("stale"),
+            metadata=_p5_attestation_metadata(
+                root,
+                base,
+                target,
+                candidate_content_override="0" * 64,
+            ),
+        )
+        with pytest.raises(ValueError, match="does not match the exact promotion target"):
+            promote_fast_forward(root, target)
+        assert _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip() == base
+
+
+def test_p5_generic_promote_refuses_governance_contract_change(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _p5_authority_repo(root)
+        base = _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip()
+
+        path = root / ".claude-auto" / "governance.json"
+        governance = json.loads(path.read_text())
+        governance["control_surfaces"] = ["new-control.json"]
+        path.write_text(json.dumps(governance, indent=2) + "\n")
+        _run("git", "-C", str(root), "add", ".claude-auto/governance.json")
+        _run("git", "-C", str(root), "commit", "-qm", "change governance")
+        target = _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip()
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+
+        with pytest.raises(ValueError, match="governance-contract change"):
+            promote_fast_forward(root, target)
+        assert _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip() == base
+
+
+def test_p5_generic_promote_ordinary_path_still_needs_no_planning_attestation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _p5_authority_repo(root)
+        base = _run(
+            "git", "-C", str(root), "rev-parse", "HEAD"
+        ).stdout.strip()
+        target = _commit(root, "ordinary.txt", "ordinary\n")
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+
+        result = promote_fast_forward(root, target)
+        assert result["status"] == "promoted"
+        assert result["attestation"] is None
