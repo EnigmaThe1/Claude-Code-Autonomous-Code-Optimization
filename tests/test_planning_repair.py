@@ -1166,7 +1166,7 @@ def test_p5_candidate_task_sources_validate_without_overwriting_live_runtime_sta
                 "a",
                 [_p5_member(
                     "plans/tasks.json",
-                    role="ledger",
+                    role="source",
                     repair="repairable",
                 )],
             ),
@@ -1250,7 +1250,7 @@ def test_p5_candidate_task_source_cycle_is_rejected(monkeypatch):
                 "a",
                 [_p5_member(
                     "plans/tasks.json",
-                    role="ledger",
+                    role="source",
                     repair="repairable",
                 )],
             ),
