@@ -41,6 +41,8 @@ from repair_envelope import (
 from planning_helpers import (
     PlanningHelperError,
     HelperRunner,
+    load_reconciler_bundle,
+    load_validator_bundle,
     run_planning_reconcilers,
     run_planning_validators,
 )
@@ -54,6 +56,7 @@ from state_store import json_dump, load_json, sha256_text
 from workspace_recovery import promote_fast_forward
 from planning_validation import (
     PlanningValidationError,
+    load_candidate_authority_evidence,
     validate_planning_candidate,
 )
 
@@ -1119,11 +1122,360 @@ def validate_planning_repair_candidate(
     }
 
 
+def _verify_p5_planning_repair(
+    root: Path,
+    active: dict[str, Any],
+    args: Any,
+) -> dict[str, Any]:
+    worktree = Path(active["worktree"]).expanduser().resolve()
+    candidate = str(getattr(args, "sha", None) or active.get("candidate_sha") or "")
+    candidate = _rev(worktree, candidate)
+    if candidate != _rev(worktree, "HEAD"):
+        raise ValueError(
+            "P5 Planning Verifier requires the exact current repair-branch HEAD"
+        )
+    if active.get("validated_candidate_sha") != candidate:
+        raise ValueError(
+            "P5 Planning Verifier requires exact candidate validation before independent verification"
+        )
+
+    envelope = load_repair_envelope(root)
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("repair_envelope_sha256")
+        != active.get("repair_envelope_sha256")
+    ):
+        raise ValueError("active P5 repair is not bound to its RepairEnvelope")
+    envelope_sha = str(envelope["repair_envelope_sha256"])
+    base = str(active["base_sha"])
+
+    evidence_path_raw = active.get("candidate_authority_evidence_path")
+    if not isinstance(evidence_path_raw, str) or not evidence_path_raw:
+        raise ValueError("P5 candidate authority evidence is missing")
+    try:
+        authority_evidence = load_candidate_authority_evidence(
+            Path(evidence_path_raw),
+            candidate_sha=candidate,
+            repair_envelope_sha256=envelope_sha,
+        )
+    except PlanningValidationError as exc:
+        raise ValueError(str(exc)) from exc
+    if (
+        authority_evidence.get("candidate_authority_evidence_sha256")
+        != active.get("candidate_authority_evidence_sha256")
+    ):
+        raise ValueError(
+            "active candidate-authority evidence digest does not match persisted evidence"
+        )
+    if (
+        authority_evidence.get("candidate_authority_content_sha256")
+        != active.get("candidate_authority_content_sha256")
+    ):
+        raise ValueError(
+            "active candidate authority-content digest does not match persisted evidence"
+        )
+
+    validator_path_raw = active.get("validator_receipt_path")
+    if not isinstance(validator_path_raw, str) or not validator_path_raw:
+        raise ValueError("P5 validator receipt bundle is missing")
+    try:
+        validator_bundle = load_validator_bundle(
+            Path(validator_path_raw),
+            repair_envelope_sha256=envelope_sha,
+            candidate_sha=candidate,
+        )
+    except PlanningHelperError as exc:
+        raise ValueError(str(exc)) from exc
+    if (
+        validator_bundle.get("validator_receipt_bundle_sha256")
+        != active.get("validator_receipt_bundle_sha256")
+    ):
+        raise ValueError(
+            "active validator receipt digest does not match persisted bundle"
+        )
+
+    reconciler_bundle: dict[str, Any] | None = None
+    if envelope.get("reconciler_contracts"):
+        receipt_path_raw = active.get("reconciler_receipt_path")
+        if not isinstance(receipt_path_raw, str) or not receipt_path_raw:
+            raise ValueError("P5 reconciler receipt bundle is missing")
+        try:
+            reconciler_bundle = load_reconciler_bundle(
+                Path(receipt_path_raw),
+                repair_envelope_sha256=envelope_sha,
+                base_sha=base,
+            )
+        except PlanningHelperError as exc:
+            raise ValueError(str(exc)) from exc
+        if (
+            reconciler_bundle.get("reconciler_receipt_bundle_sha256")
+            != active.get("reconciler_receipt_bundle_sha256")
+        ):
+            raise ValueError(
+                "active reconciler receipt digest does not match persisted bundle"
+            )
+    elif active.get("reconciler_receipt_bundle_sha256") is not None:
+        raise ValueError(
+            "active repair carries reconciler evidence but RepairEnvelope declares no reconcilers"
+        )
+
+    sd = repo_state_dir(root)
+    readonly = _repair_dir(root) / "settings-verifier-readonly.json"
+    json_dump(readonly, make_readonly_settings(sd, worktree))
+    state = load_json(sd / "state.json", {})
+    if not isinstance(state, dict):
+        raise ValueError("repository durable state is malformed")
+    objective = str(
+        state.get("objective")
+        or "Preserve the repository's existing implementation objective and acceptance criteria."
+    )
+    accepted_tasks = (
+        state.get("accepted_tasks")
+        if isinstance(state.get("accepted_tasks"), dict)
+        else {}
+    )
+
+    diff = _git(
+        worktree,
+        "diff",
+        "--no-ext-diff",
+        "--binary",
+        base,
+        candidate,
+        "--",
+    )
+    if diff.returncode != 0:
+        raise ValueError("unable to capture exact P5 planning repair diff")
+
+    verifier_evidence = {
+        "schema_version": 1,
+        "base_sha": base,
+        "candidate_sha": candidate,
+        "repair_envelope_sha256": envelope_sha,
+        "selected_authority_sets": envelope["selected_authority_sets"],
+        "objective": objective,
+        "repair_reason": active.get("reason"),
+        "architect_summary": active.get("architect_summary"),
+        "diff": diff.stdout,
+        "base_authority_content_sha256": envelope[
+            "base_authority_content_sha256"
+        ],
+        "candidate_authority_content_sha256": authority_evidence[
+            "candidate_authority_content_sha256"
+        ],
+        "candidate_authority_evidence_sha256": authority_evidence[
+            "candidate_authority_evidence_sha256"
+        ],
+        "candidate_authority_snapshot": authority_evidence[
+            "candidate_authority_snapshot"
+        ],
+        "candidate_task_sources": authority_evidence[
+            "candidate_task_sources"
+        ],
+        "reconciler_receipt_bundle_sha256": (
+            reconciler_bundle.get("reconciler_receipt_bundle_sha256")
+            if reconciler_bundle is not None
+            else None
+        ),
+        "reconciler_receipts": (
+            reconciler_bundle.get("receipts", [])
+            if reconciler_bundle is not None
+            else []
+        ),
+        "validator_receipt_bundle_sha256": validator_bundle[
+            "validator_receipt_bundle_sha256"
+        ],
+        "validator_receipts": validator_bundle.get("receipts", []),
+        "accepted_tasks": accepted_tasks,
+    }
+    evidence_path = (
+        _repair_dir(root)
+        / f"verify-p5-{candidate[:16]}.json"
+    )
+    json_dump(evidence_path, verifier_evidence)
+
+    env, provider_detail = provider_from_args(args)
+    selected = ", ".join(envelope["selected_authority_sets"])
+    prompt = textwrap.dedent(f"""
+    You are the independent Planning Verifier. You did not author this repair.
+    Operate HARD READ-ONLY and verify only the exact candidate SHA and
+    RepairEnvelope below.
+
+    EXACT CANDIDATE SHA: {candidate}
+    BASE SHA: {base}
+    REPAIR ENVELOPE SHA-256: {envelope_sha}
+    SELECTED AUTHORITY SETS: {selected}
+    PRODUCT OBJECTIVE: {objective}
+
+    PRIVATE EVIDENCE FILE:
+    {evidence_path}
+
+    The package has already mechanically rebuilt the candidate AuthoritySets,
+    resolved candidate TaskSources/graph from the exact candidate, run declared
+    deterministic reconcilers and run declared validators. Review that evidence,
+    repository reality and the exact planning diff.
+
+    Verify that the repair:
+    - preserves the product objective and required functionality;
+    - resolves the stated planning defect without unrelated scope expansion;
+    - keeps backward impact on accepted/completed work coherent;
+    - keeps forward dependencies/order/remaining work coherent;
+    - does not invalidate accepted work without representing the necessary follow-up;
+    - is semantically consistent with the exact candidate TaskSource graph;
+    - has no material unresolved issue hidden by mechanically passing validators.
+
+    If committed evidence cannot resolve a genuine semantic product decision,
+    return BLOCKED rather than inventing one.
+
+    Return exactly one JSON protocol record:
+    PLANNING_REPAIR_VERIFY:
+    {{"verdict":"VERIFIED|REJECTED|BLOCKED","candidate_sha":"{candidate}","repair_envelope_sha256":"{envelope_sha}","summary":"...","findings":["..."]}}
+    """).strip()
+
+    result_text, meta = run_readonly_plan_agent(
+        root=worktree,
+        sd=sd,
+        prompt=prompt,
+        env=env,
+        provider_detail=provider_detail,
+        model=getattr(args, "model", None),
+        timeout=(getattr(args, "timeout", 0) or None),
+        max_turns=int(getattr(args, "max_turns", 35) or 35),
+        verify_repo=True,
+        max_budget_usd=getattr(args, "max_budget_usd", None),
+        settings_path=readonly,
+    )
+    protocol = parse_json_protocol(result_text, "PLANNING_REPAIR_VERIFY")
+    if not isinstance(protocol, dict):
+        raise ValueError("P5 Planning Verifier returned no valid protocol")
+    verdict = str(protocol.get("verdict", "")).upper()
+    if verdict not in {"VERIFIED", "REJECTED", "BLOCKED"}:
+        raise ValueError("P5 Planning Verifier returned an unsupported verdict")
+    if str(protocol.get("candidate_sha", "")).lower() != candidate:
+        raise ValueError(
+            "P5 Planning Verifier protocol is bound to the wrong candidate SHA"
+        )
+    if protocol.get("repair_envelope_sha256") != envelope_sha:
+        raise ValueError(
+            "P5 Planning Verifier protocol is bound to the wrong RepairEnvelope"
+        )
+    raw_findings = (
+        protocol.get("findings")
+        if isinstance(protocol.get("findings"), list)
+        else []
+    )
+    findings = [str(item)[:1800] for item in raw_findings[:100]]
+    summary = str(protocol.get("summary", ""))[:1800]
+
+    active = load_active_repair(root)
+    if (
+        not isinstance(active, dict)
+        or active.get("candidate_sha") != candidate
+        or active.get("repair_envelope_sha256") != envelope_sha
+        or active.get("validated_candidate_sha") != candidate
+    ):
+        raise ValueError(
+            "active planning repair changed during independent verification"
+        )
+
+    if verdict != "VERIFIED":
+        active["verified_sha"] = None
+        active["verifier_attestation"] = None
+        active["last_verifier"] = {
+            "verdict": verdict,
+            "candidate_sha": candidate,
+            "repair_envelope_sha256": envelope_sha,
+            "summary": summary,
+            "findings": findings,
+            "meta": meta,
+            "at": utcnow(),
+        }
+        json_dump(_active_path(root), active)
+        return {
+            "status": verdict.lower(),
+            "candidate_sha": candidate,
+            "repair_envelope_sha256": envelope_sha,
+            "summary": summary,
+            "findings": findings,
+        }
+
+    evidence_digest = sha256_text(json.dumps({
+        "evidence": verifier_evidence,
+        "verifier_result": protocol,
+        "git_after": meta.get("git_after"),
+    }, sort_keys=True, separators=(",", ":"), default=str))
+    candidate_task_sources = authority_evidence["candidate_task_sources"]
+    attestation = record_promotion_attestation(
+        root,
+        target_sha=candidate,
+        contract=PLANNING_REPAIR_CONTRACT,
+        verifier=(
+            "planning-verifier:"
+            + str(getattr(args, "model", None) or "native-default")
+        ),
+        evidence_sha256=evidence_digest,
+        summary=summary,
+        metadata={
+            "provider": provider_detail,
+            "findings": findings,
+            "repository_unchanged": meta.get("repository_unchanged"),
+            "repair_envelope_sha256": envelope_sha,
+            "selected_authority_sets": envelope["selected_authority_sets"],
+            "base_authority_content_sha256": envelope[
+                "base_authority_content_sha256"
+            ],
+            "candidate_authority_content_sha256": authority_evidence[
+                "candidate_authority_content_sha256"
+            ],
+            "candidate_authority_evidence_sha256": authority_evidence[
+                "candidate_authority_evidence_sha256"
+            ],
+            "candidate_task_source_set_sha256": candidate_task_sources.get(
+                "task_source_set_sha256"
+            ),
+            "reconciler_receipt_bundle_sha256": (
+                reconciler_bundle.get("reconciler_receipt_bundle_sha256")
+                if reconciler_bundle is not None
+                else None
+            ),
+            "validator_receipt_bundle_sha256": validator_bundle[
+                "validator_receipt_bundle_sha256"
+            ],
+        },
+    )
+    active.update({
+        "verified_sha": candidate,
+        "verifier_summary": summary,
+        "verifier_findings": findings,
+        "verifier_attestation": attestation,
+        "verified_at": utcnow(),
+        "last_verifier": {
+            "verdict": "VERIFIED",
+            "candidate_sha": candidate,
+            "repair_envelope_sha256": envelope_sha,
+            "summary": summary,
+            "findings": findings,
+            "meta": meta,
+            "at": utcnow(),
+        },
+    })
+    json_dump(_active_path(root), active)
+    return {
+        "status": "verified",
+        "candidate_sha": candidate,
+        "repair_envelope_sha256": envelope_sha,
+        "attestation": attestation,
+        "summary": summary,
+    }
+
+
 def verify_planning_repair(root: Path, args: Any) -> dict[str, Any]:
     root = root.expanduser().resolve()
     active = load_active_repair(root)
     if not active:
         raise ValueError("no active planning repair exists")
+    if active.get("schema_version") == 2:
+        return _verify_p5_planning_repair(root, active, args)
     worktree = Path(active["worktree"]).resolve()
     candidate = str(getattr(args, "sha", None) or active.get("candidate_sha") or "")
     candidate = _rev(worktree, candidate)
