@@ -27,7 +27,8 @@ Repository: https://github.com/EnigmaThe1/Claude-Code-Autonomous-Code-Optimizati
 - deterministic package-owned Git WIP/promotion context, including trusted excludes reconstruction;
 - exact-SHA verifier attestations for protected promotion;
 - optional remote-aware, idempotent promotion with exact expected-base protection;
-- optional repository-owned canonical-plan authority with dedicated repair worktrees and independent verification.
+- optional repository-owned canonical-plan authority with dedicated repair worktrees and independent verification;
+- deterministic repository-owned TaskSpecs with package-owned active ExecutionEnvelopes, post-batch mutation detection and path-gated staging/promotion.
 
 The governing principle is: **the user's objective is authoritative; the implementation plan is a repairable route to that objective.**
 
@@ -63,13 +64,32 @@ If the repair requires a genuine unresolved product/semantic decision, automatio
 
 See [Planning and repair](docs/PLANNING_AND_REPAIR.md).
 
+### Repository-owned tasks and ExecutionEnvelopes
+
+RC4 repositories may declare deterministic TaskSources in `.claude-auto/governance.json`. Claude Auto resolves those sources from exact committed Git objects into a package-owned TaskSourceSet. Built-in JSON/JSONL/TOML/static sources require no repository code; custom adapters run twice against only their declared exact-commit inputs inside the bounded read-only/no-network adapter boundary.
+
+For task-governed repositories, `claude-auto run` and supervised `start` resolve or reuse the dependency-safe READY task before a mutating Claude worker begins. The active ExecutionEnvelope binds that TaskSpec to the current AuthoritySet snapshot, product base, owned/evidence paths, runtime scratch paths and pre-task WIP.
+
+Useful inspection commands include:
+
+```bash
+claude-auto tasks status --repo .
+claude-auto tasks show TASK_ID --repo .
+claude-auto tasks explain TASK_ID --repo .
+claude-auto tasks validate-stage --repo .
+```
+
+Top-level operator recovery/control commands are available as `tasks activate`, `tasks reconcile` and `tasks deactivate`.
+
+Direct edits outside the task envelope are denied. Opaque command effects are checked after each Claude tool batch against actual repository state. Scratch may be writable but cannot be staged/promoted; protected planning/control state wins over broad task selectors in every execution profile, including Unattended and Isolated Full. P3 keeps the user's primary checkout intact on a violation rather than destructively resetting it; P4 moves task mutation into a package-owned resumable task worktree.
+
 ## Operating profiles
 
 **Balanced** is the default for normal trusted development repositories. It keeps a sandboxed execution boundary where practical, lets routine reversible engineering proceed without unnecessary prompts, and supports scoped human escalation.
 
 **Strict** is for unknown or less-trusted repositories. It tightens sandbox/read boundaries, disables unsandboxed retry and fails closed when required isolation is unavailable.
 
-**Unattended** is explicit normal-host maximum-authority mode. The human must select it. It uses Claude Code bypass-permissions execution and removes the package's normal operational restrictions for the active run. Planning, verification, correctness, security and completion gates remain active.
+**Unattended** is explicit normal-host maximum-authority mode. The human must select it. It uses Claude Code bypass-permissions execution and removes the package's normal operational restrictions for the active run. Repository planning/task governance, exact task envelopes, verification, correctness, security and completion gates remain active.
 
 **Isolated Full** is maximum execution freedom inside a separately established disposable VM/container boundary. It cannot be hot-switched into on a normal workstation.
 
