@@ -699,6 +699,26 @@ def _resume_workspace(
         raise TaskWorkspaceError(
             "active task workspace and ExecutionEnvelope identities disagree"
         )
+
+    boundary = evaluate_task_workspace_boundary(
+        coordinator_root,
+        task_root=worktree,
+        state_dir=state_root,
+    )
+    if boundary["status"] != "VALID":
+        mark_task_workspace_guard_failure(
+            coordinator_root,
+            violations=boundary["violations"],
+            state_dir=state_root,
+        )
+        detail = "; ".join(
+            f"{row['path']}: {row['reason']}"
+            for row in boundary["violations"][:40]
+        )
+        raise TaskWorkspaceError(
+            "active task workspace boundary changed: " + detail
+        )
+
     _bind_workspace_state(state_root, record)
     return record
 
