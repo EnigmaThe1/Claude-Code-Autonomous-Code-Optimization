@@ -277,6 +277,7 @@ def main() -> int:
                 reason=f"durable task state could not be verified after tool batch: {exc}",
                 tool_batch=batch,
                 state_dir=state_dir,
+                git_state_dir=state_dir,
             )
             _block(f"Durable task authority state failed closed: {exc}")
             return 0
@@ -314,6 +315,7 @@ def main() -> int:
                 reason="mutating tool batch completed in task-owned mode without an active ExecutionEnvelope",
                 tool_batch=batch,
                 state_dir=state_dir,
+                git_state_dir=state_dir,
             )
             _block(
                 "Task-owned repository mutation occurred without an active ExecutionEnvelope."
