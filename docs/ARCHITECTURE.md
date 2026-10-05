@@ -12,6 +12,7 @@ The system has an always-on low-risk user layer and an explicit autonomous super
 - `planning_support.py` / `control_plane.py`: planning, simulation and review control.
 - `governance_contract.py` / `authority_set.py`: exact-Git repository authority and control-surface snapshots.
 - `task_spec.py` / `task_sources.py`: deterministic repository-owned TaskSpec normalisation, graph validation and bounded adapter resolution.
+- `task_authority.py` / `execution_envelope.py`: dependency-safe task activation, exact WIP-bound ExecutionEnvelopes, staged/promotion admission and violation recovery.
 - `execution.py` / `process_runner.py`: isolated repository-command execution and process supervision.
 - `state_store.py` / `repo_identity.py`: durable state, recovery, identity and writer leasing.
 - `settings_policy.py` / `permission_escalation.py` / `profile_switch.py`: execution policy, human authority and runtime profile transitions.
@@ -49,7 +50,8 @@ objective or plan
   -> plan generation/reconciliation
   -> simulation + red team
   -> selected profile
-  -> implement / verify / diagnose / repair
+  -> resolve/reuse repository TaskSpec + ExecutionEnvelope when configured
+  -> implement / post-batch envelope check / verify / diagnose / repair
   -> external-plan repair, or repository-owned canonical-plan repair when configured
   -> final whole-system review
   -> deterministic verification
@@ -65,7 +67,9 @@ Planning, simulation and red-team roles run in fresh read-only contexts. Externa
 
 RC4 represents one-file and multi-file planning through named AuthoritySets derived from exact committed Git objects. Legacy one-file planning remains a one-member `default` AuthoritySet. Authority members, governance and resolved control surfaces are fenced from ordinary worker mutation in every runtime profile, including Unattended.
 
-Structured repositories may additionally declare TaskSources. Built-in JSON/JSONL/TOML/static sources are parsed from exact blobs. Custom adapters receive only declared exact-commit inputs in an ephemeral read-only/no-network sandbox, run twice for normalised determinism, and cannot expand the source's AuthoritySet ceiling. The resulting package-owned TaskSourceSet is durable authority data, but P2 deliberately does not activate tasks or grant write scope.
+Structured repositories may additionally declare TaskSources. Built-in JSON/JSONL/TOML/static sources are parsed from exact blobs. Custom adapters receive only declared exact-commit inputs in an ephemeral read-only/no-network sandbox, run twice for normalised determinism, and cannot expand the source's AuthoritySet ceiling. The resulting package-owned TaskSourceSet is durable P2 authority data.
+
+P3 derives one active ExecutionEnvelope from a verified dependency-safe TaskSpec before a mutating worker starts. The envelope binds exact task/source/governance/base identities, direct-edit and promotion selectors, runtime scratch selectors, accepted-dependency state and the pre-task WIP baseline. `PreToolUse` rejects deterministic path escapes; one `PostToolBatch` guard compares actual repository state after each parallel tool batch so opaque subprocess side effects cannot silently enter an accepted diff. The existing promotion broker reuses the same envelope path admission and invalidates stale task authority after a successful base change. Dedicated disposable task worktrees remain P4.
 
 Legacy one-file material planning repair continues through the RC3 repair flow until RC4's later multi-file RepairEnvelope phase generalises it.
 
