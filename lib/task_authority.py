@@ -117,12 +117,14 @@ def task_readiness(
     task_set: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     state_dir: Path | None = None,
+    authority_root: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     root = root.expanduser().resolve()
     try:
         current_set = task_set or load_resolved_task_source_set(
             root,
             state_dir=state_dir,
+            authority_root=authority_root,
         )
     except TaskSourceError as exc:
         raise TaskAuthorityError(str(exc)) from exc
@@ -192,12 +194,14 @@ def ready_frontier(
     task_set: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     state_dir: Path | None = None,
+    authority_root: Path | None = None,
 ) -> list[str]:
     readiness = task_readiness(
         root,
         task_set=task_set,
         state=state,
         state_dir=state_dir,
+        authority_root=authority_root,
     )
     return [
         task_id
@@ -210,7 +214,13 @@ def _state(
     root: Path,
     *,
     state_dir: Path | None = None,
+    authority_root: Path | None = None,
 ) -> dict[str, Any]:
+    authority_check_root = (
+        authority_root.expanduser().resolve()
+        if authority_root is not None
+        else root.expanduser().resolve()
+    )
     state_root = (
         state_dir.expanduser().resolve()
         if state_dir is not None
@@ -265,6 +275,7 @@ def _activate_locked(
         task_set = load_resolved_task_source_set(
             root,
             state_dir=state_root,
+            authority_root=authority_check_root,
         )
     except TaskSourceError as exc:
         raise TaskAuthorityError(str(exc)) from exc
@@ -285,6 +296,7 @@ def _activate_locked(
         task_set=task_set,
         state=state,
         state_dir=state_root,
+        authority_root=authority_check_root,
     )
     status = readiness[task_id]
     if status["status"] == "ACCEPTED":
@@ -304,6 +316,7 @@ def _activate_locked(
             task_record=row,
             task_source_set=task_set,
             state=state,
+            authority_root=authority_check_root,
         )
     except ExecutionEnvelopeError as exc:
         raise TaskAuthorityError(str(exc)) from exc
@@ -324,6 +337,7 @@ def _activate_locked(
         verified = load_active_execution_envelope(
             root,
             state_dir=state_root,
+            authority_root=authority_check_root,
         )
     except ExecutionEnvelopeError as exc:
         raise TaskAuthorityError(f"persisted task activation did not verify: {exc}") from exc
@@ -346,6 +360,7 @@ def activate_task(
     *,
     acquire_lease: bool = True,
     state_dir: Path | None = None,
+    authority_root: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     state_root = (
@@ -363,6 +378,7 @@ def activate_task(
             root,
             task_id,
             state_dir=state_root,
+            authority_root=authority_root,
         )
 
 
@@ -499,6 +515,7 @@ def active_task_prompt_context(
     root: Path,
     *,
     state_dir: Path | None = None,
+    authority_root: Path | None = None,
 ) -> dict[str, Any] | None:
     root = root.expanduser().resolve()
     state = _state(root, state_dir=state_dir)
@@ -508,10 +525,12 @@ def active_task_prompt_context(
         envelope = load_active_execution_envelope(
             root,
             state_dir=state_dir,
+            authority_root=authority_root,
         )
         task_set = load_resolved_task_source_set(
             root,
             state_dir=state_dir,
+            authority_root=authority_root,
         )
     except (ExecutionEnvelopeError, TaskSourceError) as exc:
         raise TaskAuthorityError(str(exc)) from exc
