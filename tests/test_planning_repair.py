@@ -1560,3 +1560,257 @@ def test_p5_validator_nondeterministic_pass_fail_is_rejected(monkeypatch):
                 validator_runner=runner,
             )
         assert calls == 2
+
+
+def _p5_verified_candidate_fixture(root: Path) -> tuple[dict, Path, str]:
+    (root / "plans").mkdir(exist_ok=True)
+    (root / "plans" / "main.md").write_text("base\n")
+    _git(root, "add", "plans/main.md")
+    _git(root, "commit", "-qm", "verifier planning input")
+    _p5_write_governance(root, _p5_contract([
+        _p5_set(
+            "a",
+            [_p5_member(
+                "plans/main.md",
+                role="source",
+                repair="repairable",
+            )],
+        ),
+    ]))
+    active = begin_planning_repair(
+        root,
+        reason="independent verifier repair",
+        authority_sets=["a"],
+    )
+    worktree = Path(active["worktree"])
+    (worktree / "plans" / "main.md").write_text("repaired\n")
+    candidate = _p5_candidate_commit(
+        root,
+        worktree,
+        active=active,
+        paths=["plans/main.md"],
+    )
+    validate_planning_repair_candidate(root)
+    return load_active_repair(root), worktree, candidate
+
+
+def _p5_verifier_args(**overrides):
+    data = {
+        "sha": None,
+        "model": "verifier-model",
+        "timeout": 60,
+        "max_turns": 20,
+        "max_budget_usd": None,
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
+def test_p5_independent_verifier_binds_exact_sha_envelope_and_enriched_attestation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        active, _worktree, candidate = _p5_verified_candidate_fixture(root)
+        envelope = load_repair_envelope(root)
+        assert envelope is not None
+        envelope_sha = envelope["repair_envelope_sha256"]
+
+        monkeypatch.setattr(
+            pr,
+            "provider_from_args",
+            lambda _args: (os.environ.copy(), {"provider": "native-test"}),
+        )
+        seen_prompt: list[str] = []
+
+        def fake_verifier(**kwargs):
+            seen_prompt.append(kwargs["prompt"])
+            return (
+                "PLANNING_REPAIR_VERIFY: "
+                + json.dumps({
+                    "verdict": "VERIFIED",
+                    "candidate_sha": candidate,
+                    "repair_envelope_sha256": envelope_sha,
+                    "summary": "exact candidate preserves planning intent",
+                    "findings": [],
+                }),
+                {
+                    "usage": {},
+                    "repository_unchanged": True,
+                    "git_after": {"head": candidate},
+                },
+            )
+
+        monkeypatch.setattr(pr, "run_readonly_plan_agent", fake_verifier)
+        result = verify_planning_repair(root, _p5_verifier_args())
+        assert result["status"] == "verified"
+        assert result["candidate_sha"] == candidate
+        assert result["repair_envelope_sha256"] == envelope_sha
+        assert candidate in seen_prompt[0]
+        assert envelope_sha in seen_prompt[0]
+
+        attestation = load_promotion_attestation(
+            root,
+            candidate,
+            PLANNING_REPAIR_CONTRACT,
+        )
+        assert attestation["target_sha"] == candidate
+        metadata = attestation["metadata"]
+        assert metadata["repair_envelope_sha256"] == envelope_sha
+        assert metadata["selected_authority_sets"] == ["a"]
+        assert metadata["base_authority_content_sha256"] == envelope[
+            "base_authority_content_sha256"
+        ]
+        assert metadata["candidate_authority_content_sha256"] == active[
+            "candidate_authority_content_sha256"
+        ]
+        assert metadata["candidate_authority_evidence_sha256"] == active[
+            "candidate_authority_evidence_sha256"
+        ]
+        assert metadata["validator_receipt_bundle_sha256"] == active[
+            "validator_receipt_bundle_sha256"
+        ]
+        assert metadata["reconciler_receipt_bundle_sha256"] is None
+        assert metadata["repository_unchanged"] is True
+
+        current = load_active_repair(root)
+        assert current["verified_sha"] == candidate
+        assert current["last_verifier"]["verdict"] == "VERIFIED"
+        assert current["last_verifier"]["candidate_sha"] == candidate
+        assert current["last_verifier"]["repair_envelope_sha256"] == envelope_sha
+
+
+@pytest.mark.parametrize("mismatch", ["sha", "envelope"])
+def test_p5_independent_verifier_rejects_protocol_identity_mismatch(monkeypatch, mismatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _active, _worktree, candidate = _p5_verified_candidate_fixture(root)
+        envelope = load_repair_envelope(root)
+        assert envelope is not None
+        envelope_sha = envelope["repair_envelope_sha256"]
+
+        monkeypatch.setattr(
+            pr,
+            "provider_from_args",
+            lambda _args: (os.environ.copy(), {"provider": "native-test"}),
+        )
+
+        def fake_verifier(**kwargs):
+            payload = {
+                "verdict": "VERIFIED",
+                "candidate_sha": (
+                    "0" * len(candidate) if mismatch == "sha" else candidate
+                ),
+                "repair_envelope_sha256": (
+                    "f" * 64 if mismatch == "envelope" else envelope_sha
+                ),
+                "summary": "mismatched identity",
+                "findings": [],
+            }
+            return (
+                "PLANNING_REPAIR_VERIFY: " + json.dumps(payload),
+                {
+                    "usage": {},
+                    "repository_unchanged": True,
+                    "git_after": {"head": candidate},
+                },
+            )
+
+        monkeypatch.setattr(pr, "run_readonly_plan_agent", fake_verifier)
+        with pytest.raises(ValueError, match="wrong candidate SHA|wrong RepairEnvelope"):
+            verify_planning_repair(root, _p5_verifier_args())
+        assert not load_promotion_attestation(
+            root,
+            candidate,
+            PLANNING_REPAIR_CONTRACT,
+        )
+
+
+@pytest.mark.parametrize("evidence_kind", ["authority", "validator"])
+def test_p5_independent_verifier_fails_before_model_on_tampered_evidence(monkeypatch, evidence_kind):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        active, _worktree, candidate = _p5_verified_candidate_fixture(root)
+
+        path_key = (
+            "candidate_authority_evidence_path"
+            if evidence_kind == "authority"
+            else "validator_receipt_path"
+        )
+        path = Path(active[path_key])
+        raw = json.loads(path.read_text())
+        if evidence_kind == "authority":
+            raw["candidate_authority_content_sha256"] = "0" * 64
+        else:
+            raw["receipts"] = [{"tampered": True}]
+        path.write_text(json.dumps(raw))
+
+        called = False
+
+        def should_not_run(**kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("verifier must not run on tampered package evidence")
+
+        monkeypatch.setattr(pr, "run_readonly_plan_agent", should_not_run)
+        monkeypatch.setattr(
+            pr,
+            "provider_from_args",
+            lambda _args: (os.environ.copy(), {"provider": "native-test"}),
+        )
+        with pytest.raises(ValueError, match="integrity"):
+            verify_planning_repair(root, _p5_verifier_args())
+        assert called is False
+        assert not load_promotion_attestation(
+            root,
+            candidate,
+            PLANNING_REPAIR_CONTRACT,
+        )
+
+
+@pytest.mark.parametrize("verdict", ["REJECTED", "BLOCKED"])
+def test_p5_independent_verifier_nonverified_outcome_creates_no_attestation(monkeypatch, verdict):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        _active, _worktree, candidate = _p5_verified_candidate_fixture(root)
+        envelope = load_repair_envelope(root)
+        assert envelope is not None
+        envelope_sha = envelope["repair_envelope_sha256"]
+
+        monkeypatch.setattr(
+            pr,
+            "provider_from_args",
+            lambda _args: (os.environ.copy(), {"provider": "native-test"}),
+        )
+        monkeypatch.setattr(
+            pr,
+            "run_readonly_plan_agent",
+            lambda **_kwargs: (
+                "PLANNING_REPAIR_VERIFY: "
+                + json.dumps({
+                    "verdict": verdict,
+                    "candidate_sha": candidate,
+                    "repair_envelope_sha256": envelope_sha,
+                    "summary": "not acceptable",
+                    "findings": ["finding"],
+                }),
+                {
+                    "usage": {},
+                    "repository_unchanged": True,
+                    "git_after": {"head": candidate},
+                },
+            ),
+        )
+        result = verify_planning_repair(root, _p5_verifier_args())
+        assert result["status"] == verdict.lower()
+        assert result["findings"] == ["finding"]
+        assert not load_promotion_attestation(
+            root,
+            candidate,
+            PLANNING_REPAIR_CONTRACT,
+        )
+        current = load_active_repair(root)
+        assert current["verified_sha"] is None
+        assert current["last_verifier"]["verdict"] == verdict
