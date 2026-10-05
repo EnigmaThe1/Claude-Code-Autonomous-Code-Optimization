@@ -31,16 +31,33 @@ from state_store import json_dump, load_json
 _MAX_EXCLUDES_BYTES = 2 * 1024 * 1024
 
 
-def _trust_dir(root: Path) -> Path:
-    return ensure_private_dir(repo_state_dir(root) / "git-trust")
+def _trust_dir(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> Path:
+    state_root = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(root)
+    )
+    return ensure_private_dir(state_root / "git-trust")
 
 
-def _trust_path(root: Path) -> Path:
-    return _trust_dir(root) / "policy.json"
+def _trust_path(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> Path:
+    return _trust_dir(root, state_dir=state_dir) / "policy.json"
 
 
-def _package_excludes_path(root: Path) -> Path:
-    return _trust_dir(root) / "trusted-excludes"
+def _package_excludes_path(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> Path:
+    return _trust_dir(root, state_dir=state_dir) / "trusted-excludes"
 
 
 def _resolve_candidate(root: Path, raw: str | Path) -> Path:
@@ -165,12 +182,26 @@ def clear_trusted_excludes(root: Path) -> dict[str, Any]:
     return {"status": "cleared", "previous": previous if isinstance(previous, dict) else {}}
 
 
-def load_git_trust_policy(root: Path) -> dict[str, Any]:
-    obj = load_json(_trust_path(root.expanduser().resolve()), {})
+def load_git_trust_policy(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    obj = load_json(
+        _trust_path(
+            root.expanduser().resolve(),
+            state_dir=state_dir,
+        ),
+        {},
+    )
     return obj if isinstance(obj, dict) else {}
 
 
-def trusted_git_config(root: Path) -> list[tuple[str, str]]:
+def trusted_git_config(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> list[tuple[str, str]]:
     """Return package-owned Git config reconstructed after caller sanitisation.
 
     Authentication/transport settings remain available from ordinary Git config,
@@ -178,7 +209,7 @@ def trusted_git_config(root: Path) -> list[tuple[str, str]]:
     deterministic package-owned policy.
     """
     root = root.expanduser().resolve()
-    policy = load_git_trust_policy(root)
+    policy = load_git_trust_policy(root, state_dir=state_dir)
     raw = policy.get("trusted_excludes_file")
     if isinstance(raw, str) and raw.strip():
         path = validate_trusted_excludes_file(root, raw)
@@ -198,10 +229,12 @@ def trusted_git_config(root: Path) -> list[tuple[str, str]]:
 def trusted_git_env(
     root: Path,
     source: Mapping[str, str] | None = None,
+    *,
+    state_dir: Path | None = None,
 ) -> dict[str, str]:
     """Strip all inherited inline Git config, then reconstruct trusted package config."""
     env = sanitised_subprocess_env(source)
-    config = trusted_git_config(root)
+    config = trusted_git_config(root, state_dir=state_dir)
     env["GIT_CONFIG_COUNT"] = str(len(config))
     for index, (key, value) in enumerate(config):
         env[f"GIT_CONFIG_KEY_{index}"] = key
