@@ -235,6 +235,11 @@ def build_parser(version: str) -> argparse.ArgumentParser:
     pr.add_argument("--max-turns", type=int, default=40)
     pr.add_argument("--max-budget-usd", type=float)
     add_provider_args(pr)
+    pr = prsp.add_parser(
+        "reconcile",
+        help="Run declared deterministic reconcilers and seal the schema-2 planning candidate",
+    )
+    pr.add_argument("--repo")
     pr = prsp.add_parser("verify", help="Independently verify and attest the exact repair candidate SHA")
     pr.add_argument("--repo")
     pr.add_argument("--sha", help="Exact candidate SHA; defaults to active candidate")
