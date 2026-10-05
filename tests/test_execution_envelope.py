@@ -45,7 +45,11 @@ from task_authority import (
     reconcile_task_authority,
     task_readiness,
 )
-from task_sources import load_resolved_task_source_set, resolve_task_sources
+from task_sources import (
+    TaskSourceError,
+    load_resolved_task_source_set,
+    resolve_task_sources,
+)
 from workspace_recovery import promote_fast_forward
 
 
@@ -846,3 +850,165 @@ def test_post_batch_recognises_only_exact_validated_promote_ff_handoff(monkeypat
         assert blocked is not None
         assert blocked.get("decision") == "block"
         assert load_task_violation(root) is not None
+
+
+def test_linked_worktree_gets_distinct_task_authority_state(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        linked = Path(td) / "linked"
+        _run(
+            root,
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "p3-linked-task",
+            str(linked),
+            "HEAD",
+        )
+        try:
+            resolved = resolve_task_sources(linked, persist=True)
+            assert resolved["status"] == "READY"
+            selected = activate_task(linked, "T1")
+            assert selected["status"] == "ACTIVE"
+            assert selected["task_id"] == "T1"
+            assert repo_state_dir(linked) != repo_state_dir(root)
+            assert load_active_execution_envelope(linked)["product_base_sha"] == _run(
+                linked, "git", "rev-parse", "HEAD"
+            ).stdout.strip()
+        finally:
+            _run(
+                root,
+                "git",
+                "worktree",
+                "remove",
+                "--force",
+                str(linked),
+                check=False,
+            )
+
+
+def test_shallow_clone_missing_accepted_history_blocks_dependency_readiness(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        source = _repo(Path(td) / "source")
+        old_product = _run(source, "git", "rev-parse", "HEAD").stdout.strip()
+        _write_contract(
+            source,
+            [_task("T1"), _task("T2", depends_on=["T1"])],
+        )
+        (source / "tip.txt").write_text("tip\n")
+        _run(source, "git", "add", "tip.txt")
+        _run(source, "git", "commit", "-qm", "shallow tip")
+
+        shallow = Path(td) / "shallow"
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "-q",
+                source.resolve().as_uri(),
+                str(shallow),
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert _run(
+            shallow,
+            "git",
+            "cat-file",
+            "-e",
+            f"{old_product}^{{commit}}",
+            check=False,
+        ).returncode != 0
+
+        resolved = resolve_task_sources(shallow, persist=True)
+        rows = {row["task"]["id"]: row for row in resolved["tasks"]}
+        state_path = repo_state_dir(shallow) / "state.json"
+        state_obj = load_json(state_path, {})
+        state_obj["accepted_tasks"] = {
+            "T1": {
+                "task_spec_sha256": rows["T1"]["task_spec_sha256"],
+                "accepted_product_sha": old_product,
+            }
+        }
+        json_dump(state_path, state_obj)
+        readiness = task_readiness(shallow)
+        assert readiness["T2"]["status"] == "BLOCKED"
+        assert "unavailable in local Git history" in readiness["T2"]["blockers"][0]["reason"]
+
+
+def test_missing_committed_governance_object_blocks_task_resolution(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _write_contract(root, [_task("T1")])
+        blob = _run(
+            root,
+            "git",
+            "rev-parse",
+            "HEAD:.claude-auto/governance.json",
+        ).stdout.strip()
+        object_path = root / ".git" / "objects" / blob[:2] / blob[2:]
+        assert object_path.is_file()
+        object_path.unlink()
+
+        with pytest.raises(TaskSourceError, match="governance|blob|activate"):
+            resolve_task_sources(root, persist=True)
+
+
+def test_stage_gate_accepts_unicode_spaces_and_leading_dash_inside_envelope(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        activate_task(root, "T1")
+
+        first = root / "src" / "task" / "space Δ name.bin"
+        second = root / "src" / "task" / "-leading-dash.txt"
+        first.write_bytes(b"\x00\x01p3")
+        second.write_text("dash\n")
+        _run(
+            root,
+            "git",
+            "add",
+            "--",
+            "src/task/space Δ name.bin",
+            "src/task/-leading-dash.txt",
+        )
+        result = validate_staged_diff(root)
+        assert result["status"] == "VALID"
+        staged_paths = {
+            path
+            for entry in result["staged_entries"]
+            for path in entry["paths"]
+        }
+        assert "src/task/space Δ name.bin" in staged_paths
+        assert "src/task/-leading-dash.txt" in staged_paths
+
+
+def test_large_monorepo_selector_envelope_remains_deterministic(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        selectors = [f"packages/p{index:03d}/**" for index in range(400)]
+        task = _task(
+            "T1",
+            owned_paths=selectors,
+            evidence_paths=[],
+            scratch_paths=[],
+        )
+        root = _configured(_repo(Path(td) / "repo"), [task])
+        selected = activate_task(root, "T1")
+        envelope = load_active_execution_envelope(root)
+        assert selected["status"] == "ACTIVE"
+        assert envelope["direct_edit_paths"] == sorted(selectors)
+
+        target = root / "packages" / "p399" / "feature.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("VALUE = 1\n")
+        _run(root, "git", "add", "--", "packages/p399/feature.py")
+        assert validate_staged_diff(root)["status"] == "VALID"
