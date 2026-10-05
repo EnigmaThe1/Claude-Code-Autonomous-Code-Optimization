@@ -39,6 +39,7 @@ from task_authority import (
     TaskAuthorityError,
     activate_task,
     deactivate_task,
+    ensure_supervisor_task_activation,
     ready_frontier,
     reconcile_task_authority,
     task_readiness,
@@ -666,3 +667,47 @@ def test_task_cli_parser_exposes_p3_authority_actions():
     ):
         args = parser.parse_args(argv)
         assert args.tasks_command == expected
+
+
+def test_supervisor_task_activation_resolves_selects_and_reuses(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        _write_contract(
+            root,
+            [_task("T2", depends_on=["T1"]), _task("T1")],
+        )
+        activate(root)
+        assert not (repo_state_dir(root) / "task-sources" / "resolved.json").exists()
+
+        selected = ensure_supervisor_task_activation(root)
+        assert selected["status"] == "ACTIVE"
+        assert selected["task_id"] == "T1"
+        assert selected["reused"] is False
+        assert selected["ready_frontier"] == ["T1"]
+        assert load_resolved_task_source_set(root)["task_source_set_sha256"]
+
+        # Interruption/resume keeps the same exact active task when its current
+        # repository delta still satisfies the envelope.
+        (root / "src" / "task" / "resume.txt").write_text("in progress\n")
+        reused = ensure_supervisor_task_activation(root)
+        assert reused["status"] == "ACTIVE"
+        assert reused["task_id"] == "T1"
+        assert reused["reused"] is True
+        assert reused["execution_envelope_sha256"] == selected[
+            "execution_envelope_sha256"
+        ]
+
+
+def test_supervisor_task_activation_refuses_unresolved_violation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        selected = ensure_supervisor_task_activation(root)
+        assert selected["task_id"] == "T1"
+
+        (root / "escape-supervisor.txt").write_text("bad\n")
+        blocked = _post_batch(root, ["Bash"])
+        assert blocked and blocked["decision"] == "block"
+        with pytest.raises(TaskAuthorityError, match="unresolved.*violation"):
+            ensure_supervisor_task_activation(root)
