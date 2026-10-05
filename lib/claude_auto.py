@@ -2464,7 +2464,26 @@ def do_start(args: argparse.Namespace) -> int:
             })
             json_dump(sd / "state.json", state)
             try:
-                return _do_start_unlocked(args, root, sd, child_control=child_control)
+                try:
+                    task_activation = ensure_supervisor_task_activation(root)
+                except TaskAuthorityError as exc:
+                    state = load_json(sd / "state.json", state)
+                    state.update({
+                        "status": "BLOCKED",
+                        "last_result_status": "BLOCKED",
+                        "blocker": f"Task authority activation blocked: {exc}",
+                        "updated_at": utcnow(),
+                    })
+                    json_dump(sd / "state.json", state)
+                    print(state["blocker"], file=sys.stderr)
+                    return 3
+                return _do_start_unlocked(
+                    args,
+                    root,
+                    sd,
+                    child_control=child_control,
+                    task_activation=task_activation,
+                )
             finally:
                 final_state = load_json(sd / "state.json", {})
                 if (
@@ -2487,6 +2506,7 @@ def _do_start_unlocked(
     sd: Path,
     *,
     child_control: dict[str, Any] | None = None,
+    task_activation: dict[str, Any] | None = None,
 ) -> int:
     state = load_json(sd / "state.json", {})
     requested_session_settings = getattr(args, "session_settings", None)
@@ -2504,23 +2524,6 @@ def _do_start_unlocked(
         state["objective"] = objective
     state["resume_config"] = _capture_resume_config(args)
     json_dump(sd / "state.json", state)
-
-    # Interactive Claude is mutation-capable too. Resolve/reuse repository task
-    # authority before the child process starts; the caller holds SupervisorLease.
-    try:
-        interactive_task = ensure_supervisor_task_activation(root)
-    except TaskAuthorityError as exc:
-        state = load_json(sd / "state.json", state)
-        state.update({
-            "status": "BLOCKED",
-            "last_result_status": "BLOCKED",
-            "blocker": f"Task authority activation blocked: {exc}",
-            "updated_at": utcnow(),
-        })
-        json_dump(sd / "state.json", state)
-        print(state["blocker"], file=sys.stderr)
-        return 3
-
     permission_mode_for_profile(args.permission_mode, args.profile, set())
     if args.subagent_model and (args.verifier_model or args.researcher_model):
         raise SystemExit("--subagent-model globally overrides subagents; do not combine it with --verifier-model/--researcher-model.")
@@ -2570,11 +2573,11 @@ def _do_start_unlocked(
         print(f"Starting Claude in {root}")
         print(f"Autonomy profile: {args.profile}")
         print(f"Autonomy state: {sd}")
-        if interactive_task.get("status") == "ACTIVE":
-            reuse = "resumed" if interactive_task.get("reused") else "selected"
+        if isinstance(task_activation, dict) and task_activation.get("status") == "ACTIVE":
+            reuse = "resumed" if task_activation.get("reused") else "selected"
             print(
-                f"Task: {interactive_task.get('task_id')} "
-                f"({reuse}; envelope {str(interactive_task.get('execution_envelope_sha256'))[:12]})"
+                f"Task: {task_activation.get('task_id')} "
+                f"({reuse}; envelope {str(task_activation.get('execution_envelope_sha256'))[:12]})"
             )
         if resume_session_id:
             print(f"Resuming Claude session: {resume_session_id}")
