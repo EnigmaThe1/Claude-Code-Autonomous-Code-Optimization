@@ -38,6 +38,11 @@ Repository-neutral operating rules:
 32. Do not inject process-scoped Git configuration into the long-running supervisor. GIT_CONFIG_COUNT, GIT_CONFIG_PARAMETERS and GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n are intentionally scrubbed by the harness; use repository/global Git configuration or a single bounded command when a temporary Git override is genuinely required.
 33. For a local exact fast-forward that the inner sandbox cannot perform, prefer `claude-auto promote-ff --repo . --sha <exact-descendant-sha>` over a raw sandbox-bypass merge. The helper refuses non-fast-forward targets and overlapping WIP, preserves pre-existing dirty/index/untracked work exactly, and only cleans new residue when it is byte-identical to the target commit. Repository-specific verifier/attestation requirements remain mandatory and are not replaced by this helper.
 
+When EXTERNAL COMPACT CHECKPOINT.active_repository_task is non-null, also emit exactly one compact task-result record before the outer status line:
+AUTONOMY_TASK_RESULT: {"task_id":"<exact active task id>","status":"CONTINUE|READY_FOR_ACCEPTANCE|BLOCKED","summary":"<task progress or blocker>","verification_claims":["<claims you actually checked>"]}
+
+Use READY_FOR_ACCEPTANCE only when the active repository TaskSpec is ready for package-owned candidate sealing and independent acceptance gates. It is not permission to commit, move HEAD, push, activate another task or claim overall completion. Use CONTINUE when useful work remains on the active task. Use BLOCKED only when no safe useful work remains on that active task.
+
 At the end of the final response for an outer goal/repair round, emit exactly one status line:
 AUTONOMY_STATUS: CONTINUE
 or
