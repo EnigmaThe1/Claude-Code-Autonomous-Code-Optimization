@@ -24,12 +24,15 @@ from authority_set import (
     authority_content_sha256,
     build_authority_snapshot,
     planning_repair_control_paths,
+    planning_repair_control_selectors,
 )
 from governance_contract import (
     GovernanceContractError,
     canonical_json_bytes,
     load_governance_contract,
+    normalise_repo_selector,
 )
+from task_spec import selector_matches_path
 from repo_identity import repo_state_dir
 from runtime_paths import ensure_private_dir, utcnow
 from state_store import json_dump
@@ -305,11 +308,8 @@ def persist_repair_envelope(root: Path, record: dict[str, Any]) -> dict[str, Any
     return persisted
 
 
-def load_repair_envelope(root: Path) -> dict[str, Any] | None:
-    root = root.expanduser().resolve()
-    path = _path(root)
-    if not path.exists():
-        return None
+def load_repair_envelope_file(path: Path) -> dict[str, Any]:
+    path = path.expanduser().resolve()
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -323,3 +323,86 @@ def load_repair_envelope(root: Path) -> dict[str, Any] | None:
     if not isinstance(recorded, str) or len(recorded) != 64 or recorded != actual:
         raise RepairEnvelopeError("RepairEnvelope semantic integrity check failed")
     return value
+
+
+def direct_repair_path_reason(
+    root: Path,
+    envelope: dict[str, Any],
+    rel_path: str,
+) -> str | None:
+    """Return a fail-closed denial reason for one Architect direct-write path."""
+    root = root.expanduser().resolve()
+    _semantic(envelope)
+    raw = str(rel_path)
+    path = Path(raw)
+    if (
+        not raw
+        or path.is_absolute()
+        or ".." in path.parts
+        or path == Path(".")
+    ):
+        return "planning repair target must be a repository-relative file path"
+    try:
+        rel = normalise_repo_selector(path.as_posix())
+    except GovernanceContractError as exc:
+        return str(exc)
+
+    try:
+        contract = load_governance_contract(root)
+    except GovernanceContractError as exc:
+        return f"committed governance could not be verified: {exc}"
+
+    governance_blob = envelope.get("governance_blob")
+    if governance_blob is None:
+        if contract is not None:
+            return "legacy RepairEnvelope no longer matches repository governance"
+        return (
+            None
+            if rel in set(envelope.get("repairable_paths", []))
+            else "path is outside the legacy one-file RepairEnvelope"
+        )
+
+    if contract is None or contract.get("_git", {}).get("blob") != governance_blob:
+        return "committed governance no longer matches the RepairEnvelope"
+
+    try:
+        control_selectors = planning_repair_control_selectors(root)
+    except AuthoritySetError as exc:
+        return f"planning control authority could not be verified: {exc}"
+    if any(selector_matches_path(selector, rel) for selector in control_selectors):
+        return "path is planning governance/control/executable state"
+
+    selected = set(envelope.get("selected_authority_sets", []))
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for authority_set in contract["planning_authority"]["sets"]:
+        set_id = authority_set["id"]
+        for member in authority_set["members"]:
+            if selector_matches_path(member["path"], rel):
+                matches.append((set_id, member))
+
+    if not matches:
+        return "path matches no committed planning-authority declaration"
+    for set_id, member in matches:
+        if set_id not in selected:
+            return f"path also belongs to unselected AuthoritySet {set_id!r}"
+        if member["repair"] != "repairable":
+            return (
+                f"path is declared {member['repair']!r} in selected "
+                f"AuthoritySet {set_id!r}"
+            )
+
+    base_paths = set(envelope.get("repairable_paths", []))
+    if rel in base_paths:
+        return None
+    allowed_new = envelope.get("allowed_new_repairable_selectors", [])
+    if any(selector_matches_path(selector, rel) for selector in allowed_new):
+        return None
+    return "new planning path is not admitted by a selected repairable pattern"
+
+
+def load_repair_envelope(root: Path) -> dict[str, Any] | None:
+    root = root.expanduser().resolve()
+    path = _path(root)
+    if not path.exists():
+        return None
+    return load_repair_envelope_file(path)
