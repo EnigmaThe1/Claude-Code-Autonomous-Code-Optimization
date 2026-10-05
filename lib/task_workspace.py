@@ -109,7 +109,7 @@ def _tasks_dir(state_root: Path) -> Path:
 
 
 def _active_path(state_root: Path) -> Path:
-    return _tasks_dir(state_root) / "workspace-active.json"
+    return state_root / "tasks" / "workspace-active.json"
 
 
 def _workspace_parent(state_root: Path) -> Path:
