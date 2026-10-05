@@ -474,6 +474,7 @@ def _resume_workspace(
                     worktree,
                     state_dir=state_root,
                     authority_root=coordinator_root,
+                    git_state_dir=state_root,
                 )
             except ExecutionEnvelopeError as exc:
                 raise TaskWorkspaceError(
@@ -492,6 +493,7 @@ def _resume_workspace(
                     acquire_lease=False,
                     state_dir=state_root,
                     authority_root=coordinator_root,
+                    git_state_dir=state_root,
                 )
             except TaskAuthorityError as exc:
                 raise TaskWorkspaceError(str(exc)) from exc
@@ -499,6 +501,7 @@ def _resume_workspace(
                 worktree,
                 state_dir=state_root,
                 authority_root=coordinator_root,
+                git_state_dir=state_root,
             )
             if (
                 activated["execution_envelope_sha256"]
@@ -508,6 +511,10 @@ def _resume_workspace(
                     "activated task envelope changed during workspace activation"
                 )
 
+        ref_binding = capture_git_ref_binding(
+            coordinator_root,
+            state_dir=state_root,
+        )
         record = _persist(
             state_root,
             {
@@ -515,6 +522,8 @@ def _resume_workspace(
                 "execution_envelope_sha256": envelope[
                     "execution_envelope_sha256"
                 ],
+                "git_ref_binding": ref_binding,
+                "git_ref_binding_sha256": _ref_binding_digest(ref_binding),
                 "lifecycle_state": "ACTIVE",
                 "activated_at": utcnow(),
             },
@@ -627,6 +636,7 @@ def _begin_locked(
                 state=state,
                 state_dir=state_root,
                 authority_root=coordinator_root,
+                git_state_dir=state_root,
             )
             unresolved = [
                 key
