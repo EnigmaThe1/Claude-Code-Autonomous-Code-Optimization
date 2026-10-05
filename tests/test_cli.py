@@ -74,6 +74,65 @@ def test_task_result_parser_is_bounded_and_fail_closed():
     ) is None
 
 
+def test_p4_task_operator_cli_routes_workspace_status_and_abort(monkeypatch, capsys):
+    root = Path("/tmp/claude-auto-p4-operator-test").resolve()
+    monkeypatch.setattr(ca, "find_repo_root", lambda _raw=None: root)
+
+    monkeypatch.setattr(
+        ca,
+        "task_workspace_status",
+        lambda resolved: {
+            "repository": str(resolved),
+            "state_dir": "/tmp/state",
+            "active": {"task_id": "T1", "lifecycle_state": "ACTIVE"},
+        },
+    )
+    assert ca.main([
+        "tasks",
+        "workspace-status",
+        "--repo",
+        str(root),
+    ]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["active"]["task_id"] == "T1"
+    assert status["active"]["lifecycle_state"] == "ACTIVE"
+
+    calls = {}
+    monkeypatch.setattr(
+        ca,
+        "require_top_level_operator",
+        lambda resolved, operation: calls.update({
+            "operator_root": resolved,
+            "operation": operation,
+        }),
+    )
+    monkeypatch.setattr(
+        ca,
+        "abort_task_workspace",
+        lambda resolved, reason: {
+            "status": "ABANDONED_PRESERVED",
+            "task_id": "T1",
+            "preservation_sha": "a" * 40,
+            "reason": reason,
+        },
+    )
+    assert ca.main([
+        "tasks",
+        "abort",
+        "--repo",
+        str(root),
+        "--reason",
+        "operator requested stop",
+    ]) == 0
+    aborted = json.loads(capsys.readouterr().out)
+    assert aborted["status"] == "ABANDONED_PRESERVED"
+    assert aborted["reason"] == "operator requested stop"
+    assert calls == {
+        "operator_root": root,
+        "operation": "P4 task workspace abort",
+    }
+
+
 def test_profile_detects_python_and_js():
     with tempfile.TemporaryDirectory() as td:
         r = Path(td)
