@@ -678,7 +678,9 @@ def test_supervisor_task_activation_resolves_selects_and_reuses(monkeypatch):
             [_task("T2", depends_on=["T1"]), _task("T1")],
         )
         activate(root)
-        assert not (repo_state_dir(root) / "task-sources" / "resolved.json").exists()
+        before_state = load_json(repo_state_dir(root) / "state.json", {})
+        assert before_state.get("task_source_sha256") is None
+        assert not (repo_state_dir(root) / "tasks" / "task-source-set.json").exists()
 
         selected = ensure_supervisor_task_activation(root)
         assert selected["status"] == "ACTIVE"
