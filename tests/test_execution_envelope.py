@@ -24,6 +24,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import task_workspace as task_workspace_module
+
 from accepted_task import (
     load_accepted_task_record,
     persist_accepted_task_record,
@@ -2955,3 +2957,300 @@ def test_p4_supervisor_worker_context_uses_task_root_and_coordinator_state(monke
             str(worker_root),
         )
         _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_preparing_recovery_before_branch_creation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        original = task_workspace_module._ensure_exact_worktree
+
+        def crash_before_branch(*_args, **_kwargs):
+            raise TaskWorkspaceError("simulated crash before branch creation")
+
+        monkeypatch.setattr(
+            task_workspace_module,
+            "_ensure_exact_worktree",
+            crash_before_branch,
+        )
+        with pytest.raises(TaskWorkspaceError, match="simulated crash"):
+            begin_task_workspace(primary)
+
+        preparing = load_active_task_workspace(primary)
+        assert preparing is not None
+        assert preparing["lifecycle_state"] == "PREPARING"
+        assert preparing["execution_envelope_sha256"] is None
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            f"refs/heads/{preparing['task_branch']}",
+            check=False,
+        ).returncode != 0
+        assert not Path(preparing["task_worktree"]).exists()
+
+        monkeypatch.setattr(
+            task_workspace_module,
+            "_ensure_exact_worktree",
+            original,
+        )
+        active = begin_task_workspace(primary)
+        assert active["lifecycle_state"] == "ACTIVE"
+        assert Path(active["task_worktree"]).is_dir()
+        assert active["execution_envelope_sha256"]
+
+
+def test_p4_preparing_recovery_after_branch_before_worktree(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        original = task_workspace_module._ensure_exact_worktree
+
+        def crash_after_branch(coordinator_root, record, *, state_root):
+            _run(
+                coordinator_root,
+                "git",
+                "branch",
+                record["task_branch"],
+                record["product_base_sha"],
+            )
+            raise TaskWorkspaceError("simulated crash after branch creation")
+
+        monkeypatch.setattr(
+            task_workspace_module,
+            "_ensure_exact_worktree",
+            crash_after_branch,
+        )
+        with pytest.raises(TaskWorkspaceError, match="simulated crash"):
+            begin_task_workspace(primary)
+
+        preparing = load_active_task_workspace(primary)
+        assert preparing is not None
+        assert preparing["lifecycle_state"] == "PREPARING"
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            f"refs/heads/{preparing['task_branch']}",
+        ).returncode == 0
+        assert not Path(preparing["task_worktree"]).exists()
+
+        monkeypatch.setattr(
+            task_workspace_module,
+            "_ensure_exact_worktree",
+            original,
+        )
+        active = begin_task_workspace(primary)
+        assert active["lifecycle_state"] == "ACTIVE"
+        assert Path(active["task_worktree"]).is_dir()
+
+
+def test_p4_preparing_recovery_after_worktree_before_envelope(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        original_activate = task_workspace_module.activate_task
+
+        def crash_before_envelope(*_args, **_kwargs):
+            raise TaskAuthorityError("simulated crash before envelope activation")
+
+        monkeypatch.setattr(
+            task_workspace_module,
+            "activate_task",
+            crash_before_envelope,
+        )
+        with pytest.raises(TaskWorkspaceError, match="simulated crash"):
+            begin_task_workspace(primary)
+
+        preparing = load_active_task_workspace(primary)
+        assert preparing is not None
+        assert preparing["lifecycle_state"] == "PREPARING"
+        assert preparing["execution_envelope_sha256"] is None
+        assert Path(preparing["task_worktree"]).is_dir()
+
+        monkeypatch.setattr(
+            task_workspace_module,
+            "activate_task",
+            original_activate,
+        )
+        active = begin_task_workspace(primary)
+        assert active["lifecycle_state"] == "ACTIVE"
+        assert active["execution_envelope_sha256"]
+
+
+def test_p4_missing_task_worktree_readds_exact_recorded_branch(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        active = begin_task_workspace(primary)
+        worktree = Path(active["task_worktree"])
+
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        assert not worktree.exists()
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            f"refs/heads/{active['task_branch']}",
+        ).returncode == 0
+
+        recovered = begin_task_workspace(primary)
+        assert recovered["task_workspace_sha256"] == active[
+            "task_workspace_sha256"
+        ]
+        assert worktree.is_dir()
+        assert _run(
+            worktree,
+            "git",
+            "branch",
+            "--show-current",
+        ).stdout.strip() == active["task_branch"]
+        assert _run(worktree, "git", "rev-parse", "HEAD").stdout.strip() == active[
+            "product_base_sha"
+        ]
+
+
+def test_p4_worktree_without_recorded_branch_fails_closed(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        active = begin_task_workspace(primary)
+        worktree = Path(active["task_worktree"])
+
+        _run(
+            primary,
+            "git",
+            "update-ref",
+            "-d",
+            f"refs/heads/{active['task_branch']}",
+        )
+        assert worktree.is_dir()
+        with pytest.raises(TaskWorkspaceError, match="branch is missing"):
+            begin_task_workspace(primary)
+
+
+def test_p4_workspace_record_cannot_escape_package_workspace_parent(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        active = begin_task_workspace(primary)
+        state_dir = repo_state_dir(primary)
+        path = state_dir / "tasks" / "workspace-active.json"
+        raw = json.loads(path.read_text())
+        raw["task_worktree"] = str(Path(td) / "escape-worktree")
+        semantic = task_workspace_module._semantic(raw)
+        raw["task_workspace_sha256"] = task_workspace_module._digest(semantic)
+        path.write_text(json.dumps(raw))
+
+        with pytest.raises(TaskWorkspaceError, match="outside package-owned"):
+            load_active_task_workspace(primary)
+
+
+def test_p4_accepted_record_and_compact_index_integrity_drive_readiness(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(
+            _repo(Path(td) / "repo"),
+            [_task("T1"), _task("T2", depends_on=["T1"])],
+        )
+        task_set = load_resolved_task_source_set(root)
+        rows = {row["task"]["id"]: row for row in task_set["tasks"]}
+        product_sha = task_set["product_head"]
+        state_dir = repo_state_dir(root)
+
+        accepted = persist_accepted_task_record(
+            state_dir,
+            {
+                "schema_version": 1,
+                "task_id": "T1",
+                "task_spec_sha256": rows["T1"]["task_spec_sha256"],
+                "task_source_set_sha256": task_set["task_source_set_sha256"],
+                "authority_snapshot_sha256": task_set[
+                    "authority_snapshot_sha256"
+                ],
+                "execution_envelope_sha256": "a" * 64,
+                "base_sha": product_sha,
+                "candidate_sha": product_sha,
+                "accepted_product_sha": product_sha,
+                "no_op": True,
+                "verification_bundle_sha256": "b" * 64,
+                "verifier_attestation_sha256": "c" * 64,
+                "attestation_contract": "claude-auto/task-acceptance/v1",
+            },
+        )
+        state_path = state_dir / "state.json"
+        state_obj = load_json(state_path, {})
+        state_obj["accepted_tasks"] = {
+            "T1": {
+                "task_spec_sha256": rows["T1"]["task_spec_sha256"],
+                "accepted_product_sha": product_sha,
+                "acceptance_sha256": accepted["acceptance_sha256"],
+            }
+        }
+        json_dump(state_path, state_obj)
+        assert task_readiness(root)["T2"]["status"] == "READY"
+
+        full_path = accepted_task_path(state_dir, "T1")
+        corrupted = json.loads(full_path.read_text())
+        corrupted["no_op"] = False
+        full_path.write_text(json.dumps(corrupted))
+        blocked = task_readiness(root)["T2"]
+        assert blocked["status"] == "BLOCKED"
+        assert "integrity" in blocked["blockers"][0]["reason"].lower()
+
+        accepted = persist_accepted_task_record(
+            state_dir,
+            {
+                key: value
+                for key, value in accepted.items()
+                if key in {
+                    "schema_version",
+                    "task_id",
+                    "task_spec_sha256",
+                    "task_source_set_sha256",
+                    "authority_snapshot_sha256",
+                    "execution_envelope_sha256",
+                    "base_sha",
+                    "candidate_sha",
+                    "accepted_product_sha",
+                    "no_op",
+                    "verification_bundle_sha256",
+                    "verifier_attestation_sha256",
+                    "attestation_contract",
+                }
+            },
+        )
+        state_obj = load_json(state_path, {})
+        state_obj["accepted_tasks"]["T1"]["acceptance_sha256"] = "f" * 64
+        json_dump(state_path, state_obj)
+        blocked = task_readiness(root)["T2"]
+        assert blocked["status"] == "BLOCKED"
+        assert "compact index digest" in blocked["blockers"][0]["reason"]
+
+
+def test_p4_unverified_candidate_cannot_be_accepted(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        active = begin_task_workspace(primary)
+        worktree = Path(active["task_worktree"])
+        target = worktree / "src" / "task" / "unverified.txt"
+        target.write_text("candidate without verifier\n")
+        sealed = seal_task_candidate(primary)
+        assert sealed["status"] == "CANDIDATE"
+
+        with pytest.raises(
+            TaskAcceptanceError,
+            match="VERIFIED_PENDING_PROMOTION|PROMOTING",
+        ):
+            accept_verified_task(primary)
