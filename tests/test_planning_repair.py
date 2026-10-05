@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 
 import planning_repair as pr
 from planning_repair import (
@@ -20,6 +21,12 @@ from planning_repair import (
     verify_planning_repair,
 )
 from promotion_policy import load_promotion_attestation
+from repair_envelope import (
+    RepairEnvelopeError,
+    derive_repair_envelope,
+    load_repair_envelope,
+    persist_repair_envelope,
+)
 from settings_policy import make_settings
 from state_store import json_dump
 
@@ -417,3 +424,161 @@ def test_corrupt_durable_planning_policy_blocks_repository_mutation(monkeypatch)
         output = json.loads(cp.stdout)["hookSpecificOutput"]
         assert output["permissionDecision"] == "deny"
         assert "blocked fail-closed" in output["permissionDecisionReason"]
+
+
+def _p5_member(path: str, *, role: str, repair: str, required: bool = True) -> dict:
+    return {
+        "path": path,
+        "role": role,
+        "repair": repair,
+        "required": required,
+    }
+
+
+def _p5_helper(helper_id: str, *, inputs: list[str], outputs: list[str]) -> dict:
+    return {
+        "id": helper_id,
+        "argv": ["python3", "-c", "print('ok')"],
+        "cwd": ".",
+        "inputs": inputs,
+        "outputs": outputs,
+        "timeout_seconds": 30,
+        "capabilities": {"network": [], "read_external": []},
+    }
+
+
+def _p5_set(
+    set_id: str,
+    members: list[dict],
+    *,
+    validators: list[dict] | None = None,
+    reconcilers: list[dict] | None = None,
+) -> dict:
+    return {
+        "id": set_id,
+        "members": members,
+        "validators": validators or [],
+        "reconcilers": reconcilers or [],
+    }
+
+
+def _p5_contract(sets: list[dict]) -> dict:
+    return {
+        "schema_version": 1,
+        "planning_authority": {"sets": sets},
+        "tasks": {
+            "sources": [],
+            "execution_mode": "single-writer",
+            "strict_dependencies": True,
+        },
+        "control_surfaces": [],
+    }
+
+
+def _p5_write_governance(root: Path, contract: dict) -> None:
+    path = root / ".claude-auto" / "governance.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(contract, indent=2) + "\n")
+    _git(root, "add", ".claude-auto/governance.json")
+    _git(root, "commit", "-qm", "governance")
+
+
+def test_p5_legacy_one_file_policy_derives_synthetic_repair_envelope(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        configure_planning_repair(root, canonical_plan="IMPLEMENTATION_PLAN.md")
+
+        envelope = derive_repair_envelope(root, reason="repair ordering")
+        assert envelope["source_mode"] == "legacy"
+        assert envelope["selected_authority_sets"] == ["default"]
+        assert envelope["repairable_paths"] == ["IMPLEMENTATION_PLAN.md"]
+        assert envelope["immutable_paths"] == []
+        assert envelope["generated_paths"] == []
+        assert envelope["allowed_new_repairable_selectors"] == []
+        assert envelope["validator_contracts"] == []
+        assert envelope["reconciler_contracts"] == []
+
+
+def test_p5_multi_set_repair_envelope_requires_explicit_selection_and_captures_contract(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "main.md").write_text("plan\n")
+        (root / "requirements.md").write_text("immutable\n")
+        (root / "generated").mkdir()
+        (root / "generated" / "index.json").write_text("{}\n")
+        (root / "other.md").write_text("other\n")
+        _git(root, "add", "plans", "requirements.md", "generated", "other.md")
+        _git(root, "commit", "-qm", "multi authority")
+
+        validator = _p5_helper(
+            "validate-a",
+            inputs=["plans/*.md", "requirements.md", "generated/*.json"],
+            outputs=[],
+        )
+        reconciler = _p5_helper(
+            "generate-a",
+            inputs=["plans/*.md", "requirements.md"],
+            outputs=["generated/*.json"],
+        )
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [
+                    _p5_member("plans/*.md", role="source", repair="repairable"),
+                    _p5_member("requirements.md", role="contract", repair="immutable"),
+                    _p5_member("generated/*.json", role="projection", repair="generated"),
+                ],
+                validators=[validator],
+                reconcilers=[reconciler],
+            ),
+            _p5_set(
+                "b",
+                [_p5_member("other.md", role="source", repair="repairable")],
+            ),
+        ]))
+
+        with pytest.raises(RepairEnvelopeError, match="ambiguous"):
+            derive_repair_envelope(root, reason="repair ledger")
+
+        envelope = derive_repair_envelope(
+            root,
+            reason="repair ledger",
+            authority_sets=["a"],
+        )
+        assert envelope["selected_authority_sets"] == ["a"]
+        assert envelope["repairable_paths"] == ["plans/main.md"]
+        assert envelope["immutable_paths"] == ["requirements.md"]
+        assert envelope["generated_paths"] == ["generated/index.json"]
+        assert envelope["allowed_new_repairable_selectors"] == ["plans/*.md"]
+        assert envelope["allowed_new_generated_selectors"] == ["generated/*.json"]
+        assert [item["helper"]["id"] for item in envelope["validator_contracts"]] == [
+            "validate-a"
+        ]
+        assert [item["helper"]["id"] for item in envelope["reconciler_contracts"]] == [
+            "generate-a"
+        ]
+        assert ".claude-auto/governance.json" in envelope["protected_control_paths"]
+
+
+def test_p5_repair_envelope_persistence_detects_semantic_tamper(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        configure_planning_repair(root, canonical_plan="IMPLEMENTATION_PLAN.md")
+        envelope = persist_repair_envelope(
+            root,
+            derive_repair_envelope(root, reason="repair ordering"),
+        )
+        loaded = load_repair_envelope(root)
+        assert loaded is not None
+        assert loaded["repair_envelope_sha256"] == envelope["repair_envelope_sha256"]
+
+        path = pr.repo_state_dir(root) / "planning-repair" / "repair-envelope.json"
+        raw = json.loads(path.read_text())
+        raw["repairable_paths"] = ["app.txt"]
+        path.write_text(json.dumps(raw))
+        with pytest.raises(RepairEnvelopeError, match="integrity"):
+            load_repair_envelope(root)
