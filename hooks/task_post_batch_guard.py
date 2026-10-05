@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -75,6 +78,118 @@ def _batch_evidence(event: dict[str, Any]) -> dict[str, Any]:
         "cwd": str(event.get("cwd") or "")[:1000],
         "tool_calls": compact,
     }
+
+
+_PROMOTION_REASON_RE = re.compile(
+    r"^promote-ff advanced HEAD from ([0-9a-f]{40,64}) to ([0-9a-f]{40,64})$"
+)
+
+
+def _single_promote_ff_command(event: dict[str, Any]) -> bool:
+    """Recognise one simple package promotion command and nothing else."""
+    rows = event.get("tool_calls")
+    if not isinstance(rows, list) or len(rows) != 1:
+        return False
+    row = rows[0]
+    if not isinstance(row, dict) or str(row.get("tool_name") or "") != "Bash":
+        return False
+    tool_input = row.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return False
+    command = tool_input.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return False
+
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lex.whitespace_split = True
+        lex.commenters = ""
+        tokens = list(lex)
+    except ValueError:
+        return False
+    if not tokens or any(token in {";", "&&", "||", "|", "&"} for token in tokens):
+        return False
+
+    idx = 0
+    while idx < len(tokens) and re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[idx]
+    ):
+        idx += 1
+    if idx < len(tokens) and Path(tokens[idx]).name == "command":
+        idx += 1
+    if idx < len(tokens) and Path(tokens[idx]).name == "env":
+        idx += 1
+        while idx < len(tokens) and re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[idx]
+        ):
+            idx += 1
+    if idx < len(tokens) and Path(tokens[idx]).name == "sudo":
+        idx += 1
+        while idx < len(tokens) and tokens[idx].startswith("-"):
+            idx += 1
+
+    return (
+        idx + 1 < len(tokens)
+        and Path(tokens[idx]).name == "claude-auto"
+        and tokens[idx + 1] == "promote-ff"
+    )
+
+
+def _git_head(root: Path) -> str | None:
+    cp = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "HEAD^{commit}"],
+        text=True,
+        capture_output=True,
+    )
+    if cp.returncode != 0 or not cp.stdout.strip():
+        return None
+    return cp.stdout.strip().lower()
+
+
+def _expected_promotion_transition(
+    root: Path,
+    durable: dict[str, Any],
+    event: dict[str, Any],
+) -> bool:
+    if not _single_promote_ff_command(event):
+        return False
+    if durable.get("task_source_sha256") is not None:
+        return False
+    if any(
+        durable.get(key) is not None
+        for key in (
+            "active_task_id",
+            "active_task_spec_sha256",
+            "active_execution_envelope_sha256",
+        )
+    ):
+        return False
+    reason = durable.get("task_authority_invalidated_reason")
+    if not isinstance(reason, str):
+        return False
+    match = _PROMOTION_REASON_RE.fullmatch(reason)
+    if not match:
+        return False
+    before, target = (part.lower() for part in match.groups())
+    if before == target:
+        return False
+    return _git_head(root) == target
+
+
+def _promotion_handoff() -> None:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolBatch",
+            "additionalContext": (
+                "Claude Auto verified that the package-owned promote-ff broker "
+                "advanced HEAD and intentionally invalidated the previous "
+                "ExecutionEnvelope. That task authority is now closed. Do not "
+                "perform further repository mutation in this turn; finish the "
+                "round with AUTONOMY_STATUS: CONTINUE so the outer supervisor "
+                "can resolve fresh TaskSourceSet/ExecutionEnvelope authority."
+            ),
+        },
+    }, separators=(",", ":")))
 
 
 def _has_mutating_tool(event: dict[str, Any]) -> bool:
@@ -174,6 +289,9 @@ def main() -> int:
     # cases; PostToolBatch prevents the model from continuing after an opaque
     # mutating command/tool when no envelope exists.
     if not active_hint:
+        if _expected_promotion_transition(root, durable, event):
+            _promotion_handoff()
+            return 0
         if _has_mutating_tool(event):
             record_task_authority_failure(
                 root,
