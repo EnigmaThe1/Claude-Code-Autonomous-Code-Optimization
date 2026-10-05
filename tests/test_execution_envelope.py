@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +32,7 @@ from execution_envelope import (
     validate_staged_diff,
 )
 from git_trust import configure_trusted_excludes
+from promotion_policy import require_exact_attestation
 from repo_identity import repo_state_dir
 from repo_runtime import activate
 from runtime_paths import package_root
@@ -52,11 +54,13 @@ from task_sources import (
     resolve_task_sources,
 )
 from task_acceptance import (
+    TASK_ACCEPTANCE_CONTRACT,
     TaskAcceptanceError,
     reconcile_task_candidate,
     reopen_task_candidate_for_repair,
     seal_task_candidate,
     verify_task_candidate_deterministic,
+    verify_task_candidate_independent,
 )
 from task_workspace import (
     begin_task_workspace,
@@ -2228,6 +2232,270 @@ def test_p4_deterministic_verification_timeout_is_unverified(monkeypatch):
             findings=result["findings"],
         )
         assert reopened["status"] == "ACTIVE"
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def _task_verifier_args() -> SimpleNamespace:
+    return SimpleNamespace(
+        provider="native",
+        gateway_url=None,
+        gateway_token_env=None,
+        gateway_discovery=None,
+        isolate_provider_profile=False,
+        gateway_hints=True,
+        opus_model=None,
+        sonnet_model=None,
+        haiku_model=None,
+        subagent_model=None,
+        model="test-task-verifier",
+        timeout=30,
+        max_turns=5,
+        max_budget_usd=None,
+    )
+
+
+def test_p4_independent_verifier_binds_exact_sha_and_attestation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "candidate.txt").write_text(
+            "candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        deterministic = verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=10,
+        )
+        assert deterministic["status"] == "PASS"
+
+        seen: dict[str, str] = {}
+
+        def fake_verifier(**kwargs):
+            root = Path(kwargs["root"])
+            seen["root"] = str(root)
+            seen["head"] = _run(
+                root,
+                "git",
+                "rev-parse",
+                "HEAD",
+            ).stdout.strip()
+            seen["branch"] = _run(
+                root,
+                "git",
+                "branch",
+                "--show-current",
+            ).stdout.strip()
+            seen["prompt"] = kwargs["prompt"]
+            return (
+                "TASK_ACCEPT_VERIFY: "
+                + json.dumps({
+                    "verdict": "VERIFIED",
+                    "task_id": "T1",
+                    "candidate_sha": candidate["candidate_sha"],
+                    "summary": "exact candidate satisfies the task",
+                    "findings": [],
+                }),
+                {
+                    "repository_unchanged": True,
+                    "provider": kwargs["provider_detail"],
+                    "model": kwargs["model"],
+                    "session_id": "independent-test-session",
+                },
+            )
+
+        result = verify_task_candidate_independent(
+            primary,
+            _task_verifier_args(),
+            verifier_runner=fake_verifier,
+        )
+        assert result["status"] == "VERIFIED"
+        assert result["candidate_sha"] == candidate["candidate_sha"]
+        assert seen["head"] == candidate["candidate_sha"]
+        assert seen["branch"] == ""
+        assert candidate["candidate_sha"] in seen["prompt"]
+        assert "T1" in seen["prompt"]
+
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "VERIFIED_PENDING_PROMOTION"
+        assert workspace["verified_candidate_sha"] == candidate["candidate_sha"]
+        assert workspace["acceptance_attestation_contract"] == (
+            TASK_ACCEPTANCE_CONTRACT
+        )
+        assert workspace["acceptance_attestation_sha256"] == result[
+            "acceptance_attestation_sha256"
+        ]
+
+        attestation = require_exact_attestation(
+            primary,
+            candidate["candidate_sha"],
+            contract=TASK_ACCEPTANCE_CONTRACT,
+        )
+        assert attestation is not None
+        assert attestation["target_sha"] == candidate["candidate_sha"]
+        assert attestation["contract"] == TASK_ACCEPTANCE_CONTRACT
+
+        verification_root = (
+            repo_state_dir(primary)
+            / "tasks"
+            / "verification-worktrees"
+            / candidate["candidate_sha"][:24]
+            / "independent"
+        )
+        assert not verification_root.exists()
+
+        _run(
+            primary,
+            "git",
+            "update-ref",
+            "-d",
+            candidate_ref_for_workspace(workspace),
+        )
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_independent_verifier_rejection_reopens_same_task(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "candidate.txt").write_text(
+            "candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        assert verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=10,
+        )["status"] == "PASS"
+
+        def fake_reject(**kwargs):
+            return (
+                "TASK_ACCEPT_VERIFY: "
+                + json.dumps({
+                    "verdict": "REJECTED",
+                    "task_id": "T1",
+                    "candidate_sha": candidate["candidate_sha"],
+                    "summary": "candidate has a material defect",
+                    "findings": ["fix the defect before acceptance"],
+                }),
+                {
+                    "repository_unchanged": True,
+                    "provider": kwargs["provider_detail"],
+                    "model": kwargs["model"],
+                },
+            )
+
+        result = verify_task_candidate_independent(
+            primary,
+            _task_verifier_args(),
+            verifier_runner=fake_reject,
+        )
+        assert result["status"] == "REJECTED"
+        assert result["reopened"]["status"] == "ACTIVE"
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "ACTIVE"
+        assert workspace["candidate_sha"] is None
+        rejected_ref = workspace["last_rejected_candidate_ref"]
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            "--hash",
+            rejected_ref,
+        ).stdout.strip() == candidate["candidate_sha"]
+
+        _run(primary, "git", "update-ref", "-d", rejected_ref)
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_independent_verifier_sha_mismatch_blocks_without_attestation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "candidate.txt").write_text(
+            "candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        assert verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=10,
+        )["status"] == "PASS"
+
+        def fake_wrong_sha(**kwargs):
+            return (
+                "TASK_ACCEPT_VERIFY: "
+                + json.dumps({
+                    "verdict": "VERIFIED",
+                    "task_id": "T1",
+                    "candidate_sha": "0" * len(candidate["candidate_sha"]),
+                    "summary": "wrong object",
+                    "findings": [],
+                }),
+                {
+                    "repository_unchanged": True,
+                    "provider": kwargs["provider_detail"],
+                    "model": kwargs["model"],
+                },
+            )
+
+        result = verify_task_candidate_independent(
+            primary,
+            _task_verifier_args(),
+            verifier_runner=fake_wrong_sha,
+        )
+        assert result["status"] == "BLOCKED"
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "BLOCKED"
+        assert workspace["verified_candidate_sha"] is None
+        assert workspace["acceptance_attestation_sha256"] is None
+        assert require_exact_attestation(
+            primary,
+            candidate["candidate_sha"],
+            contract=TASK_ACCEPTANCE_CONTRACT,
+        ) is None
+
+        reopened = reopen_task_candidate_for_repair(
+            primary,
+            findings=result["findings"],
+        )
+        rejected_ref = reopened["rejected_candidate_ref"]
+        if rejected_ref:
+            _run(primary, "git", "update-ref", "-d", rejected_ref)
         _run(
             primary,
             "git",
