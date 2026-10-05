@@ -23,6 +23,7 @@ from authority_set import (
     AuthoritySetError,
     authority_content_sha256,
     build_authority_snapshot,
+    planning_repair_control_paths,
 )
 from governance_contract import (
     GovernanceContractError,
@@ -218,11 +219,10 @@ def derive_repair_envelope(
                 })
         governance_blob = None
 
-    controls = sorted({
-        str(item["path"])
-        for item in snapshot.get("control_surfaces", [])
-        if isinstance(item, dict) and isinstance(item.get("path"), str)
-    })
+    try:
+        controls = planning_repair_control_paths(root)
+    except AuthoritySetError as exc:
+        raise RepairEnvelopeError(str(exc)) from exc
 
     semantic = {
         "schema_version": 1,
