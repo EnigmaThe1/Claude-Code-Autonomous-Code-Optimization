@@ -245,7 +245,7 @@ from cli_schema import (
     show_profiles,
 )
 from authority_set import build_authority_snapshot, governance_action
-from task_sources import task_source_action
+from task_authority import task_action
 from environment_policy import apply_resume_environment, capture_resume_environment
 from git_trust import git_trust_action
 from promotion_policy import promotion_policy_action
@@ -2628,7 +2628,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "promotion": return promotion_policy_action(args, find_repo_root=find_repo_root)
     if args.command == "planning-repair": return planning_repair_action(args, find_repo_root=find_repo_root)
     if args.command == "governance": return governance_action(args, find_repo_root=find_repo_root)
-    if args.command == "tasks": return task_source_action(args, find_repo_root=find_repo_root)
+    if args.command == "tasks": return task_action(args, find_repo_root=find_repo_root)
     if args.command == "promote-ff": return promote_ff_action(args, find_repo_root=find_repo_root)
     if args.command == "cleanup-untracked": return cleanup_untracked_action(args, find_repo_root=find_repo_root)
     if args.command == "models":
