@@ -1,6 +1,6 @@
 # RC4 P4 — Task Worktree, Exact Candidate Verification and Acceptance Protocol
 
-Status: **DRAFT FOR INTERNAL RED-TEAM**
+Status: **FROZEN FOR IMPLEMENTATION**
 
 Date: 2026-10-05
 
@@ -11,6 +11,10 @@ P3 closure: `3495f2651579e58523b80977c4893bdbf58886bf`
 P3 qualified implementation: `0488dd23b9fe3e2ed65d84877ce411dfb18bf14f`
 
 P3 qualified documentation head: `2cb45905b5f574c8311b67837eec3b71d2427674`
+
+P3 formal closure: `3495f2651579e58523b80977c4893bdbf58886bf`
+
+P4 protocol red-team closure: candidate snapshots use `write-tree` + `commit-tree` without moving task HEAD; TaskSpec verification prose is non-executable acceptance authority; coordinator Git refs and primary checkout are semantic protected state; no-op acceptance and promotion crash ordering are explicit.
 
 ## 1. Purpose
 
