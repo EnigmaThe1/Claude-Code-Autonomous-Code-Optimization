@@ -364,6 +364,7 @@ def _verify_p5_planning_attestation(
             "P5 planning promotion requires enriched planning attestation metadata"
         )
     envelope_sha = metadata.get("repair_envelope_sha256")
+    attested_base = metadata.get("base_sha")
     candidate_content = metadata.get("candidate_authority_content_sha256")
     base_content = metadata.get("base_authority_content_sha256")
     evidence_sha = metadata.get("candidate_authority_evidence_sha256")
@@ -374,6 +375,10 @@ def _verify_p5_planning_attestation(
     if not _sha256_metadata(envelope_sha):
         raise ValueError(
             "P5 planning attestation is missing a valid RepairEnvelope digest"
+        )
+    if str(attested_base or "").lower() != base_for_diff.lower():
+        raise ValueError(
+            "P5 planning attestation is stale for the exact promotion base"
         )
     if not _sha256_metadata(candidate_content):
         raise ValueError(
