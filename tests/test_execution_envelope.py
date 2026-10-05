@@ -1020,3 +1020,75 @@ def test_large_monorepo_selector_envelope_remains_deterministic(monkeypatch):
         target.write_text("VALUE = 1\n")
         _run(root, "git", "add", "--", "packages/p399/feature.py")
         assert validate_staged_diff(root)["status"] == "VALID"
+
+
+def test_linked_task_root_can_use_primary_coordinator_state(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        coordinator_state = repo_state_dir(primary)
+        linked = Path(td) / "task-linked"
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "p4-coordinator-state",
+            str(linked),
+            "HEAD",
+        )
+        try:
+            linked_state = repo_state_dir(linked)
+            assert linked_state != coordinator_state
+            assert not (linked_state / "tasks" / "execution-envelope.json").exists()
+
+            selected = activate_task(
+                linked,
+                "T1",
+                acquire_lease=False,
+                state_dir=coordinator_state,
+            )
+            assert selected["status"] == "ACTIVE"
+            assert selected["task_id"] == "T1"
+
+            envelope = load_active_execution_envelope(
+                linked,
+                state_dir=coordinator_state,
+            )
+            assert envelope["task_id"] == "T1"
+            assert envelope["product_base_sha"] == _run(
+                linked,
+                "git",
+                "rev-parse",
+                "HEAD",
+            ).stdout.strip()
+
+            context = active_task_prompt_context(
+                linked,
+                state_dir=coordinator_state,
+            )
+            assert context is not None
+            assert context["id"] == "T1"
+            assert context["execution_envelope_sha256"] == envelope[
+                "execution_envelope_sha256"
+            ]
+
+            durable = load_json(coordinator_state / "state.json", {})
+            assert durable["active_task_id"] == "T1"
+            assert durable["active_execution_envelope_sha256"] == envelope[
+                "execution_envelope_sha256"
+            ]
+            assert not (linked_state / "tasks" / "execution-envelope.json").exists()
+            assert not (linked_state / "state.json").exists()
+        finally:
+            _run(
+                primary,
+                "git",
+                "worktree",
+                "remove",
+                "--force",
+                str(linked),
+                check=False,
+            )
