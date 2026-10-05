@@ -24,7 +24,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from accepted_task import persist_accepted_task_record
+from accepted_task import (
+    load_accepted_task_record,
+    persist_accepted_task_record,
+)
 from execution_envelope import (
     ExecutionEnvelopeError,
     evaluate_active_workspace,
@@ -57,6 +60,8 @@ from task_sources import (
 from task_acceptance import (
     TASK_ACCEPTANCE_CONTRACT,
     TaskAcceptanceError,
+    accept_verified_task,
+    cleanup_accepted_task_workspace,
     reconcile_task_candidate,
     reopen_task_candidate_for_repair,
     seal_task_candidate,
@@ -2552,3 +2557,209 @@ def test_p4_independent_verifier_sha_mismatch_blocks_without_attestation(monkeyp
             str(worktree),
         )
         _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def _verify_current_candidate_with_fake(
+    primary: Path,
+    candidate_sha: str,
+    *,
+    verdict: str = "VERIFIED",
+    findings: list[str] | None = None,
+) -> dict:
+    def fake_verifier(**kwargs):
+        return (
+            "TASK_ACCEPT_VERIFY: "
+            + json.dumps({
+                "verdict": verdict,
+                "task_id": "T1",
+                "candidate_sha": candidate_sha,
+                "summary": f"fake verifier {verdict.lower()}",
+                "findings": findings or [],
+            }),
+            {
+                "repository_unchanged": True,
+                "provider": kwargs["provider_detail"],
+                "model": kwargs["model"],
+            },
+        )
+
+    return verify_task_candidate_independent(
+        primary,
+        _task_verifier_args(),
+        verifier_runner=fake_verifier,
+    )
+
+
+def test_p4_verified_acceptance_records_full_evidence_and_unlocks_dependency(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(
+            _repo(Path(td) / "repo"),
+            [_task("T1"), _task("T2", depends_on=["T1"])],
+        )
+        primary_wip = primary / "human-notes.local"
+        primary_wip.write_text("preserve me\n")
+
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "accepted.txt").write_text(
+            "accepted candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        assert verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=10,
+        )["status"] == "PASS"
+        assert _verify_current_candidate_with_fake(
+            primary,
+            candidate["candidate_sha"],
+        )["status"] == "VERIFIED"
+
+        accepted = accept_verified_task(primary)
+        assert accepted["status"] == "ACCEPTED_PENDING_CLEANUP"
+        assert accepted["candidate_sha"] == candidate["candidate_sha"]
+        assert _run(primary, "git", "rev-parse", "HEAD").stdout.strip() == candidate[
+            "candidate_sha"
+        ]
+        assert primary_wip.read_text() == "preserve me\n"
+
+        full = load_accepted_task_record(
+            repo_state_dir(primary),
+            "T1",
+        )
+        assert full["acceptance_sha256"] == accepted["acceptance_sha256"]
+        assert full["accepted_product_sha"] == candidate["candidate_sha"]
+        assert full["candidate_sha"] == candidate["candidate_sha"]
+        assert full["no_op"] is False
+        assert full["attestation_contract"] == TASK_ACCEPTANCE_CONTRACT
+
+        durable = load_json(repo_state_dir(primary) / "state.json", {})
+        compact = durable["accepted_tasks"]["T1"]
+        assert compact["acceptance_sha256"] == full["acceptance_sha256"]
+        assert compact["accepted_product_sha"] == candidate["candidate_sha"]
+
+        cleaned = cleanup_accepted_task_workspace(primary)
+        assert cleaned["status"] == "CLEAN"
+        assert not worktree.exists()
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            f"refs/heads/{record['task_branch']}",
+            check=False,
+        ).returncode != 0
+        assert task_readiness(primary)["T1"]["status"] == "ACCEPTED"
+        assert task_readiness(primary)["T2"]["status"] == "READY"
+        assert ready_frontier(primary) == ["T2"]
+
+
+def test_p4_verified_noop_acceptance_uses_unchanged_product_sha(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        base = record["product_base_sha"]
+
+        candidate = seal_task_candidate(primary)
+        assert candidate["no_op"] is True
+        assert candidate["candidate_sha"] == base
+        assert verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=10,
+        )["status"] == "PASS"
+        assert _verify_current_candidate_with_fake(
+            primary,
+            base,
+        )["status"] == "VERIFIED"
+
+        accepted = accept_verified_task(primary)
+        assert accepted["status"] == "ACCEPTED_PENDING_CLEANUP"
+        assert _run(primary, "git", "rev-parse", "HEAD").stdout.strip() == base
+        full = load_accepted_task_record(
+            repo_state_dir(primary),
+            "T1",
+        )
+        assert full["no_op"] is True
+        assert full["candidate_sha"] == base
+        assert full["accepted_product_sha"] == base
+
+        cleaned = cleanup_accepted_task_workspace(primary)
+        assert cleaned["status"] == "CLEAN"
+        assert not worktree.exists()
+        assert task_readiness(primary)["T1"]["status"] == "ACCEPTED"
+
+
+def test_p4_crash_after_fast_forward_reconciles_acceptance_idempotently(monkeypatch):
+    import task_acceptance as acceptance
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "crash-accept.txt").write_text(
+            "candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        assert verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=10,
+        )["status"] == "PASS"
+        assert _verify_current_candidate_with_fake(
+            primary,
+            candidate["candidate_sha"],
+        )["status"] == "VERIFIED"
+
+        original = acceptance._persist_acceptance_after_exact_product
+        calls = {"count": 0}
+
+        def crash_once(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise TaskAcceptanceError(
+                    "simulated crash after exact fast-forward"
+                )
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(
+            acceptance,
+            "_persist_acceptance_after_exact_product",
+            crash_once,
+        )
+        with pytest.raises(
+            TaskAcceptanceError,
+            match="simulated crash",
+        ):
+            acceptance.accept_verified_task(primary)
+
+        assert _run(primary, "git", "rev-parse", "HEAD").stdout.strip() == candidate[
+            "candidate_sha"
+        ]
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "PROMOTING"
+        assert "T1" not in load_json(
+            repo_state_dir(primary) / "state.json",
+            {},
+        ).get("accepted_tasks", {})
+
+        monkeypatch.setattr(
+            acceptance,
+            "_persist_acceptance_after_exact_product",
+            original,
+        )
+        recovered = acceptance.accept_verified_task(primary)
+        assert recovered["status"] == "ACCEPTED_PENDING_CLEANUP"
+        assert recovered["candidate_sha"] == candidate["candidate_sha"]
+
+        again = acceptance.accept_verified_task(primary)
+        assert again["acceptance_sha256"] == recovered["acceptance_sha256"]
+
+        cleaned = acceptance.cleanup_accepted_task_workspace(primary)
+        assert cleaned["status"] == "CLEAN"
+        assert not worktree.exists()
