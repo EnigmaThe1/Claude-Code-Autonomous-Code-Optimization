@@ -765,3 +765,19 @@ def test_active_task_context_is_in_worker_checkpoint_without_metadata_authority(
         assert '"active_repository_task":{"id":"T1"' in prompt
         assert "Work on that task only" in prompt
         assert "tempting_but_non_authoritative" not in prompt
+
+
+def test_post_batch_blocks_state_envelope_storage_disagreement_even_after_read(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        activate_task(root, "T1")
+        envelope_path = repo_state_dir(root) / "tasks" / "execution-envelope.json"
+        envelope_path.unlink()
+
+        blocked = _post_batch(root, ["Read"])
+        assert blocked and blocked["decision"] == "block"
+        assert "disagree" in blocked["reason"]
+        violation = load_task_violation(root)
+        assert violation is not None
+        assert violation["task_id"] == "T1"
