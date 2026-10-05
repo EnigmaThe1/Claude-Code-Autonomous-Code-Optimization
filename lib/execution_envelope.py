@@ -1102,6 +1102,8 @@ def direct_repository_mutation_reason(
     *,
     rel: str,
     allow_scratch: bool = False,
+    state_dir: Path | None = None,
+    authority_root: Path | None = None,
 ) -> str | None:
     root = root.expanduser().resolve()
     # Repository-declared TaskSources switch product mutation into task-owned
@@ -1112,7 +1114,11 @@ def direct_repository_mutation_reason(
         return None
 
     try:
-        envelope = load_active_execution_envelope(root)
+        envelope = load_active_execution_envelope(
+            root,
+            state_dir=state_dir,
+            authority_root=authority_root,
+        )
     except ExecutionEnvelopeError as exc:
         return f"task-owned repository has no current active ExecutionEnvelope: {exc}"
 
