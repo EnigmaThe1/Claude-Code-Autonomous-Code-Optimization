@@ -30,6 +30,13 @@ from promotion_policy import (
     REPOSITORY_PLANNING_REPAIR_CONTRACT,
     record_promotion_attestation,
 )
+from repair_envelope import (
+    RepairEnvelopeError,
+    derive_repair_envelope,
+    direct_repair_path_reason,
+    load_repair_envelope,
+    persist_repair_envelope,
+)
 from protocols import parse_json_protocol
 from provider_config import provider_from_args
 from repo_identity import repo_id, repo_state_dir
@@ -197,25 +204,102 @@ def planning_repair_status(root: Path) -> dict[str, Any]:
     }
 
 
-def begin_planning_repair(root: Path, *, reason: str = "") -> dict[str, Any]:
+def _recover_p5_repair_worktree(
+    root: Path,
+    active: dict[str, Any],
+) -> dict[str, Any]:
+    raw_worktree = str(active.get("worktree") or "")
+    repair_branch = str(active.get("repair_branch") or "")
+    if not raw_worktree or not repair_branch.startswith("claude-auto/planning-repair/"):
+        raise ValueError("active P5 planning repair state is incomplete or untrusted")
+    worktree = Path(raw_worktree).expanduser().resolve()
+    base = str(active.get("base_sha") or "")
+    branch_exists = (
+        _git(root, "show-ref", "--verify", f"refs/heads/{repair_branch}").returncode
+        == 0
+    )
+
+    if worktree.exists() and not branch_exists:
+        raise ValueError("planning repair worktree exists but its branch is missing")
+
+    if not worktree.exists():
+        if branch_exists:
+            cp = _git(root, "worktree", "add", str(worktree), repair_branch)
+        elif active.get("status") == "PREPARING":
+            cp = _git(
+                root,
+                "worktree",
+                "add",
+                "-b",
+                repair_branch,
+                str(worktree),
+                base,
+            )
+        else:
+            raise ValueError(
+                "active planning repair lost both package branch and worktree; "
+                "automatic destructive reconstruction is refused"
+            )
+        if cp.returncode != 0:
+            detail = (cp.stderr or cp.stdout or "git worktree recovery failed").strip()
+            raise ValueError(detail[:1600])
+
+    if _rev(worktree, "HEAD") != base:
+        raise ValueError(
+            "planning repair worktree HEAD no longer matches the recorded base"
+        )
+    if _current_branch(worktree) != repair_branch:
+        raise ValueError(
+            "planning repair worktree is not on its exact recorded package branch"
+        )
+
+    if active.get("status") == "PREPARING":
+        active["status"] = "ACTIVE"
+        active["activated_at"] = utcnow()
+    else:
+        active["worktree_recovered_at"] = utcnow()
+    json_dump(_active_path(root), active)
+    return active
+
+
+def begin_planning_repair(
+    root: Path,
+    *,
+    reason: str = "",
+    authority_sets: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     root = root.expanduser().resolve()
-    policy = load_planning_repair_policy(root)
-    if not policy:
-        raise ValueError("repository-owned planning repair is not configured")
     active = load_active_repair(root)
     if active:
+        if active.get("schema_version") == 2:
+            envelope = load_repair_envelope(root)
+            if (
+                not isinstance(envelope, dict)
+                or envelope.get("repair_envelope_sha256")
+                != active.get("repair_envelope_sha256")
+            ):
+                raise ValueError(
+                    "active P5 planning repair is not bound to a valid RepairEnvelope"
+                )
+            return _recover_p5_repair_worktree(root, active)
+
+        # P6 owns in-flight migration. Preserve the proven v1 recovery path.
         raw_worktree = str(active.get("worktree") or "")
         repair_branch = str(active.get("repair_branch") or "")
         if not raw_worktree or not repair_branch.startswith("claude-auto/planning-repair/"):
             raise ValueError("active planning repair state is incomplete or untrusted")
         worktree = Path(raw_worktree).expanduser().resolve()
-        branch_exists = _git(root, "show-ref", "--verify", f"refs/heads/{repair_branch}").returncode == 0
+        branch_exists = _git(
+            root, "show-ref", "--verify", f"refs/heads/{repair_branch}"
+        ).returncode == 0
         if worktree.exists():
             if not branch_exists:
                 raise ValueError("planning repair worktree exists but its branch is missing")
             return active
         if not branch_exists:
-            raise ValueError("planning repair state exists but both worktree and repair branch are missing")
+            raise ValueError(
+                "planning repair state exists but both worktree and repair branch are missing"
+            )
         cp = _git(root, "worktree", "add", str(worktree), repair_branch)
         if cp.returncode != 0:
             detail = (cp.stderr or cp.stdout or "git worktree recovery failed").strip()
@@ -224,14 +308,38 @@ def begin_planning_repair(root: Path, *, reason: str = "") -> dict[str, Any]:
         json_dump(_active_path(root), active)
         return active
 
-    product_branch = str(policy["product_branch"])
-    if _current_branch(root) != product_branch:
-        raise ValueError(
-            f"planning repair must begin from configured product branch {product_branch!r}"
+    policy = load_planning_repair_policy(root)
+    if policy:
+        configured_branch = str(policy["product_branch"])
+        if _current_branch(root) != configured_branch:
+            raise ValueError(
+                f"planning repair must begin from configured product branch {configured_branch!r}"
+            )
+
+    try:
+        envelope = persist_repair_envelope(
+            root,
+            derive_repair_envelope(
+                root,
+                reason=reason,
+                authority_sets=authority_sets,
+            ),
         )
-    base = _rev(root, "HEAD")
+    except RepairEnvelopeError as exc:
+        if not policy:
+            raise ValueError(str(exc)) from exc
+        raise ValueError(f"unable to derive RepairEnvelope: {exc}") from exc
+
+    if policy and envelope["product_branch"] != policy["product_branch"]:
+        raise ValueError(
+            "legacy planning policy product branch and RepairEnvelope branch disagree"
+        )
+
     token = hashlib.sha256(
-        f"{repo_id(root)}:{policy['canonical_plan']}".encode()
+        (
+            f"{repo_id(root)}:{envelope['repair_envelope_sha256']}:"
+            f"{envelope['base_sha']}"
+        ).encode()
     ).hexdigest()[:12]
     repair_branch = f"claude-auto/planning-repair/{token}"
     worktree = _repair_dir(root) / "worktree"
@@ -242,29 +350,34 @@ def begin_planning_repair(root: Path, *, reason: str = "") -> dict[str, Any]:
             f"stale planning repair branch exists without active state: {repair_branch}"
         )
     if worktree.exists():
-        raise ValueError(f"stale planning repair worktree exists without active state: {worktree}")
+        raise ValueError(
+            f"stale planning repair worktree exists without active state: {worktree}"
+        )
 
-    cp = _git(root, "worktree", "add", "-b", repair_branch, str(worktree), base)
-    if cp.returncode != 0:
-        detail = (cp.stderr or cp.stdout or "git worktree add failed").strip()
-        raise ValueError(detail[:1600])
-
+    canonical_plan = (
+        str(policy.get("canonical_plan"))
+        if policy and policy.get("canonical_plan")
+        else None
+    )
     active = {
-        "schema_version": 1,
-        "status": "ACTIVE",
+        "schema_version": 2,
+        "status": "PREPARING",
         "started_at": utcnow(),
         "reason": str(reason)[:1800],
-        "base_sha": base,
-        "product_branch": product_branch,
+        "base_sha": envelope["base_sha"],
+        "product_branch": envelope["product_branch"],
         "repair_branch": repair_branch,
         "worktree": str(worktree),
-        "canonical_plan": policy["canonical_plan"],
+        "canonical_plan": canonical_plan,
+        "repair_envelope_sha256": envelope["repair_envelope_sha256"],
+        "selected_authority_sets": envelope["selected_authority_sets"],
         "candidate_sha": None,
         "verified_sha": None,
         "refresh": None,
     }
+    # Durable intent precedes the first Git topology mutation.
     json_dump(_active_path(root), active)
-    return active
+    return _recover_p5_repair_worktree(root, active)
 
 
 def _restore_architect_worktree(worktree: Path, head: str) -> None:
@@ -272,14 +385,24 @@ def _restore_architect_worktree(worktree: Path, head: str) -> None:
     _git(worktree, "clean", "-fd", "-q", "--")
 
 
-def _architect_settings(root: Path, worktree: Path, plan: Path) -> Path:
+def _architect_settings(
+    root: Path,
+    worktree: Path,
+    *,
+    plan: Path | None = None,
+    envelope_path: Path | None = None,
+) -> Path:
     path = _repair_dir(root) / "settings-architect.json"
+    env = {
+        "CLAUDE_AUTO_PLAN_REPAIR_ROOT": str(worktree),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    if plan is not None:
+        env["CLAUDE_AUTO_PLAN_REPAIR_PATH"] = str(plan)
+    if envelope_path is not None:
+        env["CLAUDE_AUTO_PLAN_REPAIR_ENVELOPE"] = str(envelope_path)
     settings = {
-        "env": {
-            "CLAUDE_AUTO_PLAN_REPAIR_ROOT": str(worktree),
-            "CLAUDE_AUTO_PLAN_REPAIR_PATH": str(plan),
-            "PYTHONDONTWRITEBYTECODE": "1",
-        },
+        "env": env,
         "hooks": {
             "PreToolUse": [{
                 "matcher": "Edit|Write|NotebookEdit|Bash",
@@ -288,7 +411,7 @@ def _architect_settings(root: Path, worktree: Path, plan: Path) -> Path:
                     "command": "python3 -B " + shlex.quote(
                         str(package_root() / "hooks" / "planning_repair_guard.py")
                     ),
-                    "timeout": 5,
+                    "timeout": 30,
                 }],
             }],
         },
