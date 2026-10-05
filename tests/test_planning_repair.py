@@ -19,6 +19,7 @@ from planning_repair import (
     refresh_planning_repair_base,
     run_planning_repair_architect,
     run_planning_repair_reconcile,
+    validate_planning_repair_candidate,
     verify_planning_repair,
 )
 from promotion_policy import load_promotion_attestation
@@ -30,6 +31,7 @@ from repair_envelope import (
 )
 from settings_policy import make_settings
 from state_store import json_dump
+from task_sources import resolve_task_sources
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1105,3 +1107,262 @@ def test_p5_planning_reconcile_cli_surface_exists():
 
     args = build_parser("test").parse_args(["planning-repair", "reconcile"])
     assert args.planning_repair_command == "reconcile"
+
+
+def _p5_task(task_id: str, *, depends_on: list[str] | None = None) -> dict:
+    return {
+        "schema_version": 1,
+        "id": task_id,
+        "authority_sets": ["a"],
+        "depends_on": depends_on or [],
+        "owned_paths": [f"src/{task_id}/**"],
+        "evidence_paths": [f"evidence/{task_id}/**"],
+        "runtime_scratch_paths": [f".cache/{task_id}/**"],
+        "verification": ["test"],
+        "commit_subject": None,
+        "metadata": {},
+    }
+
+
+def _p5_candidate_commit(
+    root: Path,
+    worktree: Path,
+    *,
+    active: dict,
+    paths: list[str],
+    message: str = "planning candidate",
+    delete_paths: list[str] | None = None,
+) -> str:
+    _git(worktree, "add", "-A", "--", *paths)
+    _git(worktree, "commit", "-qm", message)
+    candidate = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    active = load_active_repair(root)
+    active.update({
+        "status": "CANDIDATE",
+        "candidate_sha": candidate,
+        "verified_sha": None,
+        "architect_delete_paths": delete_paths or [],
+        "candidate_created_at": pr.utcnow(),
+    })
+    json_dump(pr._active_path(root), active)
+    return candidate
+
+
+def test_p5_candidate_task_sources_validate_without_overwriting_live_runtime_state(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        ledger = root / "plans" / "tasks.json"
+        ledger.write_text(json.dumps({
+            "schema_version": 1,
+            "tasks": [_p5_task("T1")],
+        }) + "\n")
+        _git(root, "add", "plans/tasks.json")
+        _git(root, "commit", "-qm", "task ledger")
+
+        contract = _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    "plans/tasks.json",
+                    role="ledger",
+                    repair="repairable",
+                )],
+            ),
+        ])
+        contract["tasks"]["sources"] = [{
+            "id": "ledger",
+            "kind": "json",
+            "authority_sets": ["a"],
+            "paths": ["plans/tasks.json"],
+        }]
+        _p5_write_governance(root, contract)
+
+        live = resolve_task_sources(root, persist=True)
+        assert live["status"] == "READY"
+        persisted = pr.repo_state_dir(root) / "tasks" / "task-source-set.json"
+        persisted_before = persisted.read_bytes()
+        state_before = json.loads(
+            (pr.repo_state_dir(root) / "state.json").read_text()
+        )
+
+        active = begin_planning_repair(
+            root,
+            reason="add dependent task",
+            authority_sets=["a"],
+        )
+        worktree = Path(active["worktree"])
+        (worktree / "plans" / "tasks.json").write_text(json.dumps({
+            "schema_version": 1,
+            "tasks": [
+                _p5_task("T1"),
+                _p5_task("T2", depends_on=["T1"]),
+            ],
+        }) + "\n")
+        candidate = _p5_candidate_commit(
+            root,
+            worktree,
+            active=active,
+            paths=["plans/tasks.json"],
+        )
+
+        result = validate_planning_repair_candidate(root)
+        assert result["status"] == "valid"
+        assert result["candidate_sha"] == candidate
+        assert result["candidate_task_source_set_sha256"]
+        assert result["candidate_task_source_set_sha256"] != live[
+            "task_source_set_sha256"
+        ]
+        assert persisted.read_bytes() == persisted_before
+        state_after = json.loads(
+            (pr.repo_state_dir(root) / "state.json").read_text()
+        )
+        assert state_after["task_source_sha256"] == state_before[
+            "task_source_sha256"
+        ]
+
+        active = load_active_repair(root)
+        assert active["validated_candidate_sha"] == candidate
+        assert active["candidate_authority_evidence_sha256"]
+        evidence = json.loads(
+            Path(active["candidate_authority_evidence_path"]).read_text()
+        )
+        assert evidence["candidate_task_sources"]["status"] == "READY"
+        assert evidence["candidate_task_sources"][
+            "task_source_set_sha256"
+        ] == result["candidate_task_source_set_sha256"]
+
+
+def test_p5_candidate_task_source_cycle_is_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "tasks.json").write_text(json.dumps({
+            "schema_version": 1,
+            "tasks": [_p5_task("T1")],
+        }) + "\n")
+        _git(root, "add", "plans/tasks.json")
+        _git(root, "commit", "-qm", "task ledger")
+        contract = _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    "plans/tasks.json",
+                    role="ledger",
+                    repair="repairable",
+                )],
+            ),
+        ])
+        contract["tasks"]["sources"] = [{
+            "id": "ledger",
+            "kind": "json",
+            "authority_sets": ["a"],
+            "paths": ["plans/tasks.json"],
+        }]
+        _p5_write_governance(root, contract)
+
+        active = begin_planning_repair(
+            root,
+            reason="bad cyclic repair",
+            authority_sets=["a"],
+        )
+        worktree = Path(active["worktree"])
+        (worktree / "plans" / "tasks.json").write_text(json.dumps({
+            "schema_version": 1,
+            "tasks": [
+                _p5_task("T1", depends_on=["T2"]),
+                _p5_task("T2", depends_on=["T1"]),
+            ],
+        }) + "\n")
+        _p5_candidate_commit(
+            root,
+            worktree,
+            active=active,
+            paths=["plans/tasks.json"],
+        )
+        with pytest.raises(ValueError, match="TaskSource validation failed|cycle"):
+            validate_planning_repair_candidate(root)
+
+
+def test_p5_candidate_required_authority_member_deletion_is_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "main.md").write_text("required\n")
+        _git(root, "add", "plans/main.md")
+        _git(root, "commit", "-qm", "required planning member")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    "plans/main.md",
+                    role="source",
+                    repair="repairable",
+                    required=True,
+                )],
+            ),
+        ]))
+
+        active = begin_planning_repair(
+            root,
+            reason="invalid deletion",
+            authority_sets=["a"],
+        )
+        worktree = Path(active["worktree"])
+        (worktree / "plans" / "main.md").unlink()
+        _p5_candidate_commit(
+            root,
+            worktree,
+            active=active,
+            paths=["plans/main.md"],
+            delete_paths=["plans/main.md"],
+        )
+        with pytest.raises(ValueError, match="required authority selector"):
+            validate_planning_repair_candidate(root)
+
+
+def test_p5_candidate_authority_case_collision_is_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "base.md").write_text("base\n")
+        _git(root, "add", "plans/base.md")
+        _git(root, "commit", "-qm", "pattern authority")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    "plans/*.md",
+                    role="source",
+                    repair="repairable",
+                )],
+            ),
+        ]))
+
+        active = begin_planning_repair(
+            root,
+            reason="collision",
+            authority_sets=["a"],
+        )
+        worktree = Path(active["worktree"])
+        (worktree / "plans" / "Case.md").write_text("one\n")
+        (worktree / "plans" / "case.md").write_text("two\n")
+        _p5_candidate_commit(
+            root,
+            worktree,
+            active=active,
+            paths=["plans/Case.md", "plans/case.md"],
+        )
+        with pytest.raises(ValueError, match="case/Unicode-colliding"):
+            validate_planning_repair_candidate(root)
+
+
+def test_p5_planning_validate_cli_surface_exists():
+    from cli_schema import build_parser
+
+    args = build_parser("test").parse_args(["planning-repair", "validate"])
+    assert args.planning_repair_command == "validate"
