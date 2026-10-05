@@ -426,8 +426,14 @@ def resolve_task_sources(
     *,
     runner: AdapterRunner = run_repository_command,
     persist: bool = True,
+    ref: str = "HEAD",
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
+    if persist and ref != "HEAD":
+        raise TaskSourceError(
+            "persisted TaskSourceSet resolution is HEAD-only; "
+            "candidate refs must use persist=False"
+        )
     if persist:
         # Synchronise the ordinary schema-9 lifecycle before deriving any task
         # authority. This keeps later task persistence attached to the same
@@ -439,8 +445,13 @@ def resolve_task_sources(
             raise TaskSourceError(f"unable to activate repository governance before task resolution: {exc}") from exc
 
     try:
-        snapshot = build_authority_snapshot(root)
-        contract = load_governance_contract(root)
+        snapshot = build_authority_snapshot(root, ref)
+        exact_ref = (
+            str(snapshot["product_head"])
+            if isinstance(snapshot, dict)
+            else ref
+        )
+        contract = load_governance_contract(root, exact_ref)
     except (AuthoritySetError, GovernanceContractError) as exc:
         raise TaskSourceError(str(exc)) from exc
 
@@ -477,7 +488,8 @@ def resolve_task_sources(
     # governance edit or control-surface change must invalidate the resolution
     # rather than allowing an old snapshot to be reported/persisted as READY.
     try:
-        final_snapshot = build_authority_snapshot(root)
+        final_ref = "HEAD" if ref == "HEAD" else str(snapshot["product_head"])
+        final_snapshot = build_authority_snapshot(root, final_ref)
     except AuthoritySetError as exc:
         raise TaskSourceError(f"repository authority changed during task resolution: {exc}") from exc
     if (
