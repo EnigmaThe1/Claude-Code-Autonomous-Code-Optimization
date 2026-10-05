@@ -542,6 +542,7 @@ def _resume_workspace(
             worktree,
             state_dir=state_root,
             authority_root=coordinator_root,
+            git_state_dir=state_root,
         )
     except ExecutionEnvelopeError as exc:
         raise TaskWorkspaceError(str(exc)) from exc
@@ -636,7 +637,6 @@ def _begin_locked(
                 state=state,
                 state_dir=state_root,
                 authority_root=coordinator_root,
-                git_state_dir=state_root,
             )
             unresolved = [
                 key
@@ -661,17 +661,29 @@ def _begin_locked(
     index = _task_record_index(task_set)
     task_record = index[selected]
     product_base = str(task_set.get("product_head") or "").lower()
-    if not product_base or git_head(coordinator_root).lower() != product_base:
+    if (
+        not product_base
+        or git_head(
+            coordinator_root,
+            state_dir=state_root,
+        ).lower() != product_base
+    ):
         raise TaskWorkspaceError(
             "coordinator HEAD changed since TaskSourceSet resolution"
         )
-    product_branch = git_branch(coordinator_root)
+    product_branch = git_branch(
+        coordinator_root,
+        state_dir=state_root,
+    )
     if not product_branch:
         raise TaskWorkspaceError(
             "P4 task workspace requires a named coordinator product branch"
         )
 
-    primary_baseline = capture_workspace_baseline(coordinator_root)
+    primary_baseline = capture_workspace_baseline(
+        coordinator_root,
+        state_dir=state_root,
+    )
     token = hashlib.sha256(
         (
             f"{repo_id(coordinator_root)}:{selected}:"
@@ -717,6 +729,7 @@ def _begin_locked(
             "task_branch": task_branch,
             "task_worktree": str(worktree),
             "primary_baseline_sha256": _digest(primary_baseline),
+            "git_ref_binding_sha256": None,
             "candidate_sha": None,
             "verified_candidate_sha": None,
             "acceptance_attestation_sha256": None,
