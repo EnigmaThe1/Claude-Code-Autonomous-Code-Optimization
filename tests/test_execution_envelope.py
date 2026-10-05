@@ -599,6 +599,11 @@ def test_detached_head_and_sparse_checkout_block_activation(monkeypatch):
         monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
         root = _configured(_repo(Path(td) / "repo"), [_task("T1")])
         _run(root, "git", "checkout", "--detach", "-q")
+        # Detaching changes AuthoritySet identity, so refresh the read-only
+        # TaskSourceSet first; activation must still refuse a mutating task on
+        # detached HEAD rather than inventing a durable branch destination.
+        refreshed = resolve_task_sources(root, persist=True)
+        assert refreshed["status"] == "READY"
         with pytest.raises(TaskAuthorityError, match="named branch"):
             activate_task(root, "T1")
 
