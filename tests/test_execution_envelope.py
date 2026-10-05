@@ -160,14 +160,43 @@ def _configured(root: Path, tasks: list[dict]) -> Path:
     return root
 
 
-def _hook_env(root: Path, *, semantic_only: bool = False) -> dict[str, str]:
+def _hook_env(
+    root: Path,
+    *,
+    semantic_only: bool = False,
+    state_dir: Path | None = None,
+    authority_root: Path | None = None,
+    task_workspace: bool = False,
+    protected_paths: list[Path] | None = None,
+) -> dict[str, str]:
     env = dict(os.environ)
+    effective_state = (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(root)
+    )
     env.update({
         "CLAUDE_AUTO_REPO_ROOT": str(root.resolve()),
-        "CLAUDE_AUTONOMY_STATE_DIR": str(repo_state_dir(root)),
+        "CLAUDE_AUTONOMY_STATE_DIR": str(effective_state),
         "CLAUDE_AUTO_PACKAGE_ROOT": str(package_root().resolve()),
         "PYTHONDONTWRITEBYTECODE": "1",
     })
+    if authority_root is not None:
+        env["CLAUDE_AUTO_AUTHORITY_ROOT"] = str(
+            authority_root.expanduser().resolve()
+        )
+    else:
+        env.pop("CLAUDE_AUTO_AUTHORITY_ROOT", None)
+    if task_workspace:
+        env["CLAUDE_AUTO_TASK_WORKSPACE"] = "1"
+    else:
+        env.pop("CLAUDE_AUTO_TASK_WORKSPACE", None)
+    if protected_paths:
+        env["CLAUDE_AUTO_PROTECTED_REPO_PATHS"] = json.dumps(
+            [str(path.expanduser().resolve()) for path in protected_paths]
+        )
+    else:
+        env.pop("CLAUDE_AUTO_PROTECTED_REPO_PATHS", None)
     if semantic_only:
         env["CLAUDE_AUTO_SEMANTIC_ONLY_WRITE_GUARD"] = "1"
     else:
@@ -1194,6 +1223,194 @@ def test_p4_task_workspace_reuse_honours_coordinator_trusted_excludes(monkeypatc
         reused = begin_task_workspace(primary)
         assert reused["task_workspace_sha256"] == record["task_workspace_sha256"]
         assert ignored.read_text() == "runtime ignored output\n"
+
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_settings_mark_task_workspace_and_external_semantic_roots():
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as sd:
+        base = Path(td)
+        task_root = base / "task"
+        authority_root = base / "primary"
+        task_root.mkdir()
+        authority_root.mkdir()
+        state_dir = Path(sd)
+        profile = {
+            "repo_root": str(task_root),
+            "languages": [],
+            "container_files": [],
+            "task_workspace": True,
+            "authority_root": str(authority_root),
+            "semantic_protected_paths": [
+                str(authority_root),
+                str(state_dir),
+            ],
+        }
+        rendered = make_settings(
+            state_dir,
+            "external",
+            "unattended",
+            profile,
+        )
+        env = rendered["env"]
+        assert env["CLAUDE_AUTO_TASK_WORKSPACE"] == "1"
+        assert env["CLAUDE_AUTO_AUTHORITY_ROOT"] == str(
+            authority_root.resolve()
+        )
+        protected = set(json.loads(env["CLAUDE_AUTO_PROTECTED_REPO_PATHS"]))
+        assert str(authority_root.resolve()) in protected
+        assert str(state_dir.resolve()) in protected
+        assert env["CLAUDE_AUTO_SEMANTIC_ONLY_WRITE_GUARD"] == "1"
+
+
+def test_p4_unattended_worker_cannot_write_primary_or_mutate_git(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        coordinator_state = repo_state_dir(primary)
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+
+        env = _hook_env(
+            worktree,
+            semantic_only=True,
+            state_dir=coordinator_state,
+            authority_root=primary,
+            task_workspace=True,
+            protected_paths=[primary, coordinator_state],
+        )
+
+        direct_primary = {
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(primary / "src" / "task" / "blocked.txt"),
+                "content": "blocked\n",
+            },
+        }
+        cp = subprocess.run(
+            [sys.executable, str(WRITE_GUARD)],
+            input=json.dumps(direct_primary),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        assert _decision(json.loads(cp.stdout)) == "deny"
+
+        owned_task_write = {
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(worktree / "src" / "task" / "allowed.txt"),
+                "content": "allowed\n",
+            },
+        }
+        cp = subprocess.run(
+            [sys.executable, str(WRITE_GUARD)],
+            input=json.dumps(owned_task_write),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        assert _decision(json.loads(cp.stdout)) == "allow"
+
+        git_add = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git add src/task/existing.txt"},
+        }
+        cp = subprocess.run(
+            [sys.executable, str(WRITE_GUARD)],
+            input=json.dumps(git_add),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        denied = json.loads(cp.stdout)
+        assert _decision(denied) == "deny"
+        assert "read-only Git authority" in denied["hookSpecificOutput"]["permissionDecisionReason"]
+
+        git_status = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status --short"},
+        }
+        cp = subprocess.run(
+            [sys.executable, str(WRITE_GUARD)],
+            input=json.dumps(git_status),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        assert _decision(json.loads(cp.stdout)) == "allow"
+
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p4_post_batch_uses_coordinator_git_trust_and_state(monkeypatch):
+    with (
+        tempfile.TemporaryDirectory() as td,
+        tempfile.TemporaryDirectory() as state,
+        tempfile.TemporaryDirectory() as operator_td,
+    ):
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        coordinator_state = repo_state_dir(primary)
+        excludes = Path(operator_td) / "trusted-excludes"
+        excludes.write_text("ignored-by-p4-post-batch.txt\n")
+        configure_trusted_excludes(primary, excludes)
+
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        ignored = worktree / "ignored-by-p4-post-batch.txt"
+        ignored.write_text("ignored runtime output\n")
+
+        env = _hook_env(
+            worktree,
+            state_dir=coordinator_state,
+            authority_root=primary,
+            task_workspace=True,
+            protected_paths=[primary, coordinator_state],
+        )
+        event = {
+            "session_id": "p4-post-batch",
+            "cwd": str(worktree),
+            "permission_mode": "bypassPermissions",
+            "hook_event_name": "PostToolBatch",
+            "tool_calls": [{
+                "tool_name": "Bash",
+                "tool_input": {"command": "git status --short"},
+                "tool_use_id": "tool-1",
+                "tool_response": "omitted",
+            }],
+        }
+        cp = subprocess.run(
+            [sys.executable, str(POST_BATCH_GUARD)],
+            input=json.dumps(event),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+        assert not cp.stdout.strip()
+        assert not (repo_state_dir(worktree) / "tasks" / "violation.json").exists()
+        assert not (coordinator_state / "tasks" / "violation.json").exists()
 
         _run(
             primary,
