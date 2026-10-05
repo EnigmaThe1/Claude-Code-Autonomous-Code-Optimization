@@ -75,6 +75,7 @@ from task_workspace import (
     load_active_task_workspace,
 )
 from workspace_recovery import promote_fast_forward
+from claude_auto import _p4_worker_execution_context
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -2902,3 +2903,55 @@ def test_p4_abort_refuses_unknown_ignored_file_and_leaves_workspace(monkeypatch)
             repo_state_dir(primary) / "state.json",
             {},
         )["active_task_id"] == "T1"
+
+
+def test_p4_supervisor_worker_context_uses_task_root_and_coordinator_state(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        coordinator_state = repo_state_dir(primary)
+        record = begin_task_workspace(primary)
+        args = type(
+            "Args",
+            (),
+            {
+                "profile": "balanced",
+                "memory_mode": "external",
+                "_permission_overrides": [],
+                "_permission_grants": [],
+            },
+        )()
+
+        worker_root, context, settings_path = _p4_worker_execution_context(
+            primary,
+            coordinator_state,
+            args,
+            {"status": "ACTIVE", "task_id": "T1"},
+        )
+        assert worker_root == Path(record["task_worktree"]).resolve()
+        assert context is not None
+        assert context["id"] == "T1"
+        assert context["task_worktree"] == str(worker_root)
+        assert context["task_workspace_sha256"] == record[
+            "task_workspace_sha256"
+        ]
+        assert settings_path is not None
+        settings = json.loads(settings_path.read_text())
+        env = settings["env"]
+        assert env["CLAUDE_AUTO_REPO_ROOT"] == str(worker_root)
+        assert env["CLAUDE_AUTONOMY_STATE_DIR"] == str(coordinator_state)
+        assert env["CLAUDE_AUTO_TASK_WORKSPACE"] == "1"
+        assert env["CLAUDE_AUTO_AUTHORITY_ROOT"] == str(primary.resolve())
+        protected = set(json.loads(env["CLAUDE_AUTO_PROTECTED_REPO_PATHS"]))
+        assert str(primary.resolve()) in protected
+        assert str(coordinator_state.resolve()) in protected
+
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worker_root),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
