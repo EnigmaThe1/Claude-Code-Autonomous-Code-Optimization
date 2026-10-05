@@ -420,14 +420,69 @@ def _architect_settings(
     return path
 
 
+def _architect_delete_paths(
+    worktree: Path,
+    envelope: dict[str, Any],
+    raw: Any,
+) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or len(raw) > 1000:
+        raise ValueError("PLANNING_REPAIR_ARCHITECT.delete_paths must be a bounded list")
+    out: list[str] = []
+    seen: set[str] = set()
+    base_repairable = set(envelope.get("repairable_paths", []))
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("architect delete_paths entries must be non-empty strings")
+        rel = Path(item.strip()).as_posix()
+        if rel in seen:
+            continue
+        seen.add(rel)
+        reason = direct_repair_path_reason(worktree, envelope, rel)
+        if reason:
+            raise ValueError(f"architect deletion denied for {rel}: {reason}")
+        if rel not in base_repairable:
+            raise ValueError(
+                f"architect may delete only an existing base repairable member: {rel}"
+            )
+        target = worktree / rel
+        try:
+            if target.is_symlink() or not target.is_file():
+                raise ValueError(
+                    f"architect deletion target must be a regular planning file: {rel}"
+                )
+        except OSError as exc:
+            raise ValueError(f"unable to inspect deletion target {rel}: {exc}") from exc
+        out.append(rel)
+    return sorted(out)
+
+
 def run_planning_repair_architect(root: Path, args: Any) -> dict[str, Any]:
     root = root.expanduser().resolve()
     active = load_active_repair(root) or begin_planning_repair(
-        root, reason=getattr(args, "reason", "") or ""
+        root,
+        reason=getattr(args, "reason", "") or "",
+        authority_sets=getattr(args, "authority_set", None),
     )
     worktree = Path(active["worktree"]).resolve()
-    plan_rel = str(active["canonical_plan"])
-    plan = (worktree / plan_rel).resolve()
+    is_p5 = active.get("schema_version") == 2
+    envelope = load_repair_envelope(root) if is_p5 else None
+    if is_p5 and (
+        not isinstance(envelope, dict)
+        or envelope.get("repair_envelope_sha256")
+        != active.get("repair_envelope_sha256")
+    ):
+        raise ValueError("active P5 repair is not bound to its RepairEnvelope")
+
+    canonical_raw = active.get("canonical_plan")
+    plan_rel = str(canonical_raw) if isinstance(canonical_raw, str) and canonical_raw else None
+    plan = (worktree / plan_rel).resolve() if plan_rel else None
+    envelope_path = (
+        _repair_dir(root) / "repair-envelope.json"
+        if is_p5
+        else None
+    )
     before_head = _rev(worktree, "HEAD")
     dirty = _worktree_dirty_paths(worktree)
     if dirty:
@@ -437,43 +492,99 @@ def run_planning_repair_architect(root: Path, args: Any) -> dict[str, Any]:
         )
 
     state = load_json(repo_state_dir(root) / "state.json", {})
-    objective = str(state.get("objective") or "Preserve the repository's existing implementation objective and acceptance criteria.")
-    reason = str(getattr(args, "reason", "") or active.get("reason") or "repair a concrete planning defect")
-    settings = _architect_settings(root, worktree, plan)
+    objective = str(
+        state.get("objective")
+        or "Preserve the repository's existing implementation objective and acceptance criteria."
+    )
+    reason = str(
+        getattr(args, "reason", "")
+        or active.get("reason")
+        or "repair a concrete planning defect"
+    )
+    settings = _architect_settings(
+        root,
+        worktree,
+        plan=plan,
+        envelope_path=envelope_path,
+    )
     env, provider_detail = provider_from_args(args)
     env.update({
         "CLAUDE_AUTO_PLAN_REPAIR_ROOT": str(worktree),
-        "CLAUDE_AUTO_PLAN_REPAIR_PATH": str(plan),
         "PYTHONDONTWRITEBYTECODE": "1",
     })
+    if plan is not None:
+        env["CLAUDE_AUTO_PLAN_REPAIR_PATH"] = str(plan)
+    if envelope_path is not None:
+        env["CLAUDE_AUTO_PLAN_REPAIR_ENVELOPE"] = str(envelope_path)
 
-    prompt = textwrap.dedent(f"""
-    You are the dedicated Planning Repair Architect for a repository-owned canonical implementation plan.
+    if is_p5:
+        selected = ", ".join(envelope["selected_authority_sets"])
+        prompt = textwrap.dedent(f"""
+        You are the dedicated Planning Repair Architect for repository-owned planning authority.
 
-    PRODUCT OBJECTIVE (authoritative):
-    {objective}
+        PRODUCT OBJECTIVE (authoritative):
+        {objective}
 
-    CANONICAL PLAN FILE:
-    {plan_rel}
+        SELECTED AUTHORITY SETS:
+        {selected}
 
-    REPAIR REASON:
-    {reason}
+        REPAIR REASON:
+        {reason}
 
-    Work only in the dedicated planning worktree. You may edit ONLY the canonical plan file.
-    Preserve the product objective and existing required functionality. Repair contradictions,
-    dependency/order mistakes, missing implementation work needed by existing requirements,
-    verification gaps, and plan assumptions contradicted by repository reality.
-    Do NOT add unrelated product features or broaden product scope.
+        Work only in the dedicated planning worktree. Direct file mutations are
+        permitted only when the package RepairEnvelope guard allows them.
+        You may directly edit repairable planning members. You may NOT directly
+        edit immutable members, generated members, governance/control state or
+        another AuthoritySet. Generated members are package-owned reconciler outputs.
 
-    If the repair would require a genuine semantic product decision not already resolved by the
-    objective/repository evidence, do not edit the plan and classify SEMANTIC_DECISION.
+        If an existing repairable planning member must be deleted, do not use
+        Bash. Request the exact repository-relative path in delete_paths.
 
-    Before finishing, inspect the resulting plan for backward impact on completed work and forward
-    impact on remaining work.
+        Preserve the product objective and existing required functionality.
+        Repair contradictions, dependency/order mistakes, missing implementation
+        work required by existing requirements, verification gaps and assumptions
+        contradicted by repository evidence. Do NOT add unrelated product features
+        or broaden product scope.
 
-    End with exactly one JSON protocol record:
-    PLANNING_REPAIR_ARCHITECT: {{"verdict":"READY|BLOCKED","classification":"PLAN_PRESERVING|SEMANTIC_DECISION","summary":"..."}}
-    """).strip()
+        If the repair requires a genuine semantic product decision not already
+        resolved by objective/repository evidence, make no repair and classify
+        SEMANTIC_DECISION.
+
+        Before finishing, analyse backward impact on accepted/completed work and
+        forward impact on remaining work.
+
+        End with exactly one JSON protocol record:
+        PLANNING_REPAIR_ARCHITECT:
+        {{"verdict":"READY|BLOCKED","classification":"PLAN_PRESERVING|SEMANTIC_DECISION","summary":"...","delete_paths":[]}}
+        """).strip()
+    else:
+        prompt = textwrap.dedent(f"""
+        You are the dedicated Planning Repair Architect for a repository-owned canonical implementation plan.
+
+        PRODUCT OBJECTIVE (authoritative):
+        {objective}
+
+        CANONICAL PLAN FILE:
+        {plan_rel}
+
+        REPAIR REASON:
+        {reason}
+
+        Work only in the dedicated planning worktree. You may edit ONLY the canonical plan file.
+        Preserve the product objective and existing required functionality. Repair contradictions,
+        dependency/order mistakes, missing implementation work needed by existing requirements,
+        verification gaps, and plan assumptions contradicted by repository reality.
+        Do NOT add unrelated product features or broaden product scope.
+
+        If the repair would require a genuine semantic product decision not already resolved by the
+        objective/repository evidence, do not edit the plan and classify SEMANTIC_DECISION.
+
+        Before finishing, inspect the resulting plan for backward impact on completed work and forward
+        impact on remaining work.
+
+        End with exactly one JSON protocol record:
+        PLANNING_REPAIR_ARCHITECT: {{"verdict":"READY|BLOCKED","classification":"PLAN_PRESERVING|SEMANTIC_DECISION","summary":"..."}}
+        """).strip()
 
     cmd = [
         "claude",
@@ -534,51 +645,140 @@ def run_planning_repair_architect(root: Path, args: Any) -> dict[str, Any]:
             "summary": str(protocol.get("summary", ""))[:1800],
         }
 
-    if changed != {plan_rel}:
-        _restore_architect_worktree(worktree, before_head)
-        raise ValueError(
-            "planning repair architect changed files outside the canonical plan: "
-            + (", ".join(sorted(changed)) or "<none>")
+    if is_p5:
+        assert envelope is not None
+        for rel in sorted(changed):
+            denial = direct_repair_path_reason(worktree, envelope, rel)
+            if denial:
+                _restore_architect_worktree(worktree, before_head)
+                raise ValueError(
+                    f"planning repair architect changed denied path {rel}: {denial}"
+                )
+        try:
+            delete_paths = _architect_delete_paths(
+                worktree,
+                envelope,
+                protocol.get("delete_paths", []),
+            )
+        except ValueError:
+            _restore_architect_worktree(worktree, before_head)
+            raise
+        for rel in delete_paths:
+            (worktree / rel).unlink()
+        changed = _worktree_dirty_paths(worktree)
+        for rel in sorted(changed):
+            denial = direct_repair_path_reason(worktree, envelope, rel)
+            if denial:
+                _restore_architect_worktree(worktree, before_head)
+                raise ValueError(
+                    f"planning repair delta is outside RepairEnvelope at {rel}: {denial}"
+                )
+
+        active.update({
+            "architect_classification": classification,
+            "architect_summary": str(protocol.get("summary", ""))[:1800],
+            "architect_delete_paths": delete_paths,
+            "architect_session_id": session_id,
+            "architect_provider": provider_detail,
+            "architect_usage": usage,
+            "architect_attempts": attempts,
+            "architect_wall_seconds": wall_seconds,
+            "verified_sha": None,
+        })
+        if envelope.get("reconciler_contracts"):
+            active["status"] = "RECONCILING"
+            active["candidate_sha"] = None
+            active["reconciliation_required_at"] = utcnow()
+            json_dump(_active_path(root), active)
+            return {
+                "status": "reconcile-required",
+                "classification": classification,
+                "repair_envelope_sha256": envelope["repair_envelope_sha256"],
+                "changed_paths": sorted(changed),
+                "summary": active["architect_summary"],
+            }
+        if not changed:
+            _restore_architect_worktree(worktree, before_head)
+            raise ValueError("planning repair architect produced no RepairEnvelope change")
+        stage = _git(worktree, "add", "-A", "--", *sorted(changed))
+        if stage.returncode != 0:
+            _restore_architect_worktree(worktree, before_head)
+            raise ValueError("unable to stage RepairEnvelope-admitted planning changes")
+        commit = _git(
+            worktree,
+            "-c", "user.name=Claude Code Autonomous Optimization",
+            "-c", "user.email=claude-auto@localhost.invalid",
+            "-c", "commit.gpgSign=false",
+            "-c", "core.hooksPath=/dev/null",
+            "commit", "-m", "Repair repository planning authority",
         )
+        if commit.returncode != 0:
+            _restore_architect_worktree(worktree, before_head)
+            detail = (commit.stderr or commit.stdout or "git commit failed").strip()
+            raise ValueError(detail[:1600])
+        candidate = _rev(worktree, "HEAD")
+        candidate_paths = _changed_paths(
+            worktree,
+            str(active["base_sha"]),
+            candidate,
+        )
+        for rel in sorted(candidate_paths):
+            denial = direct_repair_path_reason(worktree, envelope, rel)
+            if denial:
+                _restore_architect_worktree(worktree, before_head)
+                raise ValueError(
+                    f"candidate commit escaped RepairEnvelope at {rel}: {denial}"
+                )
+        active.update({
+            "status": "CANDIDATE",
+            "candidate_sha": candidate,
+            "candidate_created_at": utcnow(),
+        })
+    else:
+        if plan_rel is None or changed != {plan_rel}:
+            _restore_architect_worktree(worktree, before_head)
+            raise ValueError(
+                "planning repair architect changed files outside the canonical plan: "
+                + (", ".join(sorted(changed)) or "<none>")
+            )
+        add = _git(worktree, "add", "--", plan_rel)
+        if add.returncode != 0:
+            _restore_architect_worktree(worktree, before_head)
+            raise ValueError("unable to stage repaired canonical plan")
+        staged = _git(worktree, "diff", "--cached", "--quiet", "--", plan_rel)
+        if staged.returncode == 0:
+            _restore_architect_worktree(worktree, before_head)
+            raise ValueError("planning repair architect produced no canonical plan change")
+        commit = _git(
+            worktree,
+            "-c", "user.name=Claude Code Autonomous Optimization",
+            "-c", "user.email=claude-auto@localhost.invalid",
+            "-c", "commit.gpgSign=false",
+            "commit", "-m", "Repair canonical implementation plan",
+        )
+        if commit.returncode != 0:
+            _restore_architect_worktree(worktree, before_head)
+            detail = (commit.stderr or commit.stdout or "git commit failed").strip()
+            raise ValueError(detail[:1600])
+        candidate = _rev(worktree, "HEAD")
+        _require_scope(worktree, str(active["base_sha"]), candidate, plan_rel)
+        active.update({
+            "candidate_sha": candidate,
+            "verified_sha": None,
+            "architect_classification": classification,
+            "architect_summary": str(protocol.get("summary", ""))[:1800],
+            "architect_session_id": session_id,
+            "architect_provider": provider_detail,
+            "architect_usage": usage,
+            "architect_attempts": attempts,
+            "architect_wall_seconds": wall_seconds,
+            "candidate_created_at": utcnow(),
+        })
 
-    add = _git(worktree, "add", "--", plan_rel)
-    if add.returncode != 0:
-        _restore_architect_worktree(worktree, before_head)
-        raise ValueError("unable to stage repaired canonical plan")
-    staged = _git(worktree, "diff", "--cached", "--quiet", "--", plan_rel)
-    if staged.returncode == 0:
-        _restore_architect_worktree(worktree, before_head)
-        raise ValueError("planning repair architect produced no canonical plan change")
-    commit = _git(
-        worktree,
-        "-c", "user.name=Claude Code Autonomous Optimization",
-        "-c", "user.email=claude-auto@localhost.invalid",
-        "-c", "commit.gpgSign=false",
-        "commit", "-m", "Repair canonical implementation plan",
-    )
-    if commit.returncode != 0:
-        _restore_architect_worktree(worktree, before_head)
-        detail = (commit.stderr or commit.stdout or "git commit failed").strip()
-        raise ValueError(detail[:1600])
-
-    candidate = _rev(worktree, "HEAD")
-    _require_scope(worktree, str(active["base_sha"]), candidate, plan_rel)
-    active.update({
-        "candidate_sha": candidate,
-        "verified_sha": None,
-        "architect_classification": classification,
-        "architect_summary": str(protocol.get("summary", ""))[:1800],
-        "architect_session_id": session_id,
-        "architect_provider": provider_detail,
-        "architect_usage": usage,
-        "architect_attempts": attempts,
-        "architect_wall_seconds": wall_seconds,
-        "candidate_created_at": utcnow(),
-    })
     json_dump(_active_path(root), active)
     return {
         "status": "candidate",
-        "candidate_sha": candidate,
+        "candidate_sha": active["candidate_sha"],
         "classification": classification,
         "summary": active["architect_summary"],
     }
