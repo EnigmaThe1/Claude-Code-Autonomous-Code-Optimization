@@ -245,7 +245,11 @@ from cli_schema import (
     show_profiles,
 )
 from authority_set import build_authority_snapshot, governance_action
-from task_authority import task_action
+from task_authority import (
+    TaskAuthorityError,
+    ensure_supervisor_task_activation,
+    task_action,
+)
 from environment_policy import apply_resume_environment, capture_resume_environment
 from git_trust import git_trust_action
 from promotion_policy import promotion_policy_action
@@ -1556,12 +1560,34 @@ def _do_run_goal_unlocked(args: argparse.Namespace) -> int:
         json_dump(sd / "state.json", state)
         return 3
 
+    # P3 repository-task authority is selected by the outer supervisor, never
+    # by the worker. The caller already holds SupervisorLease.
+    try:
+        task_activation = ensure_supervisor_task_activation(root)
+    except TaskAuthorityError as exc:
+        state = load_json(sd / "state.json", state)
+        state.update({
+            "status": "BLOCKED",
+            "last_result_status": "BLOCKED",
+            "blocker": f"Task authority activation blocked: {exc}",
+            "updated_at": utcnow(),
+        })
+        json_dump(sd / "state.json", state)
+        print(state["blocker"], file=sys.stderr)
+        return 3
+
     print(f"Repository: {root}")
     print(f"State:      {sd}")
     print("Engine:     native Claude /goal (headless)")
     print(f"Profile:    {args.profile}")
     print(f"Plan:       v{int(plan.get('version', 0)):04d} VALIDATED ({plan.get('complexity', 'standard')})")
     print(f"Provider:   {main_provider['provider']}" + (f" @ {main_provider['base_url']}" if main_provider.get("base_url") else ""))
+    if task_activation.get("status") == "ACTIVE":
+        reuse = "resumed" if task_activation.get("reused") else "selected"
+        print(
+            f"Task:       {task_activation.get('task_id')} "
+            f"({reuse}; envelope {str(task_activation.get('execution_envelope_sha256'))[:12]})"
+        )
     rounds_text = "unlimited (until COMPLETE/BLOCKED/circuit-breaker)" if args.max_cycles <= 0 else str(args.max_cycles)
     print(f"Max goal rounds: {rounds_text}; max worker turns/round: {args.max_turns}")
     if args.max_budget_usd is not None:
@@ -2458,6 +2484,23 @@ def _do_start_unlocked(
         state["objective"] = objective
     state["resume_config"] = _capture_resume_config(args)
     json_dump(sd / "state.json", state)
+
+    # Interactive Claude is mutation-capable too. Resolve/reuse repository task
+    # authority before the child process starts; the caller holds SupervisorLease.
+    try:
+        interactive_task = ensure_supervisor_task_activation(root)
+    except TaskAuthorityError as exc:
+        state = load_json(sd / "state.json", state)
+        state.update({
+            "status": "BLOCKED",
+            "last_result_status": "BLOCKED",
+            "blocker": f"Task authority activation blocked: {exc}",
+            "updated_at": utcnow(),
+        })
+        json_dump(sd / "state.json", state)
+        print(state["blocker"], file=sys.stderr)
+        return 3
+
     permission_mode_for_profile(args.permission_mode, args.profile, set())
     if args.subagent_model and (args.verifier_model or args.researcher_model):
         raise SystemExit("--subagent-model globally overrides subagents; do not combine it with --verifier-model/--researcher-model.")
@@ -2507,6 +2550,12 @@ def _do_start_unlocked(
         print(f"Starting Claude in {root}")
         print(f"Autonomy profile: {args.profile}")
         print(f"Autonomy state: {sd}")
+        if interactive_task.get("status") == "ACTIVE":
+            reuse = "resumed" if interactive_task.get("reused") else "selected"
+            print(
+                f"Task: {interactive_task.get('task_id')} "
+                f"({reuse}; envelope {str(interactive_task.get('execution_envelope_sha256'))[:12]})"
+            )
         if resume_session_id:
             print(f"Resuming Claude session: {resume_session_id}")
         print(f"Provider: {provider_detail['provider']}" + (f" @ {provider_detail['base_url']}" if provider_detail.get('base_url') else ""))
