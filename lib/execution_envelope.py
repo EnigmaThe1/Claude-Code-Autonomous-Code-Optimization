@@ -684,7 +684,12 @@ def load_active_execution_envelope(
     return record
 
 
-def current_staged_entries(root: Path, *, ref: str = "HEAD") -> list[dict[str, Any]]:
+def current_staged_entries(
+    root: Path,
+    *,
+    ref: str = "HEAD",
+    state_dir: Path | None = None,
+) -> list[dict[str, Any]]:
     payload = _git_bytes(
         root,
         "diff",
@@ -695,6 +700,7 @@ def current_staged_entries(root: Path, *, ref: str = "HEAD") -> list[dict[str, A
         "--find-copies",
         ref,
         "--",
+        state_dir=state_dir,
     )
     fields = [item for item in payload.split(b"\0") if item]
     out: list[dict[str, Any]] = []
@@ -718,8 +724,23 @@ def current_staged_entries(root: Path, *, ref: str = "HEAD") -> list[dict[str, A
     return out
 
 
-def _mode_at(root: Path, ref: str, rel: str) -> str | None:
-    cp = _git(root, "ls-tree", "-z", ref, "--", rel, text=False)
+def _mode_at(
+    root: Path,
+    ref: str,
+    rel: str,
+    *,
+    state_dir: Path | None = None,
+) -> str | None:
+    cp = _git(
+        root,
+        "ls-tree",
+        "-z",
+        ref,
+        "--",
+        rel,
+        text=False,
+        state_dir=state_dir,
+    )
     if cp.returncode != 0:
         raise ExecutionEnvelopeError(f"unable to inspect Git mode for {rel!r} at {ref!r}")
     payload = bytes(cp.stdout)
@@ -736,8 +757,22 @@ def _mode_at(root: Path, ref: str, rel: str) -> str | None:
     return None
 
 
-def _index_mode(root: Path, rel: str) -> str | None:
-    cp = _git(root, "ls-files", "-s", "-z", "--", rel, text=False)
+def _index_mode(
+    root: Path,
+    rel: str,
+    *,
+    state_dir: Path | None = None,
+) -> str | None:
+    cp = _git(
+        root,
+        "ls-files",
+        "-s",
+        "-z",
+        "--",
+        rel,
+        text=False,
+        state_dir=state_dir,
+    )
     if cp.returncode != 0:
         raise ExecutionEnvelopeError(f"unable to inspect staged mode for {rel!r}")
     payload = bytes(cp.stdout)
@@ -771,21 +806,41 @@ def validate_staged_diff(
     root: Path,
     *,
     envelope: dict[str, Any] | None = None,
+    state_dir: Path | None = None,
+    authority_root: Path | None = None,
+    git_state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
-    record = envelope or load_active_execution_envelope(root)
-    if git_head(root) != record["product_base_sha"]:
+    record = envelope or load_active_execution_envelope(
+        root,
+        state_dir=state_dir,
+        authority_root=authority_root,
+        git_state_dir=git_state_dir,
+    )
+    if git_head(root, state_dir=git_state_dir) != record["product_base_sha"]:
         raise ExecutionEnvelopeError("staged-diff validation requires the exact envelope base HEAD")
 
-    entries = current_staged_entries(root)
+    entries = current_staged_entries(
+        root,
+        state_dir=git_state_dir,
+    )
     violations: list[dict[str, str]] = []
     for entry in entries:
         for rel in entry["paths"]:
             reason = _admission_reason(record, rel)
             if reason:
                 violations.append({"path": rel, "reason": reason})
-            base_mode = _mode_at(root, record["product_base_sha"], rel)
-            index_mode = _index_mode(root, rel)
+            base_mode = _mode_at(
+                root,
+                record["product_base_sha"],
+                rel,
+                state_dir=git_state_dir,
+            )
+            index_mode = _index_mode(
+                root,
+                rel,
+                state_dir=git_state_dir,
+            )
             if base_mode == "160000" or index_mode == "160000":
                 violations.append({
                     "path": rel,
@@ -824,12 +879,32 @@ def _baseline_exact_now(root: Path, baseline: dict[str, Any]) -> list[dict[str, 
     return problems
 
 
-def _current_delta_paths(root: Path, baseline: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _current_delta_paths(
+    root: Path,
+    baseline: dict[str, Any],
+    *,
+    state_dir: Path | None = None,
+) -> tuple[list[str], list[str]]:
     current_unstaged = set(
-        _nul_paths(root, "diff", "--name-only", "-z", "--no-ext-diff", "--")
+        _nul_paths(
+            root,
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-ext-diff",
+            "--",
+            state_dir=state_dir,
+        )
     )
     current_untracked = set(
-        _nul_paths(root, "ls-files", "--others", "--exclude-standard", "-z")
+        _nul_paths(
+            root,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            state_dir=state_dir,
+        )
     )
     baseline_unstaged = set(_record_map(baseline.get("unstaged")))
     baseline_untracked = set(_record_map(baseline.get("untracked")))
@@ -843,12 +918,20 @@ def evaluate_active_workspace(
     root: Path,
     *,
     envelope: dict[str, Any] | None = None,
+    state_dir: Path | None = None,
+    authority_root: Path | None = None,
+    git_state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
-    record = envelope or load_active_execution_envelope(root)
+    record = envelope or load_active_execution_envelope(
+        root,
+        state_dir=state_dir,
+        authority_root=authority_root,
+        git_state_dir=git_state_dir,
+    )
     violations: list[dict[str, str]] = []
 
-    if git_head(root) != record["product_base_sha"]:
+    if git_head(root, state_dir=git_state_dir) != record["product_base_sha"]:
         violations.append({
             "path": "HEAD",
             "reason": "repository HEAD moved away from the active task base",
@@ -856,7 +939,11 @@ def evaluate_active_workspace(
 
     baseline = record["baseline_wip"]
     violations.extend(_baseline_exact_now(root, baseline))
-    new_unstaged, new_untracked = _current_delta_paths(root, baseline)
+    new_unstaged, new_untracked = _current_delta_paths(
+        root,
+        baseline,
+        state_dir=git_state_dir,
+    )
     for rel in sorted(set(new_unstaged + new_untracked)):
         if path_relates_to_protected(rel, record["protected_paths"]):
             violations.append({"path": rel, "reason": "protected semantic/control path changed"})
@@ -871,7 +958,13 @@ def evaluate_active_workspace(
             })
 
     try:
-        validate_staged_diff(root, envelope=record)
+        validate_staged_diff(
+            root,
+            envelope=record,
+            state_dir=state_dir,
+            authority_root=authority_root,
+            git_state_dir=git_state_dir,
+        )
     except ExecutionEnvelopeError as exc:
         violations.append({"path": "INDEX", "reason": str(exc)})
 
@@ -894,13 +987,24 @@ def workspace_matches_activation_baseline(
     root: Path,
     *,
     envelope: dict[str, Any] | None = None,
+    state_dir: Path | None = None,
+    authority_root: Path | None = None,
+    git_state_dir: Path | None = None,
 ) -> bool:
     root = root.expanduser().resolve()
-    record = envelope or load_active_execution_envelope(root)
+    record = envelope or load_active_execution_envelope(
+        root,
+        state_dir=state_dir,
+        authority_root=authority_root,
+        git_state_dir=git_state_dir,
+    )
     baseline = record["baseline_wip"]
-    if git_head(root) != record["product_base_sha"]:
+    if git_head(root, state_dir=git_state_dir) != record["product_base_sha"]:
         return False
-    current = capture_workspace_baseline(root)
+    current = capture_workspace_baseline(
+        root,
+        state_dir=git_state_dir,
+    )
     return (
         current["staged_paths"] == baseline["staged_paths"]
         and current["unstaged"] == baseline["unstaged"]
