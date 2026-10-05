@@ -436,7 +436,7 @@ def test_rendered_background_permission_commands_are_repo_bound():
 
 def _write_guard_decision(guard: Path, event: dict, env: dict[str, str]) -> str:
     cp = subprocess.run(
-        [str(guard)],
+        [os.environ.get("PYTHON", "python3"), str(guard)],
         input=json.dumps(event),
         text=True,
         capture_output=True,
