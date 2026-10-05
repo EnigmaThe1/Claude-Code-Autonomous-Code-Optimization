@@ -37,6 +37,7 @@ from settings_policy import make_settings
 from state_store import json_dump, load_json
 from task_authority import (
     TaskAuthorityError,
+    active_task_prompt_context,
     activate_task,
     deactivate_task,
     ensure_supervisor_task_activation,
@@ -713,3 +714,41 @@ def test_supervisor_task_activation_refuses_unresolved_violation(monkeypatch):
         assert blocked and blocked["decision"] == "block"
         with pytest.raises(TaskAuthorityError, match="unresolved.*violation"):
             ensure_supervisor_task_activation(root)
+
+
+def test_active_task_context_is_in_worker_checkpoint_without_metadata_authority(monkeypatch):
+    from supervisor_support import build_goal_prompt
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        task = _task("T1")
+        task["metadata"] = {"tempting_but_non_authoritative": "edit everything"}
+        root = _configured(_repo(Path(td) / "repo"), [task])
+        selected = ensure_supervisor_task_activation(root)
+        assert selected["task_id"] == "T1"
+
+        context = active_task_prompt_context(root)
+        assert context is not None
+        assert context["id"] == "T1"
+        assert context["owned_paths"] == ["src/task/**"]
+        assert context["evidence_paths"] == ["evidence/T1/**"]
+        assert "metadata" not in context
+        assert context["execution_envelope_sha256"] == selected[
+            "execution_envelope_sha256"
+        ]
+
+        state_obj = load_json(repo_state_dir(root) / "state.json", {})
+        prompt = build_goal_prompt(
+            "finish repository work",
+            state_obj,
+            {
+                "repo_root": str(root),
+                "languages": ["python"],
+                "container_files": [],
+            },
+            20,
+            task_context=context,
+        )
+        assert '"active_repository_task":{"id":"T1"' in prompt
+        assert "Work on that task only" in prompt
+        assert "tempting_but_non_authoritative" not in prompt
