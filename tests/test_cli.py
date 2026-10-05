@@ -363,7 +363,7 @@ args=sys.argv[1:]
 capture=os.environ.get("FAKE_CLAUDE_CAPTURE")
 if capture:
     with open(capture,"a") as f:
-        f.write(json.dumps({"args":args,"base":os.environ.get("ANTHROPIC_BASE_URL"),"stop_cap":os.environ.get("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"),"headless":os.environ.get("CLAUDE_AUTO_HEADLESS")})+"\\n")
+        f.write(json.dumps({"args":args,"base":os.environ.get("ANTHROPIC_BASE_URL"),"stop_cap":os.environ.get("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"),"headless":os.environ.get("CLAUDE_AUTO_HEADLESS"),"cwd":os.getcwd()})+"\\n")
 if "--version" in args:
     print("2.1.283 (Claude Code)")
     raise SystemExit(0)
@@ -407,6 +407,17 @@ elif "/goal CLAUDE AUTO GOAL CONTINUITY QUALIFICATION" in prompt:
     result='GOAL_QUALIFICATION: {"ok":true}'
 elif "CLAUDE AUTO SUBAGENT QUALIFICATION" in prompt:
     result='SUBAGENT_QUALIFICATION: {"ok":true}'
+elif "You are the independent Task Verifier" in prompt:
+    import re
+    task_match=re.search(r"TASK ID:\s*([^\\n]+)", prompt)
+    sha_match=re.search(r"EXACT CANDIDATE SHA:\s*([0-9a-fA-F]+)", prompt)
+    result='TASK_ACCEPT_VERIFY: '+json.dumps({
+        "verdict":"VERIFIED",
+        "task_id":task_match.group(1).strip() if task_match else "",
+        "candidate_sha":sha_match.group(1).lower() if sha_match else "",
+        "summary":"exact candidate verified",
+        "findings":[],
+    })
 elif prompt.strip() == "/verify":
     if os.environ.get("FAKE_RUNTIME_VERIFY_NATIVE_FAIL") == "1":
         print("verify unavailable", file=sys.stderr)
@@ -448,6 +459,138 @@ print(json.dumps({"result":result,"session_id":"fake-session","usage":{"input_to
 """)
     script.chmod(0o755)
     return script
+
+
+def test_p4_headless_noop_task_runs_in_worktree_and_reaches_acceptance(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as dh, tempfile.TemporaryDirectory() as bd:
+        r = Path(td)
+        git_init(r)
+        subprocess.run(
+            ["git", "-C", str(r), "config", "user.email", "p4@example.invalid"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(r), "config", "user.name", "P4 Test"],
+            check=True,
+        )
+        (r / "PLAN.md").write_text("# Plan\\n")
+        owned = r / "src" / "task"
+        owned.mkdir(parents=True)
+        (owned / "existing.txt").write_text("already satisfied\\n")
+        governance = {
+            "schema_version": 1,
+            "planning_authority": {
+                "sets": [{
+                    "id": "default",
+                    "members": [{
+                        "path": "PLAN.md",
+                        "role": "source",
+                        "repair": "repairable",
+                        "required": True,
+                    }],
+                    "validators": [],
+                    "reconcilers": [],
+                }],
+            },
+            "tasks": {
+                "sources": [{
+                    "id": "tasks",
+                    "kind": "static",
+                    "authority_sets": ["default"],
+                    "tasks": [{
+                        "schema_version": 1,
+                        "id": "T1",
+                        "authority_sets": ["default"],
+                        "depends_on": [],
+                        "owned_paths": ["src/task/**"],
+                        "evidence_paths": ["evidence/T1/**"],
+                        "runtime_scratch_paths": [".scratch/T1/**"],
+                        "verification": ["existing implementation is sufficient"],
+                        "commit_subject": None,
+                        "metadata": {},
+                    }],
+                }],
+                "execution_mode": "single-writer",
+                "strict_dependencies": True,
+            },
+            "control_surfaces": [],
+        }
+        gov = r / ".claude-auto" / "governance.json"
+        gov.parent.mkdir(parents=True)
+        gov.write_text(json.dumps(governance, indent=2) + "\\n")
+        subprocess.run(["git", "-C", str(r), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(r), "commit", "-qm", "governed base"],
+            check=True,
+        )
+
+        capture = Path(dh) / "capture.jsonl"
+        make_fake_claude(Path(bd))
+        monkeypatch.setenv("PATH", bd + os.pathsep + os.environ.get("PATH", ""))
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", dh)
+        monkeypatch.setenv("FAKE_CLAUDE_CAPTURE", str(capture))
+        monkeypatch.setenv(
+            "FAKE_GOAL_RESULT",
+            "AUTONOMY_TASK_RESULT: "
+            "{\\\"task_id\\\":\\\"T1\\\","
+            "\\\"status\\\":\\\"READY_FOR_ACCEPTANCE\\\","
+            "\\\"summary\\\":\\\"task is already satisfied\\\","
+            "\\\"verification_claims\\\":[\\\"inspected current implementation\\\"]}"
+            "\\nAUTONOMY_STATUS: CONTINUE"
+            "\\nAUTONOMY_SUMMARY: task ready for package acceptance"
+            "\\nAUTONOMY_PLAN_IMPACT: NONE"
+            "\\nAUTONOMY_PHASE_BOUNDARY: NO",
+        )
+
+        rc = ca.main([
+            "run",
+            "--model-qualification",
+            "off",
+            "--repo",
+            str(r),
+            "--objective",
+            "Satisfy the governed repository task",
+            "--max-cycles",
+            "1",
+            "--max-turns",
+            "5",
+            "--security-scanners",
+            "off",
+        ])
+        assert rc == 4
+
+        sd = ca.repo_state_dir(r)
+        state = json.loads((sd / "state.json").read_text())
+        accepted = state["accepted_tasks"]["T1"]
+        assert accepted["product_sha"] == subprocess.run(
+            ["git", "-C", str(r), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        assert state["active_task_id"] is None
+        assert state.get("active_task_worktree") is None
+
+        calls = [
+            json.loads(line)
+            for line in capture.read_text().splitlines()
+            if line.strip()
+        ]
+        worker = next(
+            row
+            for row in calls
+            if row["args"]
+            and row["args"][-1].startswith("/goal ")
+            and "AUTONOMY_TASK_RESULT" not in row["args"][-1]
+        )
+        # The worker's goal prompt describes the protocol but executes from the
+        # external package-owned task worktree, never from primary checkout.
+        assert Path(worker["cwd"]).resolve() != r.resolve()
+        assert Path(worker["cwd"]).resolve().is_relative_to(
+            (sd / "tasks" / "workspaces").resolve()
+        )
+        assert not Path(worker["cwd"]).exists()
+        assert ca.task_readiness(r)["T1"]["status"] == "ACCEPTED"
 
 
 def test_goal_engine_uses_goal_and_compact_logging(monkeypatch):
