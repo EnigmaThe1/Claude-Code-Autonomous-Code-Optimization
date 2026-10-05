@@ -169,6 +169,64 @@ def _persist(state_root: Path, record: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def capture_git_ref_binding(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    root = root.expanduser().resolve()
+    cp = _git(
+        root,
+        "for-each-ref",
+        "--format=%(refname)%09%(objectname)",
+        state_dir=state_dir,
+    )
+    if cp.returncode != 0:
+        detail = cp.stderr or cp.stdout or "git for-each-ref failed"
+        raise TaskWorkspaceError(detail.strip()[:1600])
+
+    rows: list[dict[str, str]] = []
+    for raw in cp.stdout.splitlines():
+        if not raw:
+            continue
+        try:
+            name, object_id = raw.split("\t", 1)
+        except ValueError as exc:
+            raise TaskWorkspaceError(
+                "unexpected Git ref record while binding task workspace"
+            ) from exc
+        digest = object_id.strip().lower()
+        if not name.startswith("refs/") or not (
+            40 <= len(digest) <= 64
+            and all(ch in "0123456789abcdef" for ch in digest)
+        ):
+            raise TaskWorkspaceError(
+                "unexpected Git ref identity while binding task workspace"
+            )
+        rows.append({"name": name, "object": digest})
+
+    rows.sort(key=lambda row: row["name"].encode("utf-8"))
+    return {"schema_version": 1, "refs": rows}
+
+
+def _ref_binding_digest(binding: dict[str, Any]) -> str:
+    refs = binding.get("refs")
+    if (
+        binding.get("schema_version") != 1
+        or not isinstance(refs, list)
+        or any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("name"), str)
+            or not isinstance(row.get("object"), str)
+            for row in refs
+        )
+    ):
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord Git ref binding is malformed"
+        )
+    return _digest(binding)
+
+
 def _workspace_path_is_owned(state_root: Path, worktree: Path) -> bool:
     parent = _workspace_parent(state_root).resolve()
     target = worktree.expanduser().resolve()
