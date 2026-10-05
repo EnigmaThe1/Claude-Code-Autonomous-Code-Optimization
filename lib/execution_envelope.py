@@ -332,16 +332,24 @@ def _sparse_checkout_enabled(root: Path) -> bool:
     return cp.returncode == 0 and str(cp.stdout).strip().lower() == "true"
 
 
-def _envelope_path(root: Path) -> Path:
-    return repo_state_dir(root) / "tasks" / "execution-envelope.json"
+def _state_root(root: Path, state_dir: Path | None = None) -> Path:
+    return (
+        state_dir.expanduser().resolve()
+        if state_dir is not None
+        else repo_state_dir(root)
+    )
 
 
-def _violation_path(root: Path) -> Path:
-    return repo_state_dir(root) / "tasks" / "violation.json"
+def _envelope_path(root: Path, *, state_dir: Path | None = None) -> Path:
+    return _state_root(root, state_dir) / "tasks" / "execution-envelope.json"
 
 
-def _history_dir(root: Path) -> Path:
-    return ensure_private_dir(repo_state_dir(root) / "tasks" / "history")
+def _violation_path(root: Path, *, state_dir: Path | None = None) -> Path:
+    return _state_root(root, state_dir) / "tasks" / "violation.json"
+
+
+def _history_dir(root: Path, *, state_dir: Path | None = None) -> Path:
+    return ensure_private_dir(_state_root(root, state_dir) / "tasks" / "history")
 
 
 def _task_record(task_source_set: dict[str, Any], task_id: str) -> dict[str, Any]:
@@ -465,8 +473,13 @@ def prepare_execution_envelope(
     }
 
 
-def persist_execution_envelope(root: Path, record: dict[str, Any]) -> None:
-    path = _envelope_path(root.expanduser().resolve())
+def persist_execution_envelope(
+    root: Path,
+    record: dict[str, Any],
+    *,
+    state_dir: Path | None = None,
+) -> None:
+    path = _envelope_path(root.expanduser().resolve(), state_dir=state_dir)
     ensure_private_dir(path.parent)
     json_dump(path, record)
 
@@ -497,9 +510,11 @@ def load_active_execution_envelope(
     *,
     require_current: bool = True,
     require_head: bool = True,
+    state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
-    state = load_json(repo_state_dir(root) / "state.json", {})
+    state_root = _state_root(root, state_dir)
+    state = load_json(state_root / "state.json", {})
     if not isinstance(state, dict):
         raise ExecutionEnvelopeError("durable repository state is malformed")
 
@@ -509,7 +524,10 @@ def load_active_execution_envelope(
     if not all(isinstance(value, str) and value for value in (task_id, task_sha, envelope_sha)):
         raise ExecutionEnvelopeError("no active ExecutionEnvelope is bound to durable state")
 
-    record = _read_json_exact(_envelope_path(root), label="active ExecutionEnvelope")
+    record = _read_json_exact(
+        _envelope_path(root, state_dir=state_root),
+        label="active ExecutionEnvelope",
+    )
     semantic = _semantic_from_record(record)
     actual = _digest(semantic)
     if actual != record.get("execution_envelope_sha256") or actual != envelope_sha:
@@ -528,6 +546,7 @@ def load_active_execution_envelope(
             root,
             require_current=require_current,
             require_state_binding=True,
+            state_dir=state_root,
         )
     except TaskSourceError as exc:
         raise ExecutionEnvelopeError(str(exc)) from exc
@@ -796,6 +815,7 @@ def record_task_violation(
     envelope: dict[str, Any],
     violations: list[dict[str, Any]],
     tool_batch: dict[str, Any] | None = None,
+    state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     core = {
@@ -813,7 +833,7 @@ def record_task_violation(
         "violation_sha256": _digest(core),
         "recorded_at": utcnow(),
     }
-    path = _violation_path(root)
+    path = _violation_path(root, state_dir=state_dir)
     ensure_private_dir(path.parent)
     json_dump(path, record)
     return record
@@ -824,9 +844,11 @@ def record_task_authority_failure(
     *,
     reason: str,
     tool_batch: dict[str, Any] | None = None,
+    state_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
-    state = load_json(repo_state_dir(root) / "state.json", {})
+    state_root = _state_root(root, state_dir)
+    state = load_json(state_root / "state.json", {})
     if not isinstance(state, dict):
         state = {}
 
@@ -838,7 +860,7 @@ def record_task_authority_failure(
     # bound input moved. Preserve the original envelope identity for audit only
     # when the persisted envelope's own semantic digest is still valid. This
     # does not authorise anything and does not relax the fail-closed decision.
-    path = _envelope_path(root)
+    path = _envelope_path(root, state_dir=state_root)
     if path.exists():
         try:
             raw = _read_json_exact(path, label="active ExecutionEnvelope")
@@ -877,15 +899,19 @@ def record_task_authority_failure(
         "violation_sha256": _digest(core),
         "recorded_at": utcnow(),
     }
-    path = _violation_path(root)
+    path = _violation_path(root, state_dir=state_root)
     ensure_private_dir(path.parent)
     json_dump(path, record)
     return record
 
 
-def load_task_violation(root: Path) -> dict[str, Any] | None:
+def load_task_violation(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any] | None:
     root = root.expanduser().resolve()
-    path = _violation_path(root)
+    path = _violation_path(root, state_dir=state_dir)
     if not path.exists():
         return None
     record = _read_json_exact(path, label="task violation record")
@@ -905,9 +931,16 @@ def load_task_violation(root: Path) -> dict[str, Any] | None:
     return record
 
 
-def clear_task_violation(root: Path) -> None:
+def clear_task_violation(
+    root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> None:
     try:
-        _violation_path(root.expanduser().resolve()).unlink()
+        _violation_path(
+            root.expanduser().resolve(),
+            state_dir=state_dir,
+        ).unlink()
     except FileNotFoundError:
         pass
 
@@ -916,21 +949,23 @@ def invalidate_task_authority_after_head_change(
     root: Path,
     *,
     reason: str,
+    state_dir: Path | None = None,
 ) -> None:
     root = root.expanduser().resolve()
-    state_path = repo_state_dir(root) / "state.json"
+    state_root = _state_root(root, state_dir)
+    state_path = state_root / "state.json"
     state = load_json(state_path, {})
     if not isinstance(state, dict):
         raise ExecutionEnvelopeError("durable repository state is malformed")
 
-    envelope_path = _envelope_path(root)
+    envelope_path = _envelope_path(root, state_dir=state_root)
     if envelope_path.exists():
         try:
             record = _read_json_exact(envelope_path, label="active ExecutionEnvelope")
             digest = str(record.get("execution_envelope_sha256") or "unknown")
         except ExecutionEnvelopeError:
             digest = "corrupt"
-        target = _history_dir(root) / f"execution-envelope-{digest[:64]}.json"
+        target = _history_dir(root, state_dir=state_root) / f"execution-envelope-{digest[:64]}.json"
         try:
             if target.exists():
                 target.unlink()
@@ -940,9 +975,9 @@ def invalidate_task_authority_after_head_change(
                 f"unable to archive stale ExecutionEnvelope after HEAD change: {exc}"
             ) from exc
 
-    violation_path = _violation_path(root)
+    violation_path = _violation_path(root, state_dir=state_root)
     if violation_path.exists():
-        target = _history_dir(root) / f"violation-{hashlib.sha256(reason.encode()).hexdigest()[:20]}-{int(os.getpid())}.json"
+        target = _history_dir(root, state_dir=state_root) / f"violation-{hashlib.sha256(reason.encode()).hexdigest()[:20]}-{int(os.getpid())}.json"
         try:
             if target.exists():
                 target.unlink()
