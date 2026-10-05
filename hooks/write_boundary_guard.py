@@ -216,8 +216,37 @@ def _planning_policy_invalid() -> bool:
 def _protected_target(target: Path) -> bool:
     try:
         resolved = target.resolve(strict=False)
+        task_root: Path | None = None
+        if os.environ.get("CLAUDE_AUTO_TASK_WORKSPACE") == "1":
+            root_raw = os.environ.get("CLAUDE_AUTO_REPO_ROOT")
+            if root_raw:
+                task_root = Path(root_raw).expanduser().resolve(strict=False)
+
         for protected in _protected_paths():
             protected = protected.resolve(strict=False)
+
+            # P4 task worktrees deliberately live below package-owned
+            # coordinator state.  The worktree itself is the worker's product
+            # mutation surface, so an ancestor semantic-state directory must
+            # not make every legitimate task file look protected.  This is a
+            # narrow carve-out: it applies only to targets inside the exact
+            # selected task root.  Protected descendants inside that task root
+            # (governance/control files) are still denied, and writes outside
+            # the task root remain protected normally.
+            if task_root is not None:
+                try:
+                    resolved.relative_to(task_root)
+                    task_is_target_root = True
+                except ValueError:
+                    task_is_target_root = False
+                if task_is_target_root:
+                    try:
+                        task_root.relative_to(protected)
+                        if protected != task_root:
+                            continue
+                    except ValueError:
+                        pass
+
             if resolved == protected:
                 return True
             try:
