@@ -442,6 +442,151 @@ def _bind_workspace_state(
     json_dump(state_root / "state.json", state)
 
 
+def evaluate_task_workspace_boundary(
+    coordinator_root: Path,
+    *,
+    task_root: Path | None = None,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = _state_root(coordinator_root, state_dir)
+    record = load_active_task_workspace(
+        coordinator_root,
+        state_dir=state_root,
+    )
+    if record is None:
+        return {"status": "UNCONFIGURED", "violations": []}
+
+    violations: list[dict[str, str]] = []
+    if not _primary_matches_record(
+        coordinator_root,
+        record,
+        state_root=state_root,
+    ):
+        violations.append({
+            "path": "PRIMARY",
+            "reason": (
+                "coordinator primary checkout changed since task workspace "
+                "creation"
+            ),
+        })
+
+    expected_refs = record.get("git_ref_binding_sha256")
+    if isinstance(expected_refs, str):
+        try:
+            current_binding = capture_git_ref_binding(
+                coordinator_root,
+                state_dir=state_root,
+            )
+            current_digest = _ref_binding_digest(current_binding)
+        except TaskWorkspaceError as exc:
+            violations.append({
+                "path": "GIT_REFS",
+                "reason": f"unable to verify coordinator Git refs: {exc}",
+            })
+        else:
+            if current_digest != expected_refs:
+                violations.append({
+                    "path": "GIT_REFS",
+                    "reason": (
+                        "coordinator Git refs changed outside package-owned "
+                        "task operations"
+                    ),
+                })
+
+    recorded_task = Path(str(record["task_worktree"])).expanduser().resolve()
+    effective_task = (
+        task_root.expanduser().resolve()
+        if task_root is not None
+        else recorded_task
+    )
+    if effective_task != recorded_task:
+        violations.append({
+            "path": "TASK_ROOT",
+            "reason": (
+                "worker task root does not match the durable "
+                "TaskWorkspaceRecord"
+            ),
+        })
+    elif not effective_task.exists():
+        violations.append({
+            "path": "TASK_ROOT",
+            "reason": "recorded task worktree is missing",
+        })
+    else:
+        try:
+            if git_head(
+                effective_task,
+                state_dir=state_root,
+            ).lower() != str(record["product_base_sha"]).lower():
+                violations.append({
+                    "path": "TASK_HEAD",
+                    "reason": (
+                        "task worktree HEAD moved away from the recorded "
+                        "product base"
+                    ),
+                })
+            if git_branch(
+                effective_task,
+                state_dir=state_root,
+            ) != record["task_branch"]:
+                violations.append({
+                    "path": "TASK_BRANCH",
+                    "reason": (
+                        "task worktree branch differs from the recorded "
+                        "package task branch"
+                    ),
+                })
+        except ExecutionEnvelopeError as exc:
+            violations.append({
+                "path": "TASK_HEAD",
+                "reason": (
+                    "unable to verify task worktree Git identity: "
+                    + str(exc)
+                ),
+            })
+
+    return {
+        "status": "VALID" if not violations else "VIOLATION",
+        "task_id": record["task_id"],
+        "task_workspace_sha256": record["task_workspace_sha256"],
+        "violations": violations,
+    }
+
+
+def mark_task_workspace_guard_failure(
+    coordinator_root: Path,
+    *,
+    violations: list[dict[str, str]],
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = _state_root(coordinator_root, state_dir)
+    record = load_active_task_workspace(
+        coordinator_root,
+        state_dir=state_root,
+    )
+    if record is None:
+        raise TaskWorkspaceError("no active TaskWorkspaceRecord exists")
+
+    next_state = (
+        "PRIMARY_DRIFT"
+        if any(row.get("path") == "PRIMARY" for row in violations)
+        else "BLOCKED"
+    )
+    updated = _persist(
+        state_root,
+        {
+            **record,
+            "lifecycle_state": next_state,
+            "guard_violations": violations[:100],
+            "guard_failed_at": utcnow(),
+        },
+    )
+    _bind_workspace_state(state_root, updated)
+    return updated
+
+
 def _resume_workspace(
     coordinator_root: Path,
     record: dict[str, Any],
