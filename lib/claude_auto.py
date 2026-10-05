@@ -256,9 +256,11 @@ from task_workspace import (
     TaskWorkspaceError,
     ensure_supervisor_task_workspace,
     load_active_task_workspace,
+    task_workspace_status,
 )
 from task_acceptance import (
     TaskAcceptanceError,
+    abort_task_workspace,
     accept_verified_task,
     cleanup_accepted_task_workspace,
     reopen_task_candidate_for_repair,
@@ -266,6 +268,7 @@ from task_acceptance import (
     verify_task_candidate_deterministic,
     verify_task_candidate_independent,
 )
+from operator_authority import require_top_level_operator
 from environment_policy import apply_resume_environment, capture_resume_environment
 from git_trust import git_trust_action
 from promotion_policy import promotion_policy_action
@@ -3326,6 +3329,34 @@ def build_parser() -> argparse.ArgumentParser:
     return _build_parser(VERSION)
 
 
+def _p4_task_cli_action(args: argparse.Namespace) -> int:
+    root = find_repo_root(getattr(args, "repo", None))
+    action = getattr(args, "tasks_command", None)
+    try:
+        if action == "workspace-status":
+            result = task_workspace_status(root)
+        elif action == "abort":
+            require_top_level_operator(root, "P4 task workspace abort")
+            result = abort_task_workspace(
+                root,
+                reason=str(
+                    getattr(args, "reason", None)
+                    or "task workspace aborted by operator"
+                ),
+            )
+        else:
+            return task_action(args, find_repo_root=find_repo_root)
+    except (TaskWorkspaceError, TaskAcceptanceError, OSError, ValueError) as exc:
+        print(json.dumps({
+            "status": "BLOCKED",
+            "repository": str(root),
+            "error": str(exc),
+        }, indent=2))
+        return 2
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 2 if result.get("status") in {"BLOCKED", "PRESERVED_MANUAL"} else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "doctor": return doctor(args)
@@ -3357,7 +3388,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "promotion": return promotion_policy_action(args, find_repo_root=find_repo_root)
     if args.command == "planning-repair": return planning_repair_action(args, find_repo_root=find_repo_root)
     if args.command == "governance": return governance_action(args, find_repo_root=find_repo_root)
-    if args.command == "tasks": return task_action(args, find_repo_root=find_repo_root)
+    if args.command == "tasks": return _p4_task_cli_action(args)
     if args.command == "promote-ff": return promote_ff_action(args, find_repo_root=find_repo_root)
     if args.command == "cleanup-untracked": return cleanup_untracked_action(args, find_repo_root=find_repo_root)
     if args.command == "models":
