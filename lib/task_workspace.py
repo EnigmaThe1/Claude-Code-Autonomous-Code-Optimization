@@ -27,6 +27,7 @@ from execution_envelope import (
     git_branch,
     git_head,
     load_active_execution_envelope,
+    task_owned_mode,
 )
 from git_trust import trusted_git_env
 from governance_contract import canonical_json_bytes
@@ -975,6 +976,150 @@ def _begin_locked(
         preparing,
         state_root=state_root,
     )
+
+
+def ensure_supervisor_task_workspace(
+    coordinator_root: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Resolve/reuse one P4 task workspace while caller owns the supervisor lease."""
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = _state_root(coordinator_root, state_dir)
+    try:
+        governed = task_owned_mode(coordinator_root)
+    except ExecutionEnvelopeError as exc:
+        raise TaskWorkspaceError(str(exc)) from exc
+    if not governed:
+        return {
+            "status": "UNCONFIGURED",
+            "repository": str(coordinator_root),
+        }
+
+    existing = load_active_task_workspace(
+        coordinator_root,
+        state_dir=state_root,
+    )
+    if existing is not None:
+        lifecycle = str(existing["lifecycle_state"])
+        if lifecycle in {"PREPARING", "ACTIVE"}:
+            resumed = _begin_locked(
+                coordinator_root,
+                task_id=str(existing["task_id"]),
+                state_dir=state_root,
+            )
+            return {
+                "status": "ACTIVE",
+                "reused": True,
+                **resumed,
+            }
+        if lifecycle in {
+            "CANDIDATE",
+            "VERIFYING",
+            "VERIFIED_PENDING_PROMOTION",
+            "PROMOTING",
+            "ACCEPTED_PENDING_CLEANUP",
+        }:
+            return {
+                "status": "CHECKPOINT",
+                "task_id": existing["task_id"],
+                "lifecycle_state": lifecycle,
+                "task_worktree": existing["task_worktree"],
+                "task_workspace_sha256": existing[
+                    "task_workspace_sha256"
+                ],
+                "candidate_sha": existing.get("candidate_sha"),
+            }
+        return {
+            "status": "BLOCKED",
+            "task_id": existing["task_id"],
+            "lifecycle_state": lifecycle,
+            "task_worktree": existing["task_worktree"],
+            "reason": (
+                "active task workspace requires explicit reconciliation "
+                f"before worker execution: {lifecycle}"
+            ),
+        }
+
+    state = load_json(state_root / "state.json", {})
+    if not isinstance(state, dict):
+        raise TaskWorkspaceError("durable coordinator state is malformed")
+    if _state_has_active_task(state):
+        raise TaskWorkspaceError(
+            "legacy/P3 active task authority exists without a P4 workspace; "
+            "migration/reconciliation is required before P4 worker execution"
+        )
+
+    try:
+        task_set = resolve_task_sources(
+            coordinator_root,
+            persist=True,
+        )
+    except TaskSourceError as exc:
+        raise TaskWorkspaceError(str(exc)) from exc
+    if task_set.get("status") != "READY":
+        raise TaskWorkspaceError(
+            "repository TaskSources did not resolve to a READY TaskSourceSet"
+        )
+    state = load_json(state_root / "state.json", {})
+    if not isinstance(state, dict):
+        raise TaskWorkspaceError("durable coordinator state is malformed")
+    try:
+        readiness = task_readiness(
+            coordinator_root,
+            task_set=task_set,
+            state=state,
+            state_dir=state_root,
+            authority_root=coordinator_root,
+        )
+        frontier = ready_frontier(
+            coordinator_root,
+            task_set=task_set,
+            state=state,
+            state_dir=state_root,
+            authority_root=coordinator_root,
+        )
+    except TaskAuthorityError as exc:
+        raise TaskWorkspaceError(str(exc)) from exc
+
+    if not frontier:
+        unresolved = [
+            task_id
+            for task_id, row in sorted(readiness.items())
+            if row.get("status") != "ACCEPTED"
+        ]
+        if not unresolved:
+            return {
+                "status": "COMPLETE",
+                "task_source_set_sha256": task_set.get(
+                    "task_source_set_sha256"
+                ),
+                "ready_frontier": [],
+                "readiness": readiness,
+            }
+        return {
+            "status": "BLOCKED",
+            "task_source_set_sha256": task_set.get(
+                "task_source_set_sha256"
+            ),
+            "ready_frontier": [],
+            "unresolved_task_ids": unresolved,
+            "readiness": readiness,
+            "reason": "no dependency-safe READY TaskSpec is available",
+        }
+
+    selected = frontier[0]
+    started = _begin_locked(
+        coordinator_root,
+        task_id=selected,
+        state_dir=state_root,
+    )
+    return {
+        "status": "ACTIVE",
+        "reused": False,
+        "ready_frontier": frontier,
+        **started,
+    }
 
 
 def begin_task_workspace(
