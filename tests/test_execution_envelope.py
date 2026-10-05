@@ -1889,6 +1889,16 @@ def test_p4_rejected_candidate_reopens_and_reseals_replacement(monkeypatch):
         assert reopened["status"] == "ACTIVE"
         assert reopened["rejected_candidate_sha"] == first_sha
         assert "independent verifier found a defect" in reopened["repair_findings"]
+        rejected_ref = reopened["rejected_candidate_ref"]
+        assert isinstance(rejected_ref, str)
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            "--hash",
+            rejected_ref,
+        ).stdout.strip() == first_sha
         assert _run(
             primary,
             "git",
@@ -1928,6 +1938,7 @@ def test_p4_rejected_candidate_reopens_and_reseals_replacement(monkeypatch):
         ).stdout.strip() == second_sha
 
         _run(primary, "git", "update-ref", "-d", second_ref)
+        _run(primary, "git", "update-ref", "-d", rejected_ref)
         _run(
             primary,
             "git",
