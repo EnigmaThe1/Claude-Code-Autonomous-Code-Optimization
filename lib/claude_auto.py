@@ -147,6 +147,7 @@ from protocols import (
     parse_runtime_verify_gate,
     parse_security_review_gate,
     parse_status,
+    parse_task_result,
 )
 from control_plane import (
     ControlPlaneRetryableError,
@@ -250,6 +251,20 @@ from task_authority import (
     active_task_prompt_context,
     ensure_supervisor_task_activation,
     task_action,
+)
+from task_workspace import (
+    TaskWorkspaceError,
+    ensure_supervisor_task_workspace,
+    load_active_task_workspace,
+)
+from task_acceptance import (
+    TaskAcceptanceError,
+    accept_verified_task,
+    cleanup_accepted_task_workspace,
+    reopen_task_candidate_for_repair,
+    seal_task_candidate,
+    verify_task_candidate_deterministic,
+    verify_task_candidate_independent,
 )
 from environment_policy import apply_resume_environment, capture_resume_environment
 from git_trust import git_trust_action
@@ -681,14 +696,16 @@ def _run_one_goal(
     verifier_model: str | None,
     researcher_model: str | None,
     cycle: int,
+    settings_path_override: Path | None = None,
+    force_hermetic_settings: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], dict[str, Any], dict[str, Any], str, str | None, dict[str, Any] | None]:
     overrides = set(getattr(args, "_permission_overrides", []) or [])
     worker_overrides = worker_permission_overrides(overrides)
     worker_grants = worker_permission_grants(
         list(getattr(args, "_permission_grants", []) or [])
     )
-    effective_settings_path = None
-    if worker_overrides:
+    effective_settings_path = settings_path_override
+    if worker_overrides and effective_settings_path is None:
         prof = load_json(sd / "profile.json", {})
         effective_settings_path = sd / f"settings-effective-{args.profile}-{args.memory_mode}.json"
         json_dump(
@@ -706,7 +723,8 @@ def _run_one_goal(
         permission_overrides=worker_overrides,
     )
     setting_sources = "" if (
-        getattr(args, "session_settings", "compatibility") == "hermetic"
+        force_hermetic_settings
+        or getattr(args, "session_settings", "compatibility") == "hermetic"
         or bool(worker_overrides)
     ) else "user,project,local"
     cmd += [
