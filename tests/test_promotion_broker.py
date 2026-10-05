@@ -501,6 +501,7 @@ def _p5_attestation_metadata(
     assert target_snapshot is not None
     return {
         "repair_envelope_sha256": _evidence("repair-envelope"),
+        "base_sha": base,
         "selected_authority_sets": ["a"],
         "base_authority_content_sha256": authority_content_sha256(
             base_snapshot
