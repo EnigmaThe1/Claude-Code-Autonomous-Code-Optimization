@@ -638,7 +638,6 @@ def _resume_workspace(
                     acquire_lease=False,
                     state_dir=state_root,
                     authority_root=coordinator_root,
-                    git_state_dir=state_root,
                 )
             except TaskAuthorityError as exc:
                 raise TaskWorkspaceError(str(exc)) from exc
