@@ -682,7 +682,7 @@ def _guard_bash(
             if target is None:
                 return "deny", f"Claude Auto could not safely resolve Bash write target: {raw}"
             if _protected_target(target):
-                return "deny", f"Bash mutation of a protected repository/package path is denied: {target}"
+                return "deny", f"Bash mutation of a protected repository path is denied: {target}"
             lexical = _lexical_target(cwd, raw, effective_vars)
             if lexical is None and not _outside(root, target) and _task_owned_mode(root):
                 return "deny", f"Claude Auto could not derive task authority for Bash write target: {raw}"
@@ -748,7 +748,7 @@ def main() -> int:
             return 0
         root, target = _root_and_target(root_raw, str(raw))
         if _protected_target(target):
-            decision("deny", f"Direct mutation of a protected repository/package path is denied: {target}")
+            decision("deny", f"Direct mutation of a protected repository path is denied: {target}")
             return 0
         lexical = _direct_lexical_target(root, str(raw))
         if lexical is None and not _outside(root, target) and _task_owned_mode(root):
