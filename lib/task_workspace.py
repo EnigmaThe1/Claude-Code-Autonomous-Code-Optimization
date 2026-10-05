@@ -293,6 +293,60 @@ def load_active_task_workspace(
     return record
 
 
+def candidate_ref_for_workspace(record: dict[str, Any]) -> str:
+    branch = str(record.get("task_branch") or "")
+    prefix = "claude-auto/task/"
+    if not branch.startswith(prefix):
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord task branch is not package-owned"
+        )
+    token = branch[len(prefix):]
+    if not token or any(
+        ch not in "0123456789abcdef" for ch in token.lower()
+    ):
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord task branch token is malformed"
+        )
+    return f"refs/claude-auto/task-candidates/{token.lower()}"
+
+
+def update_task_workspace_package_state(
+    coordinator_root: Path,
+    *,
+    updates: dict[str, Any],
+    state_dir: Path | None = None,
+    expected_states: set[str] | None = None,
+    refresh_ref_binding: bool = False,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    state_root = _state_root(coordinator_root, state_dir)
+    record = load_active_task_workspace(
+        coordinator_root,
+        state_dir=state_root,
+    )
+    if record is None:
+        raise TaskWorkspaceError("no active TaskWorkspaceRecord exists")
+    if expected_states is not None and record["lifecycle_state"] not in expected_states:
+        raise TaskWorkspaceError(
+            "TaskWorkspaceRecord lifecycle changed unexpectedly: "
+            f"{record['lifecycle_state']!r}"
+        )
+
+    next_record = {**record, **updates}
+    if refresh_ref_binding:
+        binding = capture_git_ref_binding(
+            coordinator_root,
+            state_dir=state_root,
+        )
+        next_record["git_ref_binding"] = binding
+        next_record["git_ref_binding_sha256"] = _ref_binding_digest(
+            binding
+        )
+    persisted = _persist(state_root, next_record)
+    _bind_workspace_state(state_root, persisted)
+    return persisted
+
+
 def _branch_exists(
     root: Path,
     branch: str,
@@ -855,6 +909,7 @@ def _begin_locked(
         ).encode("utf-8")
     ).hexdigest()[:16]
     task_branch = f"claude-auto/task/{token}"
+    candidate_ref = f"refs/claude-auto/task-candidates/{token}"
     worktree = (
         _workspace_parent(state_root)
         / token
@@ -869,6 +924,18 @@ def _begin_locked(
         raise TaskWorkspaceError(
             "stale package task branch exists without a durable workspace record: "
             + task_branch
+        )
+    stale_candidate = _git(
+        coordinator_root,
+        "show-ref",
+        "--verify",
+        candidate_ref,
+        state_dir=state_root,
+    )
+    if stale_candidate.returncode == 0:
+        raise TaskWorkspaceError(
+            "stale package task candidate ref exists without a durable "
+            "workspace record: " + candidate_ref
         )
     if worktree.exists():
         raise TaskWorkspaceError(
