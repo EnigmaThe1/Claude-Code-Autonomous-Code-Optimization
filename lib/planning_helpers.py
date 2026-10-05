@@ -24,6 +24,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+from authority_set import AuthoritySetError, _resolve_selector, _tree
 from execution import run_repository_command
 from git_trust import trusted_git_env
 from governance_contract import canonical_json_bytes
@@ -581,6 +582,282 @@ def normalise_generated_to_base(
                 f"unable to remove partial generated planning member {rel!r}: {exc}"
             ) from exc
     return normalised
+
+
+def _git_blob_bytes(
+    root: Path,
+    object_id: str,
+    *,
+    maximum: int = 32 * 1024 * 1024,
+) -> bytes:
+    size = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-s", object_id],
+        text=True,
+        capture_output=True,
+        env=trusted_git_env(root),
+    )
+    if size.returncode != 0:
+        raise PlanningHelperError(
+            f"unable to inspect exact planning helper blob {object_id}"
+        )
+    try:
+        count = int(size.stdout.strip())
+    except ValueError as exc:
+        raise PlanningHelperError(
+            f"invalid exact planning helper blob size for {object_id}"
+        ) from exc
+    if count < 0 or count > maximum:
+        raise PlanningHelperError(
+            f"planning helper input blob {object_id} exceeds maximum supported size"
+        )
+    cp = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "blob", object_id],
+        capture_output=True,
+        env=trusted_git_env(root),
+    )
+    if cp.returncode != 0:
+        raise PlanningHelperError(
+            f"unable to read exact planning helper blob {object_id}"
+        )
+    payload = bytes(cp.stdout)
+    if len(payload) != count:
+        raise PlanningHelperError(
+            f"planning helper blob {object_id} changed size during read"
+        )
+    return payload
+
+
+def _exact_ref_inputs(
+    root: Path,
+    ref: str,
+    selectors: list[str],
+) -> list[dict[str, Any]]:
+    try:
+        tree = _tree(root, ref)
+    except AuthoritySetError as exc:
+        raise PlanningHelperError(str(exc)) from exc
+    out: dict[str, dict[str, Any]] = {}
+    total = 0
+    for selector in selectors:
+        try:
+            matches = _resolve_selector(selector, tree, required=True)
+        except AuthoritySetError as exc:
+            raise PlanningHelperError(str(exc)) from exc
+        for entry in matches:
+            mode = entry["mode"]
+            kind = entry["type"]
+            rel = entry["path"]
+            if mode == "120000":
+                raise PlanningHelperError(
+                    f"validator input must not resolve a symlink: {rel}"
+                )
+            if mode == "160000" or kind == "commit":
+                raise PlanningHelperError(
+                    f"validator input must not cross a gitlink/submodule boundary: {rel}"
+                )
+            if kind != "blob" or mode not in {"100644", "100755"}:
+                raise PlanningHelperError(
+                    f"validator input must resolve a regular Git blob: {rel}"
+                )
+            payload = _git_blob_bytes(root, entry["object"])
+            total += len(payload)
+            if total > MAX_GENERATED_OUTPUT_BYTES:
+                raise PlanningHelperError(
+                    "validator exact input materialisation exceeds maximum total size"
+                )
+            out[rel] = {
+                "path": rel,
+                "git_mode": mode,
+                "blob": entry["object"],
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "_payload": payload,
+            }
+    return [
+        out[key]
+        for key in sorted(out, key=lambda item: item.encode("utf-8"))
+    ]
+
+
+def _run_validator_once(
+    coordinator_root: Path,
+    candidate_sha: str,
+    contract: dict[str, Any],
+    *,
+    runner: HelperRunner,
+) -> dict[str, Any]:
+    helper = contract["helper"]
+    caps = helper["capabilities"]
+    if caps.get("network") or caps.get("read_external"):
+        raise PlanningHelperError(
+            f"validator {helper['id']!r} requests capabilities that P5 v1 does not grant"
+        )
+    inputs = _exact_ref_inputs(
+        coordinator_root,
+        candidate_sha,
+        list(helper["inputs"]),
+    )
+    input_paths = {row["path"] for row in inputs}
+
+    with tempfile.TemporaryDirectory(
+        prefix=f"claude-auto-plan-validator-{helper['id']}-"
+    ) as td:
+        view = Path(td).resolve()
+        for row in inputs:
+            target = view / row["path"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(bytes(row["_payload"]))
+            target.chmod(0o755 if row["git_mode"] == "100755" else 0o644)
+
+        cwd = view if helper["cwd"] == "." else (view / helper["cwd"]).resolve()
+        try:
+            cwd.relative_to(view)
+        except ValueError as exc:
+            raise PlanningHelperError(
+                f"validator {helper['id']!r} cwd escapes temporary view"
+            ) from exc
+        cwd.mkdir(parents=True, exist_ok=True)
+
+        before = _scan_view(view)
+        result = runner(
+            view,
+            list(helper["argv"]),
+            timeout=int(helper["timeout_seconds"]),
+            trust_repo_scripts=False,
+            unrestricted_host=False,
+            read_only_root=False,
+            working_directory=cwd,
+            hidden_paths=[coordinator_root],
+            max_output_bytes=MAX_HELPER_PROCESS_OUTPUT_BYTES,
+            read_allowlist_only=True,
+        )
+        if not bool(result.get("sandboxed", False)):
+            raise PlanningHelperError(
+                f"validator {helper['id']!r} did not run inside a verified isolation boundary"
+            )
+        if not bool(result.get("environment_scrubbed", False)):
+            raise PlanningHelperError(
+                f"validator {helper['id']!r} did not run with a scrubbed environment"
+            )
+        after = _scan_view(view)
+        mutations = _changed_paths(before, after)
+        for rel in mutations:
+            if rel in input_paths:
+                raise PlanningHelperError(
+                    f"validator {helper['id']!r} mutated exact candidate input: {rel}"
+                )
+            if not _matches_any(list(helper["outputs"]), rel):
+                raise PlanningHelperError(
+                    f"validator {helper['id']!r} mutated undeclared ephemeral output: {rel}"
+                )
+            current = after.get(rel)
+            if current is not None and current.get("kind") != "file":
+                raise PlanningHelperError(
+                    f"validator {helper['id']!r} produced non-regular ephemeral output: {rel}"
+                )
+
+        output_state = _output_state(
+            before=before,
+            after=after,
+            output_selectors=list(helper["outputs"]),
+        )
+    return {
+        "helper_id": helper["id"],
+        "set_id": contract["set_id"],
+        "helper_contract_sha256": _digest(helper),
+        "candidate_sha": candidate_sha,
+        "input_state_sha256": _digest([
+            {
+                key: value
+                for key, value in row.items()
+                if key != "_payload"
+            }
+            for row in inputs
+        ]),
+        "input_paths": sorted(input_paths),
+        "mutated_paths": mutations,
+        "ephemeral_output_state": output_state,
+        "returncode": int(result.get("returncode", 1)),
+        "timed_out": bool(result.get("timed_out", False)),
+        "stdout_sha256": hashlib.sha256(
+            str(result.get("stdout") or "").encode("utf-8")
+        ).hexdigest(),
+        "stderr_sha256": hashlib.sha256(
+            str(result.get("stderr") or "").encode("utf-8")
+        ).hexdigest(),
+        "execution_boundary": result.get("execution_boundary"),
+        "sandboxed": True,
+        "environment_scrubbed": True,
+    }
+
+
+def run_planning_validators(
+    coordinator_root: Path,
+    candidate_sha: str,
+    envelope: dict[str, Any],
+    *,
+    runner: HelperRunner = run_repository_command,
+) -> dict[str, Any]:
+    coordinator_root = coordinator_root.expanduser().resolve()
+    contracts = list(envelope.get("validator_contracts", []))
+    receipts: list[dict[str, Any]] = []
+    for contract in sorted(
+        contracts,
+        key=lambda item: (item["set_id"], item["helper"]["id"]),
+    ):
+        first = _run_validator_once(
+            coordinator_root,
+            candidate_sha,
+            contract,
+            runner=runner,
+        )
+        second = _run_validator_once(
+            coordinator_root,
+            candidate_sha,
+            contract,
+            runner=runner,
+        )
+        if (
+            first["input_state_sha256"] != second["input_state_sha256"]
+            or first["returncode"] != second["returncode"]
+            or first["timed_out"] != second["timed_out"]
+        ):
+            raise PlanningHelperError(
+                f"validator {contract['helper']['id']!r} produced nondeterministic pass/fail results"
+            )
+        if first["timed_out"]:
+            raise PlanningHelperError(
+                f"validator {contract['helper']['id']!r} timed out"
+            )
+        if first["returncode"] != 0:
+            raise PlanningHelperError(
+                f"validator {contract['helper']['id']!r} failed with exit {first['returncode']}"
+            )
+        receipt = dict(first)
+        receipt["determinism_runs"] = [
+            {
+                "execution_boundary": first["execution_boundary"],
+                "returncode": first["returncode"],
+                "timed_out": first["timed_out"],
+            },
+            {
+                "execution_boundary": second["execution_boundary"],
+                "returncode": second["returncode"],
+                "timed_out": second["timed_out"],
+            },
+        ]
+        receipts.append(receipt)
+
+    semantic = {
+        "schema_version": 1,
+        "repair_envelope_sha256": envelope["repair_envelope_sha256"],
+        "candidate_sha": candidate_sha,
+        "receipts": receipts,
+    }
+    return {
+        **semantic,
+        "validator_receipt_bundle_sha256": _digest(semantic),
+    }
 
 
 def load_reconciler_bundle(
