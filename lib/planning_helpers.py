@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -580,6 +581,51 @@ def normalise_generated_to_base(
                 f"unable to remove partial generated planning member {rel!r}: {exc}"
             ) from exc
     return normalised
+
+
+def load_reconciler_bundle(
+    path: Path,
+    *,
+    repair_envelope_sha256: str,
+    base_sha: str,
+) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PlanningHelperError(
+            f"reconciler receipt bundle is unreadable or malformed: {exc}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise PlanningHelperError("reconciler receipt bundle must be a JSON object")
+    semantic = {
+        "schema_version": value.get("schema_version"),
+        "repair_envelope_sha256": value.get("repair_envelope_sha256"),
+        "base_sha": value.get("base_sha"),
+        "receipts": value.get("receipts"),
+        "normalised_generated_paths": value.get("normalised_generated_paths"),
+    }
+    if semantic["schema_version"] != 1:
+        raise PlanningHelperError("unsupported reconciler receipt bundle schema")
+    if semantic["repair_envelope_sha256"] != repair_envelope_sha256:
+        raise PlanningHelperError(
+            "reconciler receipt bundle RepairEnvelope binding is stale"
+        )
+    if semantic["base_sha"] != base_sha:
+        raise PlanningHelperError(
+            "reconciler receipt bundle base SHA binding is stale"
+        )
+    if not isinstance(semantic["receipts"], list):
+        raise PlanningHelperError("reconciler receipt bundle receipts are malformed")
+    if not isinstance(semantic["normalised_generated_paths"], list):
+        raise PlanningHelperError(
+            "reconciler receipt bundle normalised path evidence is malformed"
+        )
+    actual = _digest(semantic)
+    if value.get("reconciler_receipt_bundle_sha256") != actual:
+        raise PlanningHelperError(
+            "reconciler receipt bundle semantic integrity check failed"
+        )
+    return value
 
 
 def run_planning_reconcilers(
