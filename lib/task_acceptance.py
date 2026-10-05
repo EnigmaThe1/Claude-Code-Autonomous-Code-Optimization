@@ -340,22 +340,28 @@ def _ref_value(
     *,
     state_dir: Path,
 ) -> str | None:
+    # show-ref --verify reports a missing fully-qualified ref as a fatal
+    # "not a valid ref" on some supported Git versions. rev-parse --quiet is
+    # portable for this package-generated/validated ref namespace and cleanly
+    # distinguishes an absent ref from a present exact commit.
     cp = _git(
         root,
-        "show-ref",
+        "rev-parse",
         "--verify",
-        "--hash",
-        ref,
+        "--quiet",
+        f"{ref}^{{commit}}",
         state_dir=state_dir,
     )
-    if cp.returncode == 1:
-        return None
     if cp.returncode != 0:
-        detail = str(cp.stderr or cp.stdout or "git show-ref failed")
-        raise TaskAcceptanceError(detail.strip()[:1600])
+        return None
     value = str(cp.stdout or "").strip().lower()
-    if not value:
-        raise TaskAcceptanceError("candidate ref resolved to an empty object id")
+    if not (
+        40 <= len(value) <= 64
+        and all(ch in "0123456789abcdef" for ch in value)
+    ):
+        raise TaskAcceptanceError(
+            "candidate ref resolved to an invalid commit object id"
+        )
     return value
 
 
