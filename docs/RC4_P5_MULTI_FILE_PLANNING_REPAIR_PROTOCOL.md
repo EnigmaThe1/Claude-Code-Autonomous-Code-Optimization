@@ -238,9 +238,16 @@ Any match against:
 - an unselected AuthoritySet;
 - an immutable declaration;
 - the governance contract;
-- a control surface;
+- a planning control/configuration/executable surface;
 
 wins as a denial.
+
+P1 also protects declared helper and TaskSource **data inputs** from ordinary
+product workers. P5 does not reinterpret those data inputs as immutable planning
+control merely because they are inputs: when such a file is itself a selected
+`repairable` planning member, Planning Repair may edit it. Governance,
+verification configuration/scripts, helper executable code and explicit control
+surfaces remain forbidden.
 
 This prevents selecting one domain from becoming an indirect way to modify another domain.
 
