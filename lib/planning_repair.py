@@ -1420,6 +1420,7 @@ def _verify_p5_planning_repair(
             "findings": findings,
             "repository_unchanged": meta.get("repository_unchanged"),
             "repair_envelope_sha256": envelope_sha,
+            "base_sha": base,
             "selected_authority_sets": envelope["selected_authority_sets"],
             "base_authority_content_sha256": envelope[
                 "base_authority_content_sha256"
