@@ -68,20 +68,26 @@ See [Planning and repair](docs/PLANNING_AND_REPAIR.md).
 
 RC4 repositories may declare deterministic TaskSources in `.claude-auto/governance.json`. Claude Auto resolves those sources from exact committed Git objects into a package-owned TaskSourceSet. Built-in JSON/JSONL/TOML/static sources require no repository code; custom adapters run twice against only their declared exact-commit inputs inside the bounded read-only/no-network adapter boundary.
 
-For task-governed repositories, `claude-auto run` and supervised `start` resolve or reuse the dependency-safe READY task before a mutating Claude worker begins. The active ExecutionEnvelope binds that TaskSpec to the current AuthoritySet snapshot, product base, owned/evidence paths, runtime scratch paths and pre-task WIP.
+For task-governed repositories, `claude-auto run` resolves the dependency-safe READY task and performs mutating work in a package-owned resumable linked worktree rather than in the user's primary checkout. The coordinator checkout remains the authority root and is fingerprinted independently, while the active ExecutionEnvelope applies owned/evidence/scratch path authority to the task worktree.
 
-Useful inspection commands include:
+Useful inspection/control commands include:
 
 ```bash
 claude-auto tasks status --repo .
 claude-auto tasks show TASK_ID --repo .
 claude-auto tasks explain TASK_ID --repo .
-claude-auto tasks validate-stage --repo .
+claude-auto tasks workspace-status --repo .
+claude-auto tasks begin [TASK_ID] --repo .
+claude-auto tasks candidate --repo .
+claude-auto tasks verify --repo .
+claude-auto tasks accept --repo .
+claude-auto tasks cleanup --repo .
+claude-auto tasks abort --repo . --reason "..."
 ```
 
-Top-level operator recovery/control commands are available as `tasks activate`, `tasks reconcile` and `tasks deactivate`.
+Direct edits outside the task envelope are denied. Opaque command effects are checked after each Claude tool batch against actual task-worktree, primary-checkout and relevant Git-ref state. Scratch may be writable but cannot enter a candidate. Protected planning/control state wins over broad task selectors in every execution profile, including Unattended and Isolated Full.
 
-Direct edits outside the task envelope are denied. Opaque command effects are checked after each Claude tool batch against actual repository state. Scratch may be writable but cannot be staged/promoted; protected planning/control state wins over broad task selectors in every execution profile, including Unattended and Isolated Full. P3 keeps the user's primary checkout intact on a violation rather than destructively resetting it; P4 moves task mutation into a package-owned resumable task worktree.
+Candidate sealing is package-owned and keeps task-worktree HEAD pinned to the exact product base. Deterministic verification runs in detached exact-SHA worktrees using the existing verification-command authority; TaskSpec verification strings remain acceptance claims, not executable shell. A separate read-only Task Verifier must attest the exact candidate SHA before promotion. Successful acceptance persists a full integrity-checked AcceptedTaskRecord, supports no-op tasks without fake commits, cleans the task workspace and recomputes the next dependency-safe READY frontier. Rejected candidates return to the same task for repair; stale/drifted or unsafe cleanup states preserve evidence rather than silently resetting or rebasing work.
 
 ## Operating profiles
 
