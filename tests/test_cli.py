@@ -590,7 +590,10 @@ def test_p4_headless_noop_task_runs_in_worktree_and_reaches_acceptance(monkeypat
             (sd / "tasks" / "workspaces").resolve()
         )
         assert not Path(worker["cwd"]).exists()
-        assert ca.task_readiness(r)["T1"]["status"] == "ACCEPTED"
+        assert ca.ensure_supervisor_task_workspace(
+            r,
+            state_dir=sd,
+        )["status"] == "COMPLETE"
 
 
 def test_goal_engine_uses_goal_and_compact_logging(monkeypatch):
