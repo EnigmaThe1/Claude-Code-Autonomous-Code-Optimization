@@ -51,6 +51,10 @@ from runtime_paths import ensure_private_dir, package_root, utcnow
 from settings_policy import make_readonly_settings
 from state_store import json_dump, load_json, sha256_text
 from workspace_recovery import promote_fast_forward
+from planning_validation import (
+    PlanningValidationError,
+    validate_planning_candidate,
+)
 
 
 PLANNING_REPAIR_CONTRACT = REPOSITORY_PLANNING_REPAIR_CONTRACT
@@ -973,6 +977,89 @@ def run_planning_repair_reconcile(
         ],
         "changed_paths": sorted(candidate_paths),
         "receipts": bundle.get("receipts", []),
+    }
+
+
+def validate_planning_repair_candidate(
+    root: Path,
+    *,
+    task_source_runner: HelperRunner = run_repository_command,
+) -> dict[str, Any]:
+    root = root.expanduser().resolve()
+    active = load_active_repair(root)
+    if not active or active.get("schema_version") != 2:
+        raise ValueError("candidate validation requires an active schema-2 planning repair")
+    if active.get("status") != "CANDIDATE":
+        raise ValueError(
+            "candidate validation requires CANDIDATE state; "
+            f"found {active.get('status')!r}"
+        )
+    envelope = load_repair_envelope(root)
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("repair_envelope_sha256")
+        != active.get("repair_envelope_sha256")
+    ):
+        raise ValueError("active planning repair is not bound to its RepairEnvelope")
+
+    worktree = Path(active["worktree"]).expanduser().resolve()
+    candidate = str(active.get("candidate_sha") or "")
+    if not candidate or _rev(worktree, "HEAD") != candidate:
+        raise ValueError(
+            "candidate validation requires the exact active repair-branch HEAD"
+        )
+
+    try:
+        evidence = validate_planning_candidate(
+            root,
+            active,
+            envelope,
+            task_source_runner=task_source_runner,
+        )
+    except PlanningValidationError as exc:
+        active["last_candidate_validation_error"] = str(exc)[:1800]
+        active["candidate_validation_failed_at"] = utcnow()
+        json_dump(_active_path(root), active)
+        raise ValueError(str(exc)) from exc
+
+    evidence_path = (
+        _repair_dir(root)
+        / f"candidate-authority-{candidate[:16]}.json"
+    )
+    json_dump(evidence_path, evidence)
+    task_sources = evidence.get("candidate_task_sources", {})
+    active.update({
+        "candidate_authority_evidence_sha256": evidence[
+            "candidate_authority_evidence_sha256"
+        ],
+        "candidate_authority_content_sha256": evidence[
+            "candidate_authority_content_sha256"
+        ],
+        "candidate_authority_snapshot_sha256": evidence[
+            "candidate_authority_snapshot"
+        ]["snapshot_sha256"],
+        "candidate_task_source_set_sha256": task_sources.get(
+            "task_source_set_sha256"
+        ),
+        "candidate_authority_evidence_path": str(evidence_path),
+        "candidate_validated_at": utcnow(),
+        "validated_candidate_sha": candidate,
+    })
+    active.pop("last_candidate_validation_error", None)
+    json_dump(_active_path(root), active)
+    return {
+        "status": "valid",
+        "candidate_sha": candidate,
+        "candidate_authority_content_sha256": active[
+            "candidate_authority_content_sha256"
+        ],
+        "candidate_authority_evidence_sha256": active[
+            "candidate_authority_evidence_sha256"
+        ],
+        "candidate_task_source_set_sha256": active.get(
+            "candidate_task_source_set_sha256"
+        ),
+        "evidence_path": str(evidence_path),
     }
 
 
