@@ -136,16 +136,18 @@ def derive_repair_envelope(
     *,
     reason: str,
     authority_sets: list[str] | tuple[str, ...] | None = None,
+    base_ref: str = "HEAD",
+    product_branch: str | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     try:
-        snapshot = build_authority_snapshot(root)
-        contract = load_governance_contract(root)
+        snapshot = build_authority_snapshot(root, base_ref)
+        contract = load_governance_contract(root, base_ref)
     except (AuthoritySetError, GovernanceContractError) as exc:
         raise RepairEnvelopeError(str(exc)) from exc
     if not isinstance(snapshot, dict):
         raise RepairEnvelopeError("repository planning authority is not configured")
-    branch = snapshot.get("branch")
+    branch = product_branch or snapshot.get("branch")
     if not isinstance(branch, str) or not branch:
         raise RepairEnvelopeError(
             "planning repair requires a named coordinator product branch"
@@ -223,7 +225,7 @@ def derive_repair_envelope(
         governance_blob = None
 
     try:
-        controls = planning_repair_control_paths(root)
+        controls = planning_repair_control_paths(root, base_ref)
     except AuthoritySetError as exc:
         raise RepairEnvelopeError(str(exc)) from exc
 
