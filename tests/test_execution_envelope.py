@@ -3296,11 +3296,11 @@ def test_p6_interactive_product_context_uses_exact_p4_task_worktree(monkeypatch)
 
         settings = json.loads(settings_path.read_text())
         assert settings["env"]["CLAUDE_AUTO_REPO_ROOT"] == str(worker_root)
-        assert settings["env"]["CLAUDE_AUTO_AUTHORITY_REPO_ROOT"] == str(
+        assert settings["env"]["CLAUDE_AUTO_AUTHORITY_ROOT"] == str(
             primary.resolve()
         )
         protected = json.loads(
-            settings["env"]["CLAUDE_AUTO_SEMANTIC_PROTECTED_PATHS"]
+            settings["env"]["CLAUDE_AUTO_PROTECTED_REPO_PATHS"]
         )
         assert str(primary.resolve()) in protected
         assert str(sd.resolve()) in protected
