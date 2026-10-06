@@ -1612,6 +1612,60 @@ def test_transactional_install_preserves_runtime_state():
         assert "Transactional upgrade verification" in cp.stdout
 
 
+def test_p7_install_refuses_corrupt_foreign_or_mismatched_existing_marker():
+    cases = ("corrupt", "foreign", "path-mismatch")
+    for case in cases:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as install:
+            bindir = Path(home) / ".local" / "bin"
+            bindir.mkdir(parents=True)
+            dest = Path(install) / "pack"
+            env = os.environ.copy()
+            env.update({
+                "HOME": home,
+                "CLAUDE_AUTONOMY_HOME": str(dest),
+                "CLAUDE_AUTONOMY_BIN": str(bindir),
+            })
+            first = subprocess.run(
+                ["bash", str(ROOT / "install.sh"), "--no-plugins"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+            assert first.returncode == 0, first.stderr
+
+            marker = dest / ".claude-autonomy-install.json"
+            before_version = (dest / "VERSION").read_bytes()
+            before_readme = (dest / "README.md").read_bytes()
+            sentinel = dest / "repos" / "keep" / "state.json"
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_bytes(b"preserve-on-refusal\n")
+
+            if case == "corrupt":
+                marker.write_text("{not-json\n")
+            else:
+                obj = json.loads(marker.read_text())
+                if case == "foreign":
+                    obj["package_id"] = "not-claude-auto"
+                else:
+                    obj["canonical_install_path"] = str(Path(install) / "other")
+                marker.write_text(json.dumps(obj, indent=2) + "\n")
+
+            attempted = subprocess.run(
+                ["bash", str(ROOT / "install.sh"), "--no-plugins"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+            assert attempted.returncode != 0
+            assert "Refusing upgrade" in attempted.stderr
+            assert (dest / "VERSION").read_bytes() == before_version
+            assert (dest / "README.md").read_bytes() == before_readme
+            assert sentinel.read_bytes() == b"preserve-on-refusal\n"
+            assert (bindir / "claude-auto").is_symlink()
+
+
 def test_p7_rc3_identity_upgrade_preserves_durable_state():
     with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as install:
         bindir = Path(home) / ".local" / "bin"
