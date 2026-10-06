@@ -110,5 +110,20 @@ jobs:
             exit 1
           fi
 
+          # Re-read remote branch truth immediately before the immutable tag
+          # write. Earlier checks prove the reviewed identity, but without this
+          # final lease-style revalidation a concurrent branch move could cause
+          # a stale formerly-accepted SHA to be tagged.
+          REMOTE_MAIN="$(git ls-remote --heads origin refs/heads/main | awk '{print $1}')"
+          REMOTE_RELEASE="$(git ls-remote --heads origin "refs/heads/$RELEASE_BRANCH" | awk '{print $1}')"
+          if [[ "$REMOTE_MAIN" != "$MAIN_SHA" ]]; then
+            echo "::error title=Main moved before tagging::Expected main at $MAIN_SHA, found $REMOTE_MAIN."
+            exit 1
+          fi
+          if [[ "$REMOTE_RELEASE" != "$MAIN_SHA" ]]; then
+            echo "::error title=Release branch moved before tagging::Expected $RELEASE_BRANCH at $MAIN_SHA, found $REMOTE_RELEASE."
+            exit 1
+          fi
+
           gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs"             -f ref="refs/tags/$TAG"             -f sha="$MAIN_SHA"
           echo "Created release tag $TAG -> $MAIN_SHA"
