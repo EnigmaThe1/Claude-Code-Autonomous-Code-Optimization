@@ -91,10 +91,15 @@ def activate(root: Path, dry_run: bool = False) -> Path:
     # P6 state-schema migration happens before current-version governance,
     # profile or settings state is persisted. SupervisorLease has already
     # reconciled the outer legacy state-directory identity before activate().
+    identity = repository_identity(root)
     ensure_private_dir(data_home())
     ensure_private_dir(data_home() / "repos")
     ensure_private_dir(sd)
-    migrate_state_on_disk(sd)
+    migrate_state_on_disk(
+        sd,
+        repository_identity=identity,
+        git_head=prof.git_head,
+    )
     ensure_private_dir(sd / "logs")
     prune_runtime_history(sd)
 
@@ -113,7 +118,6 @@ def activate(root: Path, dry_run: bool = False) -> Path:
             pass
 
     json_dump(sd / "profile.json", asdict(prof))
-    identity = repository_identity(root)
     state = load_json(sd / "state.json", {})
     if not state:
         state = {
