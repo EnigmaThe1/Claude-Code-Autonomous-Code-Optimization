@@ -29,6 +29,7 @@ from planning_repair import load_active_repair
 from repo_identity import repo_state_dir, repository_identity
 from runtime_paths import ensure_private_dir, utcnow
 from state_store import json_dump, load_json
+from task_authority import TaskAuthorityError, task_readiness
 from task_sources import TaskSourceError, resolve_task_sources
 from task_workspace import TaskWorkspaceError, load_active_task_workspace
 
@@ -294,6 +295,7 @@ def _classify_active_claim(
     task_index: dict[str, dict[str, Any]],
     current_product_sha: str,
     runtime_conflicts: list[str],
+    current_readiness: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -322,6 +324,20 @@ def _classify_active_claim(
             "status": "STALE_BASE",
             "resolved_base_sha": base,
             "current_product_sha": current_product_sha,
+        }
+    readiness = current_readiness.get(row["id"], {})
+    if readiness.get("status") == "ACCEPTED":
+        return {
+            **row,
+            "status": "ALREADY_ACCEPTED_CURRENTLY",
+            "resolved_base_sha": base,
+        }
+    if readiness.get("status") != "READY":
+        return {
+            **row,
+            "status": "DEPENDENCY_NOT_READY",
+            "resolved_base_sha": base,
+            "blockers": readiness.get("blockers") or [],
         }
     return {
         **row,
@@ -364,6 +380,24 @@ def import_legacy_state_claims(
         task_set.get("product_head") or current_head
     ).lower()
     runtime_conflicts = _runtime_conflicts(root)
+    state_path = repo_state_dir(root) / "state.json"
+    state_before = load_json(state_path, {})
+    if not isinstance(state_before, dict):
+        raise StateAdoptionError("durable repository state is malformed")
+    try:
+        current_readiness = (
+            task_readiness(
+                root,
+                task_set=task_set,
+                state=state_before,
+                state_dir=repo_state_dir(root),
+                authority_root=root,
+            )
+            if task_set.get("status") == "READY"
+            else {}
+        )
+    except TaskAuthorityError as exc:
+        raise StateAdoptionError(str(exc)) from exc
 
     authority_claim = document.get("authority_snapshot_sha256")
     authority_status = (
@@ -391,6 +425,7 @@ def import_legacy_state_claims(
         task_index=task_index,
         current_product_sha=current_product_sha,
         runtime_conflicts=runtime_conflicts,
+        current_readiness=current_readiness,
     )
     product_relationship = _classify_commit_relationship(
         root,
@@ -449,10 +484,20 @@ def import_legacy_state_claims(
         json_dump(history_path, record)
     json_dump(adoption_dir / "current.json", record)
 
-    state_path = repo_state_dir(root) / "state.json"
     state = load_json(state_path, {})
     if not isinstance(state, dict):
         raise StateAdoptionError("durable repository state is malformed")
+    for key in (
+        "accepted_tasks",
+        "active_task_id",
+        "active_task_spec_sha256",
+        "active_execution_envelope_sha256",
+    ):
+        if state.get(key) != state_before.get(key):
+            raise StateAdoptionError(
+                "legacy adoption import observed unexpected authority-state mutation "
+                f"before persistence: {key}"
+            )
     # Claims remain evidence only. Do not modify accepted_tasks or any active
     # task/ExecutionEnvelope fields here.
     state["legacy_adoption"] = {
