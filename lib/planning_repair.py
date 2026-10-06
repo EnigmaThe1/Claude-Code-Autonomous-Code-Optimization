@@ -2310,7 +2310,11 @@ def planning_repair_action(args: Any, *, find_repo_root) -> int:
                 remote_branch=getattr(args, "remote_branch", None),
             )
         elif action == "begin":
-            result = begin_planning_repair(root, reason=getattr(args, "reason", "") or "")
+            result = begin_planning_repair(
+                root,
+                reason=getattr(args, "reason", "") or "",
+                authority_sets=getattr(args, "authority_set", None),
+            )
         elif action == "architect":
             result = run_planning_repair_architect(root, args)
         elif action == "reconcile":
