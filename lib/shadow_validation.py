@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import stat
 import subprocess
 from pathlib import Path
@@ -24,7 +23,7 @@ from typing import Any
 
 from accepted_task import AcceptedTaskError, load_accepted_task_record
 from authority_set import AuthoritySetError, build_authority_snapshot
-from git_trust import trusted_git_env
+from environment_policy import sanitised_subprocess_env
 from governance_contract import canonical_json_bytes
 from repo_identity import repo_id, repo_state_dir
 from runtime_paths import ensure_private_dir, utcnow
@@ -85,7 +84,7 @@ def _git_ancestor(
         ],
         text=True,
         capture_output=True,
-        env=trusted_git_env(root, state_dir=state_dir),
+        env=sanitised_subprocess_env(),
     )
     if cp.returncode == 0:
         return True
@@ -662,3 +661,33 @@ def shadow_compare(
         "comparison": comparison,
         "audit": audit,
     }
+
+
+def shadow_action(args: Any, *, find_repo_root) -> int:
+    root = find_repo_root(getattr(args, "repo", None))
+    try:
+        if args.shadow_command == "snapshot":
+            result = shadow_snapshot(root)
+        elif args.shadow_command == "compare":
+            result = shadow_compare(
+                root,
+                Path(args.legacy),
+                dispositions_path=(
+                    Path(args.dispositions)
+                    if getattr(args, "dispositions", None)
+                    else None
+                ),
+            )
+        else:
+            raise ShadowValidationError(
+                f"unsupported shadow command: {args.shadow_command}"
+            )
+    except (ShadowValidationError, OSError, ValueError) as exc:
+        print(json.dumps({
+            "status": "BLOCKED",
+            "repository": str(root),
+            "error": str(exc),
+        }, indent=2))
+        return 2
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 2 if result.get("status") == "MISMATCH" else 0
