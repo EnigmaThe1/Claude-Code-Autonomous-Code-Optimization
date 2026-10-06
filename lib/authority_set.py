@@ -159,6 +159,43 @@ def _resolve_selector(
     return sorted(matches, key=lambda item: item["path"].encode("utf-8", errors="surrogateescape"))
 
 
+def _assert_authority_blob_is_materialised(
+    root: Path,
+    entry: dict[str, str],
+) -> None:
+    """Reject canonical Git LFS pointers as unresolved authority content."""
+    if entry.get("type") != "blob":
+        return
+    cp = _git(root, "cat-file", "blob", entry["object"], text=False)
+    if cp.returncode != 0:
+        raise AuthoritySetError(
+            f"unable to read authority member blob: {entry['path']}"
+        )
+    payload = bytes(cp.stdout)
+    if len(payload) > 8192:
+        return
+    try:
+        text_value = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    lines = text_value.splitlines()
+    if not lines or lines[0] != "version https://git-lfs.github.com/spec/v1":
+        return
+    has_oid = any(
+        re.fullmatch(r"oid sha256:[0-9a-fA-F]{64}", line) is not None
+        for line in lines[1:]
+    )
+    has_size = any(
+        re.fullmatch(r"size [0-9]+", line) is not None
+        for line in lines[1:]
+    )
+    if has_oid and has_size:
+        raise AuthoritySetError(
+            "authority member is an unresolved Git LFS pointer rather than "
+            f"materialised authority content: {entry['path']}"
+        )
+
+
 def _member_entry(entry: dict[str, str], member: dict[str, Any]) -> dict[str, Any]:
     mode = entry["mode"]
     kind = entry["type"]
@@ -497,6 +534,7 @@ def planning_repair_control_paths(
 
 
 def _build_contract_sets(
+    root: Path,
     contract: dict[str, Any],
     tree: dict[str, dict[str, str]],
 ) -> list[dict[str, Any]]:
@@ -508,6 +546,7 @@ def _build_contract_sets(
         seen_folded: dict[str, str] = {}
         for member in declared["members"]:
             for entry in _resolve_selector(member["path"], tree, required=bool(member["required"])):
+                _assert_authority_blob_is_materialised(root, entry)
                 record = _member_entry(entry, member)
                 path = record["path"]
                 if path in seen_exact:
@@ -535,11 +574,16 @@ def _build_contract_sets(
     return sorted(out, key=lambda item: item["id"])
 
 
-def _legacy_set(policy: dict[str, Any], tree: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
+def _legacy_set(
+    root: Path,
+    policy: dict[str, Any],
+    tree: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
     canonical = policy["canonical_plan"]
     matches = _resolve_selector(canonical, tree, required=True)
     if len(matches) != 1:
         raise AuthoritySetError("legacy canonical plan must resolve to exactly one tracked file")
+    _assert_authority_blob_is_materialised(root, matches[0])
     record = _member_entry(
         matches[0],
         {"role": "source", "repair": "repairable", "required": True},
@@ -596,7 +640,7 @@ def build_authority_snapshot(root: Path, ref: str = "HEAD") -> dict[str, Any] | 
         return None
 
     if contract is not None:
-        sets = _build_contract_sets(contract, tree)
+        sets = _build_contract_sets(root, contract, tree)
         if legacy:
             _assert_legacy_compatible(legacy, sets)
         controls = _resolve_control_surfaces(root, contract, tree)
@@ -604,7 +648,7 @@ def build_authority_snapshot(root: Path, ref: str = "HEAD") -> dict[str, Any] | 
         governance_blob = contract["_git"]["blob"]
         source_mode = "contract+legacy" if legacy else "contract"
     else:
-        sets = _legacy_set(legacy, tree)
+        sets = _legacy_set(root, legacy, tree)
         controls = []
         task_source_digest = _digest({})
         governance_blob = None
