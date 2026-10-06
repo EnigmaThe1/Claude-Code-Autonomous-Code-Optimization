@@ -1,0 +1,759 @@
+{
+  "schema_version": 1,
+  "target": "1.0.0-rc4",
+  "scenario_count": 64,
+  "scenarios": [
+    {
+      "id": 1,
+      "scenario": "one-file Markdown plan, no task ownership",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_governance_authority.py::test_legacy_canonical_plan_becomes_one_member_default_set"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_legacy_one_file_policy_derives_synthetic_repair_envelope"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "scenario": "one-file structured plan with task ownership",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_root_task_activation_and_dependency_frontier"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "scenario": "multi-file planning authority with two task ledgers",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_governance_authority.py::test_multi_file_authority_snapshot_is_deterministic"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_builtin_json_jsonl_toml_and_static_sources_merge"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "scenario": "manifest + ledgers + traceability",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_large_multifile_authority_envelope_is_deterministic"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_candidate_task_sources_validate_without_overwriting_live_runtime_state"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "scenario": "generated planning projection",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_reconciler_deterministically_creates_updates_and_deletes_generated_members"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "scenario": "immutable requirement file plus repairable ledger",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_architect_guard_enforces_repair_envelope_mutability_and_growth"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "scenario": "cross-ledger dependency",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_1000_task_multiledger_multidomain_stress_is_deterministic"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "scenario": "duplicate task IDs across ledgers",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_duplicate_task_id_across_sources_fails_closed"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "scenario": "missing dependency",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_missing_dependency_strict_and_non_strict"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "scenario": "dependency cycle",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_candidate_task_source_cycle_is_rejected"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_deep_task_graph_cycle_is_iterative"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "scenario": "task with no owned paths",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_task_with_no_owned_paths_is_valid_but_cannot_self_expand"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "scenario": "task owning one file",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_exact_file_and_nested_directory_ownership_are_distinct"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "scenario": "task owning nested directories",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_exact_file_and_nested_directory_ownership_are_distinct"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "scenario": "task owning paths with spaces/Unicode",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_stage_gate_accepts_unicode_spaces_and_leading_dash_inside_envelope"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "scenario": "overlapping task ownership used sequentially",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_overlapping_ownership_is_dependency_serialised"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_verified_acceptance_records_full_evidence_and_unlocks_dependency"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "scenario": "attempted direct edit outside active task",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_direct_and_bash_guard_enforce_task_paths_including_unattended"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "scenario": "arbitrary Bash command modifies out-of-envelope tracked file",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_post_batch_allows_owned_and_scratch_then_blocks_escape_and_reconciles"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "scenario": "formatter touches unrelated tracked file",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_post_batch_detects_changed_unrelated_baseline_wip"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "scenario": "build creates allowed scratch files",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_post_batch_allows_owned_and_scratch_then_blocks_escape_and_reconciles"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "scenario": "build creates unexpected untracked files",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_post_batch_allows_owned_and_scratch_then_blocks_escape_and_reconciles"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "scenario": "attempted edit of planning authority by product worker",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_product_write_guard_denies_bash_and_direct_mutation_of_canonical_plan"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "scenario": "attempted governance-contract edit",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_opaque_deletion_of_committed_governance_cannot_disable_task_owned_mode"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_governance_authority.py::test_governance_protection_applies_to_every_profile"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "scenario": "mechanical ownership defect repaired through planning repair",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_candidate_task_sources_validate_without_overwriting_live_runtime_state"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "scenario": "semantic ownership expansion rejected for operator decision",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_task_authority_ceiling_and_protected_paths_fail"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "scenario": "multi-file repair changes only permitted repairable members",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_architect_multi_file_candidate_and_package_delete"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "scenario": "architect attempts immutable-member edit",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_architect_guard_enforces_repair_envelope_mutability_and_growth"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "scenario": "architect attempts generated-member direct edit",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_architect_guard_enforces_repair_envelope_mutability_and_growth"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "scenario": "generator modifies undeclared path",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_reconciler_rejects_undeclared_output_mutation"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "scenario": "stale exact-SHA planning attestation",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_promotion_broker.py::test_p5_generic_promote_rejects_stale_candidate_authority_digest"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_independent_verifier_attests_exact_candidate_and_promotion_consumes_it"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "scenario": "product branch advances during repair",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_refresh_base_rebases_plan_only_candidate_and_invalidates_old_attestation"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "scenario": "lost-response remote promotion retry",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_promotion_broker.py::test_remote_push_lost_response_reconciles_remote_truth"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "scenario": "real pre-existing WIP outside task",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_task_workspace_is_external_resumable_and_primary_wip_isolated"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "scenario": "overlapping pre-existing WIP",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_activation_rejects_staged_and_overlapping_wip_but_preserves_unrelated"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_task_workspace_is_external_resumable_and_primary_wip_isolated"
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "scenario": "linked worktree",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_linked_task_root_can_use_primary_coordinator_state"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_task_workspace_is_external_resumable_and_primary_wip_isolated"
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "scenario": "monorepo cross-package task",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_cross_domain_cross_package_task_is_explicit_authority"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "scenario": "submodule mutation attempt",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_gitlink_owned_selector_is_blocked_at_activation"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_gitlink_authority_member_is_rejected"
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "scenario": "sparse checkout missing authority file",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_detached_head_and_sparse_checkout_block_activation"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "scenario": "shallow clone missing ancestry",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_shallow_clone_missing_accepted_history_blocks_dependency_readiness"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "scenario": "missing LFS authority content",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_governance_authority.py::test_p7_lfs_pointer_authority_member_fails_closed"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "scenario": "detached HEAD",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_detached_head_and_sparse_checkout_block_activation"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "scenario": "non-Git directory graceful limitation",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_non_git_directory_is_graceful_without_legacy_authority"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "scenario": "multiple remotes",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_multiple_remotes_are_explicitly_scoped"
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "scenario": "symlink/path traversal attack",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_unattended_symlink_traversal_is_denied_by_task_authority"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_symlink_authority_member_is_rejected"
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "scenario": "malicious custom adapter output",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_adapter_output_cannot_expand_authority_or_duplicate_ids"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_adapter_input_mutation_and_nondeterminism_fail"
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "scenario": "adapter timeout/invalid JSON/oversized output",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_adapter_timeout_and_oversized_output_fail"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_malformed_builtin_sources_fail_closed"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_adapter_nonzero_noisy_and_unsandboxed_outputs_fail"
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "scenario": "repository validator tries host escape",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_validator_cannot_mutate_exact_candidate_input"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_validator_timeout_or_unavailable_boundary_rejects"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "scenario": "corrupted external state recovery",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_cli.py::test_corrupt_state_recovers_previous_generation"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_cli.py::test_corrupt_state_without_valid_backup_fails_closed"
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "scenario": "stale supervisor",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_cli.py::test_supervisor_lease_blocks_second_writer"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_profile_switch.py::test_request_bound_to_different_supervisor_is_rejected_as_stale"
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "scenario": "active RC3 single-file policy upgrade",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_state_migration.py::test_p6_legacy_one_file_policy_normalises_without_rewriting_policy"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_state_migration.py::test_p6_legacy_schema5_walks_explicit_chain_to10"
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "scenario": "active/inactive planning-repair state upgrade",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_state_migration.py::test_p6_clean_schema1_repair_migrates_to_p5_envelope"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_state_migration.py::test_p6_schema1_repair_recovers_missing_worktree_from_surviving_branch"
+        }
+      ]
+    },
+    {
+      "id": 51,
+      "scenario": "exact named/session-ID resume under new RC4 policy",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_profile_switch.py::test_interactive_external_session_adoption_forks_and_records_new_session"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_profile_switch.py::test_session_adoption_blocks_missing_or_reused_session_identity"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "scenario": "imported legacy task state reconciles or fails closed",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_state_adoption.py::test_p6_adoption_import_preserves_claims_without_unlocking_dependencies"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_state_adoption.py::test_p6_imported_active_task_stale_base_is_not_mappable"
+        }
+      ]
+    },
+    {
+      "id": 53,
+      "scenario": "1,000-task multi-ledger stress fixture",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_1000_task_multiledger_multidomain_stress_is_deterministic"
+        }
+      ]
+    },
+    {
+      "id": 54,
+      "scenario": "100,000-path matcher/resolution stress fixture",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_100000_path_selector_stress_is_deterministic"
+        }
+      ]
+    },
+    {
+      "id": 55,
+      "scenario": "Unattended profile still enforces task/planning governance",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_direct_and_bash_guard_enforce_task_paths_including_unattended"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_unattended_does_not_bypass_repair_envelope"
+        }
+      ]
+    },
+    {
+      "id": 56,
+      "scenario": "multiple named authority domains in one monorepo",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_governance_authority.py::test_multiple_named_authority_sets_resolve"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_1000_task_multiledger_multidomain_stress_is_deterministic"
+        }
+      ]
+    },
+    {
+      "id": 57,
+      "scenario": "task spanning two declared authority domains",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_p7_qualification.py::test_p7_cross_domain_cross_package_task_is_explicit_authority"
+        }
+      ]
+    },
+    {
+      "id": 58,
+      "scenario": "unrelated authority domain cannot be modified by scoped repair",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_architect_guard_denies_path_also_owned_by_unselected_authority_set"
+        }
+      ]
+    },
+    {
+      "id": 59,
+      "scenario": "task attempts to weaken governance/verification contract before commit",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_task_authority_ceiling_and_protected_paths_fail"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_governance_authority.py::test_nested_instructions_ci_and_verification_script_are_control_surfaces"
+        }
+      ]
+    },
+    {
+      "id": 60,
+      "scenario": "task changes Claude/Git control-surface files and forces revalidation",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_governance_authority.py::test_control_surface_blob_change_invalidates_snapshot"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_governance_authority.py::test_role_mutability_and_helper_contract_changes_invalidate_snapshot"
+        }
+      ]
+    },
+    {
+      "id": 61,
+      "scenario": "out-of-band descendant commit changes task authority",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_post_batch_head_movement_blocks_and_preserves_original_envelope_identity"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_persisted_status_becomes_stale_after_committed_source_change"
+        }
+      ]
+    },
+    {
+      "id": 62,
+      "scenario": "adapter requests undeclared network/credential capability",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_adapter_cannot_request_network_or_external_read"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_task_sources.py::test_adapter_external_read_capability_is_not_granted"
+        }
+      ]
+    },
+    {
+      "id": 63,
+      "scenario": "ignored/untracked scratch cannot be promoted with git add -f",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_stage_gate_accepts_owned_and_rejects_scratch_outside_and_rename"
+        }
+      ]
+    },
+    {
+      "id": 64,
+      "scenario": "repository Git hooks/filter/textconv cannot alter broker truth",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_promotion_broker.py::test_p7_broker_neutralises_filters_textconv_and_hooks"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_promotion_broker.py::test_p7_trusted_git_env_strips_truth_redirection_but_keeps_transport"
+        }
+      ]
+    }
+  ]
+}
