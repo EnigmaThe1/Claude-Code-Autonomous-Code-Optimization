@@ -388,3 +388,34 @@ def test_p7_exact_file_and_nested_directory_ownership_are_distinct():
         "packages/service/**",
         "packages/service/deep/module/file.py",
     )
+
+
+def test_p7_scenario_traceability_has_all_64_live_pytest_references():
+    root = Path(__file__).resolve().parents[1]
+    traceability = json.loads(
+        (
+            root
+            / "docs"
+            / "RC4_P7_SCENARIO_TRACEABILITY.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert traceability["schema_version"] == 1
+    assert traceability["target"] == "1.0.0-rc4"
+    scenarios = traceability["scenarios"]
+    assert traceability["scenario_count"] == 64
+    assert len(scenarios) == 64
+    assert [row["id"] for row in scenarios] == list(range(1, 65))
+    assert len({row["scenario"] for row in scenarios}) == 64
+
+    for row in scenarios:
+        evidence = row.get("evidence")
+        assert isinstance(evidence, list) and evidence, row
+        for item in evidence:
+            assert item.get("kind") == "pytest", item
+            ref = item.get("ref")
+            assert isinstance(ref, str) and "::" in ref, item
+            rel, function = ref.split("::", 1)
+            path = root / rel
+            assert path.is_file(), ref
+            source = path.read_text(encoding="utf-8")
+            assert f"def {function}(" in source, ref
