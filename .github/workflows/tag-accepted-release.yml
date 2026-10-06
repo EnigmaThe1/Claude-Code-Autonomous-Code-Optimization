@@ -57,19 +57,34 @@ jobs:
             exit 1
           fi
 
-          if [[ ! -f .release-qualify ]]; then
-            echo "::error title=Qualification attestation missing::.release-qualify is required on the accepted SHA."
+          if [[ ! -f .release-qualify || ! -f .release-finalize ]]; then
+            echo "::error title=Release attestation missing::.release-qualify and .release-finalize are both required on the accepted SHA."
             exit 1
           fi
-          grep -Fxq "version=$VERSION" .release-qualify || {
-            echo "::error title=Qualification version mismatch::.release-qualify does not attest $VERSION."
+          mapfile -t QUALIFY_LINES < .release-qualify
+          mapfile -t FINALIZE_LINES < .release-finalize
+          if (( ${#QUALIFY_LINES[@]} != 3 || ${#FINALIZE_LINES[@]} != 2 )); then
+            echo "::error title=Release attestation malformed::Finalization and qualification markers have unexpected structure."
             exit 1
-          }
+          fi
+          if [[ "${QUALIFY_LINES[0]}" != "version=$VERSION" || "${FINALIZE_LINES[0]}" != "version=$VERSION" ]]; then
+            echo "::error title=Qualification version mismatch::Release markers do not attest $VERSION."
+            exit 1
+          fi
+          if [[ ! "${QUALIFY_LINES[1]}" =~ ^sequence=([1-9][0-9]*)$ ]]; then
+            echo "::error title=Qualification sequence invalid::Qualification marker has no valid sequence."
+            exit 1
+          fi
+          QUALIFY_SEQUENCE="${BASH_REMATCH[1]}"
+          if [[ "${FINALIZE_LINES[1]}" != "sequence=$QUALIFY_SEQUENCE" ]]; then
+            echo "::error title=Release sequence mismatch::Finalization and qualification markers attest different sequences."
+            exit 1
+          fi
           EXPECTED_SOURCE="$(git rev-parse HEAD^)"
-          grep -Fxq "source_sha=$EXPECTED_SOURCE" .release-qualify || {
+          if [[ "${QUALIFY_LINES[2]}" != "source_sha=$EXPECTED_SOURCE" ]]; then
             echo "::error title=Qualification source mismatch::.release-qualify must attest immediate parent $EXPECTED_SOURCE."
             exit 1
-          }
+          fi
 
           gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/release-candidate.yml/runs"             -f branch="$RELEASE_BRANCH" -f status=success -f per_page=100 > /tmp/release-runs.json
           gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"             -f branch="main" -f status=success -f per_page=100 > /tmp/main-ci-runs.json
