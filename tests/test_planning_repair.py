@@ -2049,3 +2049,28 @@ def test_p5_planning_cli_exposes_explicit_authority_set_selection():
         "domain-a",
     ])
     assert architect.authority_set == ["domain-a"]
+
+
+def test_p6_p5_candidate_worktree_recovery_uses_recorded_candidate_head(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        configure_planning_repair(root, canonical_plan="IMPLEMENTATION_PLAN.md")
+        active, candidate = _make_candidate(root)
+        worktree = Path(active["worktree"])
+
+        # Simulate a restart after durable candidate state survived but the
+        # linked worktree registration/path was removed. The repair branch and
+        # exact candidate object remain.
+        _git(root, "worktree", "remove", "--force", str(worktree))
+        assert not worktree.exists()
+
+        recovered = begin_planning_repair(root, reason="resume after restart")
+        assert recovered["candidate_sha"] == candidate
+        assert Path(recovered["worktree"]).is_dir()
+        assert _git(
+            Path(recovered["worktree"]),
+            "rev-parse",
+            "HEAD",
+        ).stdout.strip() == candidate
+        assert recovered["repair_envelope_sha256"]
