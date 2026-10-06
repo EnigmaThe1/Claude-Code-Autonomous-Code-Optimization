@@ -279,6 +279,7 @@ from planning_repair import (
     load_active_repair,
     load_planning_repair_policy,
     planning_repair_action,
+    planning_repair_session_context,
     promote_planning_repair,
     refresh_planning_repair_base,
     run_planning_repair_architect,
@@ -291,6 +292,14 @@ from profile_switch import (
     pending_profile_switch,
     process_start_token,
     profile_action,
+)
+from session_adoption import (
+    SessionAdoptionError,
+    block_session_adoption,
+    capture_adopted_session_id,
+    finish_session_adoption,
+    mark_session_adoption_launched,
+    prepare_session_adoption,
 )
 from telemetry import (
     circuit_breaker_reason,
