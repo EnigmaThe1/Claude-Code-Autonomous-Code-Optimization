@@ -79,7 +79,7 @@ from task_workspace import (
     load_active_task_workspace,
 )
 from workspace_recovery import promote_fast_forward
-from claude_auto import _p4_worker_execution_context
+from claude_auto import _interactive_start_context, _p4_worker_execution_context
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -3262,3 +3262,55 @@ def test_p4_unverified_candidate_cannot_be_accepted(monkeypatch):
             match="VERIFIED_PENDING_PROMOTION|PROMOTING",
         ):
             accept_verified_task(primary)
+
+
+def test_p6_interactive_product_context_uses_exact_p4_task_worktree(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        sd = repo_state_dir(primary)
+        args = SimpleNamespace(
+            profile="balanced",
+            session_settings=None,
+            memory_mode="external",
+            _permission_overrides=[],
+            _permission_grants=[],
+            resume_role="product",
+            resume_session="legacy-session-name",
+        )
+
+        worker_root, task_context, settings_path, activation = (
+            _interactive_start_context(primary, sd, args)
+        )
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert activation["status"] == "ACTIVE"
+        assert worker_root == Path(workspace["task_worktree"]).resolve()
+        assert worker_root != primary.resolve()
+        assert isinstance(task_context, dict)
+        assert task_context["id"] == "T1"
+        assert task_context["task_workspace_sha256"] == workspace[
+            "task_workspace_sha256"
+        ]
+        assert settings_path is not None and settings_path.is_file()
+
+        settings = json.loads(settings_path.read_text())
+        assert settings["env"]["CLAUDE_AUTO_REPO_ROOT"] == str(worker_root)
+        assert settings["env"]["CLAUDE_AUTO_AUTHORITY_REPO_ROOT"] == str(
+            primary.resolve()
+        )
+        protected = json.loads(
+            settings["env"]["CLAUDE_AUTO_SEMANTIC_PROTECTED_PATHS"]
+        )
+        assert str(primary.resolve()) in protected
+        assert str(sd.resolve()) in protected
+
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worker_root),
+        )
+        _run(primary, "git", "branch", "-D", workspace["task_branch"])
