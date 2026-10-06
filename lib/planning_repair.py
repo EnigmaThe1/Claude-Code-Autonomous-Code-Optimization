@@ -58,6 +58,7 @@ from repo_identity import repo_id, repo_state_dir
 from runtime_paths import ensure_private_dir, package_root, utcnow
 from settings_policy import make_readonly_settings
 from state_store import json_dump, load_json, sha256_text
+from task_sources import TaskSourceError, resolve_task_sources
 from workspace_recovery import promote_fast_forward
 from planning_validation import (
     PlanningValidationError,
@@ -2328,28 +2329,66 @@ def _cleanup_repair_worktree(root: Path, active: dict[str, Any]) -> None:
             raise ValueError("unable to remove completed planning repair branch")
 
 
-def _capture_live_task_source_generation(root: Path) -> dict[str, Any]:
-    """Capture the current durable TaskSourceSet generation before planning promotion.
+def _capture_live_task_source_generation(
+    root: Path,
+    *,
+    base_sha: str,
+) -> dict[str, Any]:
+    """Reconstruct the exact pre-repair TaskSourceSet generation.
 
-    A planning repair may change the task ledger itself.  Until the outer
-    supervisor explicitly rebuilds TaskSources at the new product HEAD, the
-    previously persisted generation must remain available only as STALE
-    evidence.  Promotion-side helpers must not silently replace it with
-    candidate authority.
+    Candidate planning verification may inspect a candidate task graph.  The
+    interruption contract after promotion is stronger: until the outer
+    supervisor explicitly rebuilds live TaskSources, durable state must still
+    expose the generation bound to the pre-repair product base as STALE
+    evidence.  Never trust mutable task-source-set.json bytes for that
+    generation; rebuild it from the exact recorded base SHA and verify its
+    digest against state.json's durable binding.
     """
-    state_root = repo_state_dir(root.expanduser().resolve())
-    source_path = state_root / "tasks" / "task-source-set.json"
-    source = load_json(source_path, {})
+    root = root.expanduser().resolve()
+    state_root = repo_state_dir(root)
     state = load_json(state_root / "state.json", {})
+    if not isinstance(state, dict):
+        raise ValueError(
+            "durable repository state is malformed before planning promotion"
+        )
+    bound = state.get("task_source_sha256")
+    if bound is None:
+        return {
+            "state_root": str(state_root),
+            "source_present": False,
+            "source": {},
+            "task_source_sha256": None,
+        }
+    if not isinstance(bound, str) or len(bound) != 64:
+        raise ValueError(
+            "durable TaskSourceSet binding is malformed before planning promotion"
+        )
+    try:
+        resolved = resolve_task_sources(
+            root,
+            persist=False,
+            ref=base_sha,
+        )
+    except TaskSourceError as exc:
+        raise ValueError(
+            f"unable to reconstruct pre-promotion TaskSourceSet at {base_sha}: {exc}"
+        ) from exc
+    if resolved.get("status") != "READY":
+        raise ValueError(
+            "durable TaskSourceSet binding exists but exact-base TaskSources "
+            "did not resolve READY before planning promotion"
+        )
+    rebuilt = resolved.get("task_source_set_sha256")
+    if rebuilt != bound:
+        raise ValueError(
+            "durable TaskSourceSet binding does not match the exact planning "
+            f"repair base generation: state={bound}, base={rebuilt}"
+        )
     return {
         "state_root": str(state_root),
-        "source_present": source_path.exists(),
-        "source": source if isinstance(source, dict) else {},
-        "task_source_sha256": (
-            state.get("task_source_sha256")
-            if isinstance(state, dict)
-            else None
-        ),
+        "source_present": True,
+        "source": resolved,
+        "task_source_sha256": bound,
     }
 
 
@@ -2407,7 +2446,10 @@ def promote_planning_repair(root: Path) -> dict[str, Any]:
         raise ValueError("planning repair promotion requires VERIFIED attestation for the exact active candidate SHA")
 
     remote = policy.get("remote") if isinstance(policy.get("remote"), str) and policy.get("remote") else None
-    task_source_generation = _capture_live_task_source_generation(root)
+    task_source_generation = _capture_live_task_source_generation(
+        root,
+        base_sha=str(active["base_sha"]),
+    )
     result = promote_fast_forward(
         root,
         candidate,
