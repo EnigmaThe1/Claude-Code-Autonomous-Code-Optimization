@@ -51,11 +51,19 @@ PY
 # upgrade copies or rewrites their contents.  A corrupt/foreign marker is not
 # evidence that Claude Auto may adopt the destination.
 python3 - "$DEST" "$MARKER" <<'PY'
-import json, os, sys
+import json, os, stat, sys
 dest, marker = sys.argv[1:3]
 dest = os.path.realpath(os.path.expanduser(dest))
-marker = os.path.realpath(os.path.expanduser(marker))
-if os.path.exists(marker):
+marker = os.path.abspath(os.path.expanduser(marker))
+if os.path.realpath(os.path.dirname(marker)) != dest or os.path.basename(marker) != ".claude-autonomy-install.json":
+    raise SystemExit("Refusing upgrade: package marker path is outside the canonical install directory")
+if os.path.lexists(marker):
+    try:
+        st = os.lstat(marker)
+    except OSError as exc:
+        raise SystemExit(f"Refusing upgrade: cannot inspect existing package marker: {exc}")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise SystemExit("Refusing upgrade: existing package marker must be a regular non-symlink file")
     try:
         with open(marker, encoding="utf-8") as fh:
             obj = json.load(fh)
@@ -151,21 +159,29 @@ chmod +x "$STAGE/bin/claude-auto" "$STAGE/install.sh" "$STAGE/uninstall.sh" "$ST
 
 # Preserve the install identity but write the canonical final path into the staged marker.
 python3 - "$MARKER" "$STAGE/.claude-autonomy-install.json" "$DEST" <<'PY'
-import json, os, secrets, sys
+import json, os, secrets, stat, sys
 old_marker, stage_marker, dest = sys.argv[1:4]
 old = {}
-if os.path.exists(old_marker):
+if os.path.lexists(old_marker):
+    st = os.lstat(old_marker)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise SystemExit("Refusing upgrade: existing package marker changed to a non-regular file")
     with open(old_marker, encoding="utf-8") as f:
         old = json.load(f)
 obj = {
     "package_id": "claude-autonomous-optimisation-pack",
     "install_uuid": old.get("install_uuid") or secrets.token_hex(16),
     "canonical_install_path": os.path.realpath(dest),
-    "version": open(os.path.join(os.path.dirname(stage_marker), "VERSION")).read().strip(),
+    "version": open(os.path.join(os.path.dirname(stage_marker), "VERSION"), encoding="utf-8").read().strip(),
 }
-with open(stage_marker, "w") as f:
-    json.dump(obj, f, indent=2); f.write("\n")
-os.chmod(stage_marker, 0o600)
+flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(stage_marker, flags, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(obj, f, indent=2)
+    f.write("\n")
+os.chmod(stage_marker, 0o600, follow_symlinks=False)
 PY
 
 # Candidate must be self-consistent before the live install is moved at all.
