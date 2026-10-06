@@ -22,17 +22,26 @@ MARKER="$DEST/.claude-autonomy-install.json"
 PURGE="${1:-}"
 
 python3 - "$DEST" "$MARKER" "$HOME" "${XDG_DATA_HOME:-$HOME/.local/share}" "$PURGE" <<'PY'
-import json, os, sys
+import json, os, stat, sys
 dest, marker, home, xdg, purge = sys.argv[1:6]
 dest = os.path.realpath(os.path.expanduser(dest))
+marker = os.path.abspath(os.path.expanduser(marker))
 home = os.path.realpath(os.path.expanduser(home))
 xdg = os.path.realpath(os.path.expanduser(xdg))
 if purge not in {"", "--keep-state", "--purge-state"}:
     raise SystemExit("Usage: uninstall.sh [--keep-state|--purge-state]")
 if dest in {"/", home, xdg, os.path.dirname(home)} or len([p for p in dest.split(os.sep) if p]) < 3:
     raise SystemExit(f"Refusing unsafe uninstall destination: {dest}")
+if os.path.realpath(os.path.dirname(marker)) != dest or os.path.basename(marker) != ".claude-autonomy-install.json":
+    raise SystemExit("Refusing uninstall: package marker path is outside the canonical install directory")
 try:
-    with open(marker) as f:
+    st = os.lstat(marker)
+except OSError as exc:
+    raise SystemExit(f"Refusing uninstall: valid package marker missing at {marker}: {exc}")
+if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+    raise SystemExit("Refusing uninstall: package marker must be a regular non-symlink file")
+try:
+    with open(marker, encoding="utf-8") as f:
         obj = json.load(f)
 except Exception as exc:
     raise SystemExit(f"Refusing uninstall: valid package marker missing at {marker}: {exc}")
