@@ -2202,8 +2202,15 @@ def test_p7_planning_promotion_recovers_stale_task_source_generation(monkeypatch
             paths=["plans/tasks.json"],
         )
         validation = validate_planning_repair_candidate(root)
-        expected_new_digest = validation["candidate_task_source_set_sha256"]
-        assert expected_new_digest != old_digest
+        detached_candidate_digest = validation["candidate_task_source_set_sha256"]
+        assert detached_candidate_digest != old_digest
+        validated_active = load_active_repair(root)
+        candidate_evidence = json.loads(
+            Path(validated_active["candidate_authority_evidence_path"]).read_text()
+        )
+        expected_new_merged_digest = candidate_evidence[
+            "candidate_task_sources"
+        ]["merged_tasks_sha256"]
 
         monkeypatch.setattr(
             pr,
@@ -2256,7 +2263,14 @@ def test_p7_planning_promotion_recovers_stale_task_source_generation(monkeypatch
         rebuilt = resolve_task_sources(root, persist=True)
         assert rebuilt["status"] == "READY"
         assert rebuilt["product_head"] == candidate
-        assert rebuilt["task_source_set_sha256"] == expected_new_digest
+        # P1 intentionally binds branch identity into AuthoritySet snapshot
+        # identity. Candidate validation resolves an exact detached commit
+        # (branch=None), while the live rebuild resolves product HEAD on the
+        # named branch. Their full TaskSourceSet digests must therefore differ
+        # even though the exact task graph/content is the same.
+        assert rebuilt["task_source_set_sha256"] != detached_candidate_digest
+        assert rebuilt["task_source_set_sha256"] != old_digest
+        assert rebuilt["merged_tasks_sha256"] == expected_new_merged_digest
         assert [row["task"]["id"] for row in rebuilt["tasks"]] == ["T1", "T2"]
         assert task_source_status(root)["status"] == "READY"
 
