@@ -152,37 +152,39 @@ Authority-changing P3/P4 lifecycle commands are top-level-operator only when inv
 
 ## Repository-owned planning repair
 
+Legacy one-file planning remains available:
+
 ```bash
 claude-auto planning-repair configure --repo /path/to/repo --plan IMPLEMENTATION_PLAN.md
 claude-auto planning-repair status --repo /path/to/repo
 ```
 
-Optional remote-backed canonical planning:
+For repositories with `.claude-auto/governance.json`, P5 derives the same RepairEnvelope abstraction from one or more named AuthoritySets. If selection is ambiguous, choose the exact set(s) explicitly; repeat `--authority-set` for a deliberate multi-set repair:
 
 ```bash
-claude-auto planning-repair configure \
-  --repo /path/to/repo \
-  --plan IMPLEMENTATION_PLAN.md \
-  --remote origin \
-  --remote-branch main
-```
+claude-auto planning-repair begin --repo /path/to/repo \
+  --authority-set domain-a \
+  --reason "repair dependency ordering"
 
-The normal autonomous path is then:
+claude-auto planning-repair architect --repo /path/to/repo \
+  --authority-set domain-a \
+  --reason "repair dependency ordering"
 
-```bash
-claude-auto run --repo /path/to/repo --plan IMPLEMENTATION_PLAN.md
-```
-
-When a material plan defect is detected, the supervisor automatically performs the configured repair/verify/promote/revalidate sequence. The following commands are available for operator diagnostics/recovery and are top-level-operator only when they change authority:
-
-```bash
-claude-auto planning-repair begin --repo /path/to/repo --reason "..."
-claude-auto planning-repair architect --repo /path/to/repo --reason "..."
+claude-auto planning-repair reconcile --repo /path/to/repo
+claude-auto planning-repair validate --repo /path/to/repo
 claude-auto planning-repair verify --repo /path/to/repo
 claude-auto planning-repair refresh-base --repo /path/to/repo
 claude-auto planning-repair promote --repo /path/to/repo
 claude-auto planning-repair abort --repo /path/to/repo
 ```
+
+`begin` creates or recovers the dedicated repair worktree and binds the exact RepairEnvelope. `architect` may directly edit only repairable members; immutable members and governance/control state remain read-only. Generated members can be changed only by declared deterministic reconcilers via `reconcile`.
+
+`validate` rebuilds the exact candidate AuthoritySets and candidate TaskSources/graph without overwriting live runtime TaskSource state, then runs declared validators. `verify` preserves the legacy one-command workflow by automatically running any missing mandatory validation gates before invoking the independent exact-SHA Planning Verifier.
+
+The resulting enriched attestation binds the candidate SHA, RepairEnvelope, exact base, authority-content evidence and helper receipt digests. `promote`/generic protected `promote-ff` accepts only the exact attested planning candidate. `refresh-base` invalidates stale evidence and refuses automatic refresh when planning governance/control executables/verification control, selected authority contracts or TaskSource authority changed.
+
+Planning-repair authority-changing commands are top-level-operator/package operations and are not worker-self-service commands. Runtime profiles, including Unattended, do not widen RepairEnvelope authority.
 
 ## Narrow recovery and promotion
 
