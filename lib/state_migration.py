@@ -208,6 +208,7 @@ def _v8_to_v9(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _v9_to_v10(state: dict[str, Any]) -> dict[str, Any]:
+    _ensure_dict(state, "accepted_tasks")
     state.setdefault("state_schema_migration", None)
     state.setdefault("legacy_adoption", None)
     state.setdefault("session_adoption", None)
@@ -264,9 +265,19 @@ def _migration_id(
     source_schema: int,
     target_schema: int,
     before_sha256: str,
+    repository_identity: dict[str, Any] | None = None,
 ) -> str:
+    identity_digest = hashlib.sha256(
+        json.dumps(
+            repository_identity or {},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
     material = (
-        f"state-schema:{source_schema}:{target_schema}:{before_sha256}"
+        f"state-schema:{source_schema}:{target_schema}:{before_sha256}:"
+        f"{identity_digest}"
     ).encode("utf-8")
     return hashlib.sha256(material).hexdigest()[:24]
 
@@ -322,6 +333,8 @@ def migrate_state_on_disk(
     state_dir: Path,
     *,
     target_schema: int = CURRENT_STATE_SCHEMA,
+    repository_identity: dict[str, Any] | None = None,
+    git_head: str | None = None,
 ) -> dict[str, Any]:
     state_dir = state_dir.expanduser().resolve()
     state_path = state_dir / "state.json"
@@ -374,11 +387,15 @@ def migrate_state_on_disk(
                 raise StateMigrationError(
                     "unexpected active migration record exists for already-current state"
                 )
+        verified = _verify_current_state(
+            state_dir,
+            target_schema=target_schema,
+        )
         return {
             "status": "CURRENT",
             "source_schema": source_schema,
             "target_schema": target_schema,
-            "state": state,
+            "state": verified,
         }
 
     before_sha = _state_file_digest(state_path)
@@ -401,6 +418,7 @@ def migrate_state_on_disk(
             source_schema=source_schema,
             target_schema=target_schema,
             before_sha256=before_sha,
+            repository_identity=repository_identity,
         )
         record = {
             "schema_version": 1,
@@ -408,6 +426,13 @@ def migrate_state_on_disk(
             "source_schema": source_schema,
             "target_schema": target_schema,
             "before_state_sha256": before_sha,
+            "repository_identity": repository_identity or {},
+            "initial_git_head": str(git_head or ""),
+            "mutable_paths": [
+                "state.json",
+                "migrations/active.json",
+                "migrations/history/<migration-id>.json",
+            ],
             "lifecycle_state": "PREPARING",
             "started_at": utcnow(),
         }
