@@ -332,6 +332,7 @@ def capture_adopted_session_id(
     root: Path,
     *,
     state_dir: Path | None = None,
+    block_if_missing: bool = True,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     state_root = _state_root(root, state_dir)
@@ -354,6 +355,8 @@ def capture_adopted_session_id(
         None,
     )
     if not session_id:
+        if not block_if_missing:
+            return record
         return _persist(state_root, {
             **record,
             "lifecycle_state": "BLOCKED",
