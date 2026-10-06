@@ -417,6 +417,7 @@ def _architect_settings(
     path = _repair_dir(root) / "settings-architect.json"
     env = {
         "CLAUDE_AUTO_PLAN_REPAIR_ROOT": str(worktree),
+        "CLAUDE_AUTONOMY_STATE_DIR": str(repo_state_dir(root)),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     if plan is not None:
@@ -426,6 +427,15 @@ def _architect_settings(
     settings = {
         "env": env,
         "hooks": {
+            "SessionStart": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 -B " + shlex.quote(
+                        str(package_root() / "hooks" / "runtime_event_logger.py")
+                    ),
+                    "timeout": 5,
+                }],
+            }],
             "PreToolUse": [{
                 "matcher": "Edit|Write|NotebookEdit|Bash",
                 "hooks": [{
