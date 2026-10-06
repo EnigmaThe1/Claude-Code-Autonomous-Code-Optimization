@@ -1,6 +1,6 @@
 # RC4 P6 — Migration, Session Adoption and Shadow Validation Protocol
 
-Status: **DRAFT FOR INTERNAL RED-TEAM**
+Status: **FROZEN FOR IMPLEMENTATION**
 
 Date: 2026-10-06
 
@@ -9,6 +9,8 @@ Branch: `release/1.0.0-rc4`
 P5 qualified implementation: `8ada95010f6bdea52655db5432b768b3c48b4c82`
 
 P5 formal closure: `ff0f6ba6b914037a816145a1d78cb05cb71091b9`
+
+P6 protocol red-team closure: explicit future-schema zero-write preflight; no silent stale-base WIP rebase; imported acceptance remains claims until P4 re-attestation; external Claude conversation adoption uses current native resume with a fresh forked RC4-owned session; shadow mode is data-only/read-only.
 
 ## 1. Purpose
 
