@@ -3314,3 +3314,167 @@ def test_p6_interactive_product_context_uses_exact_p4_task_worktree(monkeypatch)
             str(worker_root),
         )
         _run(primary, "git", "branch", "-D", workspace["task_branch"])
+
+
+def test_p7_deterministic_verification_resumes_from_persisted_verifying(monkeypatch):
+    import task_acceptance as acceptance
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured_with_verification(
+            _repo(Path(td) / "repo"),
+            [_task("T1")],
+            "python -c \"raise SystemExit(0)\"",
+        )
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "candidate.txt").write_text("candidate\n")
+        candidate = seal_task_candidate(primary)
+
+        original = acceptance._fresh_verification_worktree
+        calls = {"count": 0}
+
+        def crash_once(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise TaskAcceptanceError(
+                    "simulated crash after VERIFYING persistence"
+                )
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(
+            acceptance,
+            "_fresh_verification_worktree",
+            crash_once,
+        )
+        with pytest.raises(
+            TaskAcceptanceError,
+            match="simulated crash after VERIFYING",
+        ):
+            acceptance.verify_task_candidate_deterministic(
+                primary,
+                unrestricted_host=True,
+                timeout=20,
+            )
+
+        interrupted = load_active_task_workspace(primary)
+        assert interrupted is not None
+        assert interrupted["lifecycle_state"] == "VERIFYING"
+        assert interrupted["candidate_sha"] == candidate["candidate_sha"]
+        assert interrupted.get("deterministic_verification_sha256") is None
+
+        monkeypatch.setattr(
+            acceptance,
+            "_fresh_verification_worktree",
+            original,
+        )
+        recovered = acceptance.verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=20,
+        )
+        assert recovered["status"] == "PASS"
+        assert recovered["candidate_sha"] == candidate["candidate_sha"]
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        assert workspace["lifecycle_state"] == "VERIFYING"
+        assert workspace["deterministic_verification_sha256"] == recovered[
+            "verification_bundle_sha256"
+        ]
+
+        _run(
+            primary,
+            "git",
+            "update-ref",
+            "-d",
+            candidate_ref_for_workspace(workspace),
+        )
+        _run(
+            primary,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        )
+        _run(primary, "git", "branch", "-D", record["task_branch"])
+
+
+def test_p7_accepted_cleanup_retries_after_candidate_ref_deleted(monkeypatch):
+    import task_acceptance as acceptance
+
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        primary = _configured(_repo(Path(td) / "repo"), [_task("T1")])
+        record = begin_task_workspace(primary)
+        worktree = Path(record["task_worktree"])
+        (worktree / "src" / "task" / "cleanup-crash.txt").write_text(
+            "accepted candidate\n"
+        )
+        candidate = seal_task_candidate(primary)
+        assert verify_task_candidate_deterministic(
+            primary,
+            unrestricted_host=True,
+            timeout=10,
+        )["status"] == "PASS"
+        assert _verify_current_candidate_with_fake(
+            primary,
+            candidate["candidate_sha"],
+        )["status"] == "VERIFIED"
+        accepted = accept_verified_task(primary)
+        assert accepted["status"] == "ACCEPTED_PENDING_CLEANUP"
+
+        workspace = load_active_task_workspace(primary)
+        assert workspace is not None
+        candidate_ref = candidate_ref_for_workspace(workspace)
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            "--hash",
+            candidate_ref,
+        ).stdout.strip() == candidate["candidate_sha"]
+
+        original_git = acceptance._git
+        failed = {"done": False}
+
+        def fail_worktree_remove(root, *args, **kwargs):
+            if (
+                not failed["done"]
+                and len(args) >= 2
+                and args[0] == "worktree"
+                and args[1] == "remove"
+            ):
+                failed["done"] = True
+                return subprocess.CompletedProcess(
+                    ["git", *args],
+                    77,
+                    stdout="",
+                    stderr="simulated cleanup crash",
+                )
+            return original_git(root, *args, **kwargs)
+
+        monkeypatch.setattr(acceptance, "_git", fail_worktree_remove)
+        with pytest.raises(TaskAcceptanceError, match="simulated cleanup crash"):
+            acceptance.cleanup_accepted_task_workspace(primary)
+
+        interrupted = load_active_task_workspace(primary)
+        assert interrupted is not None
+        assert interrupted["lifecycle_state"] == "ACCEPTED_PENDING_CLEANUP"
+        assert worktree.exists()
+        assert _run(
+            primary,
+            "git",
+            "show-ref",
+            "--verify",
+            candidate_ref,
+            check=False,
+        ).returncode != 0
+
+        monkeypatch.setattr(acceptance, "_git", original_git)
+        recovered = acceptance.cleanup_accepted_task_workspace(primary)
+        assert recovered["status"] == "CLEAN"
+        assert recovered["scheduler_status"] == "COMPLETE"
+        assert not worktree.exists()
+        assert load_active_task_workspace(primary) is None
