@@ -30,6 +30,11 @@ from repo_identity import repo_state_dir, repository_identity
 from repo_profile import profile_repo
 from runtime_paths import data_home, ensure_private_dir, package_root, utcnow
 from settings_policy import AUTONOMY_PROFILES, make_readonly_settings, make_settings
+from state_migration import (
+    CURRENT_STATE_SCHEMA,
+    migrate_state_on_disk,
+    preflight_state_schema,
+)
 from state_store import json_dump, load_json
 
 
@@ -73,12 +78,23 @@ def prune_runtime_history(sd: Path, max_log_files: int = 2000, max_log_bytes: in
 def activate(root: Path, dry_run: bool = False) -> Path:
     prof = profile_repo(root)
     sd = repo_state_dir(root)
+    existing_schema = preflight_state_schema(sd)
     if dry_run:
-        print(json.dumps({"would_write": str(sd), "profile": asdict(prof)}, indent=2))
+        print(json.dumps({
+            "would_write": str(sd),
+            "profile": asdict(prof),
+            "state_schema": existing_schema,
+            "target_state_schema": CURRENT_STATE_SCHEMA,
+        }, indent=2))
         return sd
+
+    # P6 state-schema migration happens before current-version governance,
+    # profile or settings state is persisted. SupervisorLease has already
+    # reconciled the outer legacy state-directory identity before activate().
     ensure_private_dir(data_home())
     ensure_private_dir(data_home() / "repos")
     ensure_private_dir(sd)
+    migrate_state_on_disk(sd)
     ensure_private_dir(sd / "logs")
     prune_runtime_history(sd)
 
@@ -101,7 +117,7 @@ def activate(root: Path, dry_run: bool = False) -> Path:
     state = load_json(sd / "state.json", {})
     if not state:
         state = {
-            "schema_version": 9,
+            "schema_version": CURRENT_STATE_SCHEMA,
             "created_at": utcnow(),
             "updated_at": utcnow(),
             "repo_root": str(root.resolve()),
@@ -130,13 +146,21 @@ def activate(root: Path, dry_run: bool = False) -> Path:
             "active_execution_envelope_sha256": None,
             "accepted_tasks": {},
             "governance_blocker": None,
+            "state_schema_migration": None,
+            "legacy_adoption": None,
+            "session_adoption": None,
+            "shadow_validation": None,
+            "migration_generation": 0,
         }
     else:
         state["updated_at"] = utcnow()
         state["repo_root"] = str(root.resolve())
         state["repo_id"] = prof.repo_id
         state["repo_identity"] = identity
-        state["schema_version"] = max(int(state.get("schema_version", 1)), 9)
+        if int(state.get("schema_version", 0) or 0) != CURRENT_STATE_SCHEMA:
+            raise ValueError(
+                f"state migration did not produce schema {CURRENT_STATE_SCHEMA}"
+            )
         state.setdefault("pending_permission_request", None)
         state.setdefault("permission_grants", [])
         state.setdefault("permission_decisions", [])
@@ -150,6 +174,11 @@ def activate(root: Path, dry_run: bool = False) -> Path:
         state.setdefault("active_execution_envelope_sha256", None)
         state.setdefault("accepted_tasks", {})
         state.setdefault("governance_blocker", None)
+        state.setdefault("state_schema_migration", None)
+        state.setdefault("legacy_adoption", None)
+        state.setdefault("session_adoption", None)
+        state.setdefault("shadow_validation", None)
+        state.setdefault("migration_generation", 0)
 
     previous_governance = state.get("governance_snapshot_sha256")
     current_governance = (
