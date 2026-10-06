@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 
 from authority_set import build_authority_snapshot
+from cli_schema import build_parser
+import claude_auto
 from repo_identity import SupervisorLease, repo_state_dir
 from repo_runtime import activate
 from state_adoption import (
@@ -32,6 +34,7 @@ from state_adoption import (
     begin_adopted_active_task,
     begin_adopted_task_reattestation,
     import_legacy_state_claims,
+    load_current_adoption,
 )
 from state_store import load_json
 from task_authority import task_readiness
@@ -707,3 +710,72 @@ def test_p6_wip_adoption_refuses_symlink_task_progress(monkeypatch):
         assert link.is_symlink()
         assert outside.read_text() == "outside\n"
         assert load_active_task_workspace(root) is None
+
+
+def test_p6_migrate_cli_parser_exposes_bounded_adoption_actions():
+    parser = build_parser("test")
+    cases = (
+        (["migrate", "status"], "status"),
+        (["migrate", "state"], "state"),
+        (["migrate", "planning-repair"], "planning-repair"),
+        (["migrate", "adopt-state", "--from", "legacy.json"], "adopt-state"),
+        (["migrate", "reattest", "T1"], "reattest"),
+        (["migrate", "adopt-active"], "adopt-active"),
+        (["migrate", "adopt-wip"], "adopt-wip"),
+    )
+    for argv, expected in cases:
+        args = parser.parse_args(argv)
+        assert args.command == "migrate"
+        assert args.migrate_command == expected
+
+
+def test_p6_migrate_adopt_state_cli_routes_real_claim_import(monkeypatch, capsys):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        task_set = _configure(root, [_task("T1")])
+        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+        snapshot = build_authority_snapshot(root)
+        assert snapshot is not None
+
+        doc = _write_document(
+            Path(td) / "legacy-cli.json",
+            {
+                "schema_version": 1,
+                "source_system": "legacy-cli-test",
+                "source_state_id": "cli-state-001",
+                "product_sha": head,
+                "verified_through_sha": head,
+                "authority_snapshot_sha256": snapshot["snapshot_sha256"],
+                "active_task": None,
+                "accepted_tasks": [],
+                "blockers": [],
+                "reservations": [],
+            },
+        )
+        monkeypatch.setattr(
+            claude_auto,
+            "require_top_level_operator",
+            lambda _root, _operation: None,
+        )
+        parser = build_parser("test")
+        args = parser.parse_args([
+            "migrate",
+            "adopt-state",
+            "--repo",
+            str(root),
+            "--from",
+            str(doc),
+        ])
+
+        rc = claude_auto._p6_migration_cli_action(args)
+        assert rc == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["source_system"] == "legacy-cli-test"
+        assert output["current_task_source_set_sha256"] == task_set[
+            "task_source_set_sha256"
+        ]
+
+        current = load_current_adoption(root)
+        assert current["adoption_sha256"] == output["adoption_sha256"]
+        assert current["source_state_id"] == "cli-state-001"
