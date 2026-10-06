@@ -1,6 +1,6 @@
 # Claude Code Autonomous Code Optimization
 
-**Version 1.0.0-rc3**
+**Version 1.0.0-rc4**
 
 Claude Code Autonomous Code Optimization is a user-level control and optimisation layer for Claude Code. It is designed for long-running software-engineering work where Claude should keep implementing, testing, diagnosing and repairing until the requested objective is complete or a genuine external blocker is reached.
 
