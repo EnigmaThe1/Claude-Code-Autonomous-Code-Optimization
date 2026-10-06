@@ -264,9 +264,11 @@ def _recover_p5_repair_worktree(
             detail = (cp.stderr or cp.stdout or "git worktree recovery failed").strip()
             raise ValueError(detail[:1600])
 
-    if _rev(worktree, "HEAD") != base:
+    expected_head = str(active.get("candidate_sha") or base)
+    if _rev(worktree, "HEAD") != expected_head:
         raise ValueError(
-            "planning repair worktree HEAD no longer matches the recorded base"
+            "planning repair worktree HEAD no longer matches the exact recorded "
+            + ("candidate" if active.get("candidate_sha") else "base")
         )
     if _current_branch(worktree) != repair_branch:
         raise ValueError(
