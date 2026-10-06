@@ -23,7 +23,11 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
-from authority_set import AuthoritySetError, build_authority_snapshot
+from authority_set import (
+    AuthoritySetError,
+    build_authority_snapshot,
+    planning_repair_control_digest,
+)
 from control_plane import _run_control_model, run_readonly_plan_agent
 from operator_authority import require_top_level_operator
 from git_trust import trusted_git_env
@@ -1749,10 +1753,14 @@ def _refresh_p5_planning_repair_base(
         raise ValueError(
             "P5 base refresh requires configured planning authority at old and new bases"
         )
-    if (
-        old_authority_snapshot.get("control_surface_digest")
-        != new_authority_snapshot.get("control_surface_digest")
-    ):
+    try:
+        old_control_digest = planning_repair_control_digest(root, old_base)
+        new_control_digest = planning_repair_control_digest(root, new_base)
+    except AuthoritySetError as exc:
+        raise ValueError(
+            f"unable to compare immutable planning control bytes across base refresh: {exc}"
+        ) from exc
+    if old_control_digest != new_control_digest:
         raise ValueError(
             "product-base advancement changed planning/helper/verification control "
             "surface bytes; the old RepairEnvelope is invalid and automatic refresh is refused"
