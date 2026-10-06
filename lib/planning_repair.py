@@ -2328,6 +2328,69 @@ def _cleanup_repair_worktree(root: Path, active: dict[str, Any]) -> None:
             raise ValueError("unable to remove completed planning repair branch")
 
 
+def _capture_live_task_source_generation(root: Path) -> dict[str, Any]:
+    """Capture the current durable TaskSourceSet generation before planning promotion.
+
+    A planning repair may change the task ledger itself.  Until the outer
+    supervisor explicitly rebuilds TaskSources at the new product HEAD, the
+    previously persisted generation must remain available only as STALE
+    evidence.  Promotion-side helpers must not silently replace it with
+    candidate authority.
+    """
+    state_root = repo_state_dir(root.expanduser().resolve())
+    source_path = state_root / "tasks" / "task-source-set.json"
+    source = load_json(source_path, {})
+    state = load_json(state_root / "state.json", {})
+    return {
+        "state_root": str(state_root),
+        "source_present": source_path.exists(),
+        "source": source if isinstance(source, dict) else {},
+        "task_source_sha256": (
+            state.get("task_source_sha256")
+            if isinstance(state, dict)
+            else None
+        ),
+    }
+
+
+def _restore_stale_task_source_generation_after_planning_promotion(
+    root: Path,
+    captured: dict[str, Any],
+) -> None:
+    root = root.expanduser().resolve()
+    before_root = Path(str(captured.get("state_root") or "")).resolve()
+    after_root = repo_state_dir(root).resolve()
+    if before_root != after_root:
+        raise ValueError(
+            "planning promotion changed durable repository-state identity; "
+            "automatic TaskSource interruption reconciliation is refused"
+        )
+
+    source_path = after_root / "tasks" / "task-source-set.json"
+    if bool(captured.get("source_present")):
+        source = captured.get("source")
+        if not isinstance(source, dict) or not source:
+            raise ValueError(
+                "captured pre-promotion TaskSourceSet is malformed"
+            )
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        json_dump(source_path, source)
+    else:
+        try:
+            source_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    state_path = after_root / "state.json"
+    state = load_json(state_path, {})
+    if not isinstance(state, dict):
+        raise ValueError(
+            "durable repository state is malformed after planning promotion"
+        )
+    state["task_source_sha256"] = captured.get("task_source_sha256")
+    json_dump(state_path, state)
+
+
 def promote_planning_repair(root: Path) -> dict[str, Any]:
     root = root.expanduser().resolve()
     policy = load_planning_repair_policy(root)
@@ -2344,6 +2407,7 @@ def promote_planning_repair(root: Path) -> dict[str, Any]:
         raise ValueError("planning repair promotion requires VERIFIED attestation for the exact active candidate SHA")
 
     remote = policy.get("remote") if isinstance(policy.get("remote"), str) and policy.get("remote") else None
+    task_source_generation = _capture_live_task_source_generation(root)
     result = promote_fast_forward(
         root,
         candidate,
@@ -2351,6 +2415,10 @@ def promote_planning_repair(root: Path) -> dict[str, Any]:
         remote=remote,
         remote_branch=str(policy.get("remote_branch") or policy["product_branch"]) if remote else None,
         expected_remote=str(active["base_sha"]) if remote else None,
+    )
+    _restore_stale_task_source_generation_after_planning_promotion(
+        root,
+        task_source_generation,
     )
     completed = dict(active)
     completed.update({
