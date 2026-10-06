@@ -374,7 +374,7 @@ def _verify_p5_planning_attestation(
 
     if not _sha256_metadata(envelope_sha):
         raise ValueError(
-            "P5 planning attestation is missing a valid RepairEnvelope digest"
+            "enriched planning attestation is missing a valid RepairEnvelope digest"
         )
     if str(attested_base or "").lower() != base_for_diff.lower():
         raise ValueError(
