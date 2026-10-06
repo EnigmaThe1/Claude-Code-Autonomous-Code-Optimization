@@ -2026,3 +2026,26 @@ def test_p5_unattended_does_not_bypass_repair_envelope(monkeypatch):
         assert denied["permissionDecision"] == "deny"
         assert "immutable" in denied["permissionDecisionReason"].lower()
         assert bash["permissionDecision"] == "deny"
+
+
+def test_p5_planning_cli_exposes_explicit_authority_set_selection():
+    from cli_schema import build_parser
+
+    parser = build_parser("test")
+    begin = parser.parse_args([
+        "planning-repair",
+        "begin",
+        "--authority-set",
+        "domain-a",
+        "--authority-set",
+        "domain-b",
+    ])
+    assert begin.authority_set == ["domain-a", "domain-b"]
+
+    architect = parser.parse_args([
+        "planning-repair",
+        "architect",
+        "--authority-set",
+        "domain-a",
+    ])
+    assert architect.authority_set == ["domain-a"]
