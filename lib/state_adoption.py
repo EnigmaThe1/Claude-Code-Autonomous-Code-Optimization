@@ -29,9 +29,16 @@ from planning_repair import load_active_repair
 from repo_identity import repo_state_dir, repository_identity
 from runtime_paths import ensure_private_dir, utcnow
 from state_store import json_dump, load_json
+from task_acceptance import TaskAcceptanceError, seal_task_candidate
 from task_authority import TaskAuthorityError, task_readiness
 from task_sources import TaskSourceError, resolve_task_sources
-from task_workspace import TaskWorkspaceError, load_active_task_workspace
+from task_spec import selector_matches_path
+from task_workspace import (
+    TaskWorkspaceError,
+    begin_task_workspace,
+    load_active_task_workspace,
+    update_task_workspace_package_state,
+)
 
 
 MAX_ADOPTION_BYTES = 2 * 1024 * 1024
@@ -508,3 +515,225 @@ def import_legacy_state_claims(
     }
     json_dump(state_path, state)
     return record
+
+
+def load_current_adoption(root: Path) -> dict[str, Any]:
+    root = root.expanduser().resolve()
+    path = repo_state_dir(root) / "adoption" / "current.json"
+    record = load_json(path, {})
+    if not isinstance(record, dict) or not record:
+        raise StateAdoptionError("no current legacy AdoptionRecord exists")
+    recorded = record.get("adoption_sha256")
+    semantic = {
+        key: value
+        for key, value in record.items()
+        if key not in {"adoption_sha256", "imported_at"}
+    }
+    if not isinstance(recorded, str) or recorded != _digest(semantic):
+        raise StateAdoptionError("current AdoptionRecord integrity check failed")
+    return record
+
+
+def _current_task_record(
+    root: Path,
+    task_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        task_set = resolve_task_sources(root, persist=False)
+    except TaskSourceError as exc:
+        raise StateAdoptionError(str(exc)) from exc
+    if task_set.get("status") != "READY":
+        raise StateAdoptionError(
+            "current repository has no READY TaskSourceSet for adoption"
+        )
+    index = _task_index(task_set)
+    row = index.get(task_id)
+    if row is None:
+        raise StateAdoptionError(
+            f"adopted task {task_id!r} is absent from current TaskSourceSet"
+        )
+    return task_set, row
+
+
+def _visible_primary_wip(root: Path) -> set[str]:
+    tracked = _git(
+        root,
+        "diff",
+        "--name-only",
+        "-z",
+        "HEAD",
+        "--",
+    )
+    if tracked.returncode != 0:
+        raise StateAdoptionError("unable to inspect primary tracked WIP")
+    untracked = _git(
+        root,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    )
+    if untracked.returncode != 0:
+        raise StateAdoptionError("unable to inspect primary untracked WIP")
+    return {
+        item
+        for payload in (tracked.stdout, untracked.stdout)
+        for item in payload.split("\0")
+        if item
+    }
+
+
+def _task_promotable_wip(
+    root: Path,
+    task: dict[str, Any],
+) -> list[str]:
+    selectors = [
+        *list(task.get("owned_paths") or []),
+        *list(task.get("evidence_paths") or []),
+    ]
+    return sorted(
+        rel
+        for rel in _visible_primary_wip(root)
+        if any(selector_matches_path(selector, rel) for selector in selectors)
+    )
+
+
+def begin_adopted_task_reattestation(
+    root: Path,
+    task_id: str,
+) -> dict[str, Any]:
+    """Prepare an imported accepted-task claim for normal P4 no-op acceptance.
+
+    This function does not verify or accept the task. It creates the ordinary
+    P4 task workspace/candidate, which must then pass existing deterministic
+    verification, independent Task Verifier and accept/cleanup gates.
+    """
+    root = root.expanduser().resolve()
+    adoption = load_current_adoption(root)
+    matches = [
+        row
+        for row in adoption.get("accepted_task_claims", [])
+        if isinstance(row, dict) and row.get("id") == task_id
+    ]
+    if len(matches) != 1:
+        raise StateAdoptionError(
+            f"AdoptionRecord has no unique accepted-task claim for {task_id!r}"
+        )
+    claim = matches[0]
+    if claim.get("status") != "ELIGIBLE_FOR_REATTESTATION":
+        raise StateAdoptionError(
+            f"accepted-task claim {task_id!r} is not eligible for re-attestation: "
+            f"{claim.get('status')!r}"
+        )
+
+    existing = load_active_task_workspace(root)
+    if existing is not None:
+        if (
+            existing.get("task_id") != task_id
+            or existing.get("adoption_sha256") != adoption["adoption_sha256"]
+            or existing.get("adoption_mode")
+            != "accepted-claim-reattestation"
+        ):
+            raise StateAdoptionError(
+                "another task workspace is already active"
+            )
+        return {
+            "status": existing["lifecycle_state"],
+            "task_id": task_id,
+            "candidate_sha": existing.get("candidate_sha"),
+            "task_workspace_sha256": existing[
+                "task_workspace_sha256"
+            ],
+            "adoption_sha256": adoption["adoption_sha256"],
+        }
+
+    try:
+        workspace = begin_task_workspace(root, task_id=task_id)
+        workspace = update_task_workspace_package_state(
+            root,
+            expected_states={"ACTIVE"},
+            updates={
+                "adoption_sha256": adoption["adoption_sha256"],
+                "adoption_mode": "accepted-claim-reattestation",
+                "legacy_accepted_product_sha": claim[
+                    "resolved_accepted_product_sha"
+                ],
+                "legacy_source_state_id": adoption["source_state_id"],
+            },
+        )
+        candidate = seal_task_candidate(root)
+    except (TaskWorkspaceError, TaskAcceptanceError) as exc:
+        raise StateAdoptionError(str(exc)) from exc
+
+    if not bool(candidate.get("no_op")):
+        raise StateAdoptionError(
+            "accepted-task re-attestation unexpectedly produced a non-no-op candidate"
+        )
+    if candidate.get("candidate_sha") != workspace.get(
+        "product_base_sha"
+    ):
+        raise StateAdoptionError(
+            "accepted-task re-attestation candidate is not the exact current product base"
+        )
+    return {
+        "status": "CANDIDATE",
+        "task_id": task_id,
+        "candidate_sha": candidate["candidate_sha"],
+        "no_op": True,
+        "task_workspace_sha256": candidate["task_workspace_sha256"],
+        "adoption_sha256": adoption["adoption_sha256"],
+        "next_gate": "deterministic-verification",
+    }
+
+
+def begin_adopted_active_task(
+    root: Path,
+) -> dict[str, Any]:
+    """Map a currently-ready imported active task into the normal P4 workspace."""
+    root = root.expanduser().resolve()
+    adoption = load_current_adoption(root)
+    claim = adoption.get("active_task_claim")
+    if not isinstance(claim, dict):
+        raise StateAdoptionError("AdoptionRecord has no active-task claim")
+    if claim.get("status") != "MAPPABLE_CURRENT_TASK":
+        raise StateAdoptionError(
+            "imported active task is not currently mappable: "
+            f"{claim.get('status')!r}"
+        )
+    task_id = str(claim["id"])
+    _task_set, row = _current_task_record(root, task_id)
+    task = row["task"]
+    promotable_wip = _task_promotable_wip(root, task)
+    if promotable_wip:
+        raise StateAdoptionError(
+            "imported active task has primary owned/evidence WIP requiring "
+            "explicit P6 WIP adoption: "
+            + ", ".join(promotable_wip[:40])
+        )
+
+    existing = load_active_task_workspace(root)
+    if existing is not None:
+        if (
+            existing.get("task_id") == task_id
+            and existing.get("adoption_sha256")
+            == adoption["adoption_sha256"]
+            and existing.get("adoption_mode") == "active-task-map"
+        ):
+            return existing
+        raise StateAdoptionError("another task workspace is already active")
+
+    try:
+        workspace = begin_task_workspace(root, task_id=task_id)
+        workspace = update_task_workspace_package_state(
+            root,
+            expected_states={"ACTIVE"},
+            updates={
+                "adoption_sha256": adoption["adoption_sha256"],
+                "adoption_mode": "active-task-map",
+                "legacy_source_state_id": adoption["source_state_id"],
+                "legacy_active_base_sha": claim["resolved_base_sha"],
+            },
+        )
+    except TaskWorkspaceError as exc:
+        raise StateAdoptionError(str(exc)) from exc
+    return workspace
