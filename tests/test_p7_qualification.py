@@ -501,3 +501,27 @@ def test_p7_tag_workflow_requires_exact_successful_main_ci_for_manual_and_automa
     assert 'run.get("conclusion") == "success"' in workflow
     assert "No successful main CI found for exact SHA" in workflow
     assert "main_ci_run=" in workflow
+
+
+def test_p7_tag_workflow_revalidates_remote_branch_heads_immediately_before_tag_write():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "tag-accepted-release.yml"
+    ).read_text(encoding="utf-8")
+    main_probe = (
+        'REMOTE_MAIN="$(git ls-remote --heads origin refs/heads/main '
+        '| awk \'{print $1}\')"'
+    )
+    release_probe = (
+        'REMOTE_RELEASE="$(git ls-remote --heads origin '
+        '"refs/heads/$RELEASE_BRANCH" | awk \'{print $1}\')"'
+    )
+    tag_write = 'gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs"'
+    assert main_probe in workflow
+    assert release_probe in workflow
+    assert "Main moved before tagging" in workflow
+    assert "Release branch moved before tagging" in workflow
+    assert workflow.rfind(main_probe) < workflow.rfind(tag_write)
+    assert workflow.rfind(release_probe) < workflow.rfind(tag_write)
