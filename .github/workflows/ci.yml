@@ -28,10 +28,11 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(cat VERSION)"
-          if [[ "$GITHUB_REF_NAME" == release/* ]]; then
-            EXPECTED="${GITHUB_REF_NAME#release/}"
+          EFFECTIVE_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          if [[ "$EFFECTIVE_BRANCH" == release/* ]]; then
+            EXPECTED="${EFFECTIVE_BRANCH#release/}"
             if [[ "$VERSION" != "$EXPECTED" ]]; then
-              echo "::error title=Release branch/version mismatch::Branch '$GITHUB_REF_NAME' requires VERSION '$EXPECTED', but VERSION contains '$VERSION'."
+              echo "::error title=Release branch/version mismatch::Branch '$EFFECTIVE_BRANCH' requires VERSION '$EXPECTED', but VERSION contains '$VERSION'."
               exit 1
             fi
           fi
@@ -74,7 +75,7 @@ jobs:
               raise SystemExit("Historical pre-public release labels detected:\n" + "\n".join(hits))
           PY
       - name: Prepare release-branch development manifest
-        if: startsWith(github.ref, 'refs/heads/release/')
+        if: ${{ startsWith(github.ref, 'refs/heads/release/') || startsWith(github.head_ref, 'release/') }}
         run: |
           set -euo pipefail
           python scripts/build_manifest.py --write
@@ -82,7 +83,7 @@ jobs:
             echo "::notice title=Development manifest refreshed::The committed MANIFEST.sha256 is not release-final for this development SHA. CI regenerated it in the runner so installer regressions can still execute."
           fi
       - name: Verify committed package manifest
-        if: ${{ !startsWith(github.ref, 'refs/heads/release/') }}
+        if: ${{ !(startsWith(github.ref, 'refs/heads/release/') || startsWith(github.head_ref, 'release/')) }}
         run: |
           set -euo pipefail
           python scripts/build_manifest.py --check
