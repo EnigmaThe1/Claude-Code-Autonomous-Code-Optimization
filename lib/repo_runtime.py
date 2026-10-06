@@ -25,7 +25,10 @@ from typing import Any
 
 from authority_set import build_authority_snapshot
 from environment_policy import sanitised_subprocess_env
-from migration import normalise_legacy_planning_policy
+from migration import (
+    migrate_legacy_planning_repair,
+    normalise_legacy_planning_policy,
+)
 from process_runner import run
 from repo_identity import repo_state_dir, repository_identity
 from repo_profile import profile_repo
@@ -109,6 +112,7 @@ def activate(root: Path, dry_run: bool = False) -> Path:
     # closed rather than producing a weaker settings file.
     authority_snapshot = build_authority_snapshot(root)
     normalise_legacy_planning_policy(root)
+    migrate_legacy_planning_repair(root)
     governance_dir = ensure_private_dir(sd / "governance")
     snapshot_path = governance_dir / "snapshot.json"
     if authority_snapshot is not None:
