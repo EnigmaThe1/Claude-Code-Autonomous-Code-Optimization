@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from migration import MigrationError, normalise_legacy_planning_policy
+from planning_repair import configure_planning_repair
 from repo_identity import SupervisorLease, repo_state_dir
 from repo_runtime import activate
 from state_migration import (
@@ -271,3 +273,86 @@ def test_p6_future_state_schema_refuses_before_activation_semantic_writes(monkey
         assert not (sd / "settings.json").exists()
         assert not (sd / "governance" / "snapshot.json").exists()
         assert not (sd / "migrations" / "active.json").exists()
+
+
+def test_p6_legacy_one_file_policy_normalises_without_rewriting_policy(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        plan = root / "PLAN.md"
+        plan.write_text("# canonical plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "add canonical plan")
+
+        configure_planning_repair(root, canonical_plan="PLAN.md")
+        sd = repo_state_dir(root)
+        policy_path = sd / "planning-repair" / "policy.json"
+        before_bytes = policy_path.read_bytes()
+        before_sha = hashlib.sha256(before_bytes).hexdigest()
+
+        with SupervisorLease(sd, root):
+            activate(root)
+
+        assert policy_path.read_bytes() == before_bytes
+        assert hashlib.sha256(policy_path.read_bytes()).hexdigest() == before_sha
+
+        normalised_path = sd / "planning-repair" / "policy-migration.json"
+        assert normalised_path.is_file()
+        record = json.loads(normalised_path.read_text())
+        assert record["schema_version"] == 1
+        assert record["generation"] == 1
+        assert record["canonical_plan"] == "PLAN.md"
+        assert record["authority_set_id"] == "default"
+        assert record["source_mode"] == "legacy"
+        assert len(record["authority_content_sha256"]) == 64
+        assert len(record["authority_snapshot_sha256"]) == 64
+        assert record["product_sha"] == _head(root)
+
+        # Re-activation does not rewrite either the legacy policy or its
+        # normalised semantic generation when all exact inputs are unchanged.
+        first_record = dict(record)
+        with SupervisorLease(sd, root):
+            activate(root)
+        assert policy_path.read_bytes() == before_bytes
+        second_record = json.loads(normalised_path.read_text())
+        assert second_record == first_record
+
+
+def test_p6_legacy_policy_normaliser_is_idempotent_when_called_directly(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("# plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        configure_planning_repair(root, canonical_plan="PLAN.md")
+
+        first = normalise_legacy_planning_policy(root)
+        second = normalise_legacy_planning_policy(root)
+        assert first is not None and second is not None
+        assert first == second
+        assert first["generation"] == 1
+        assert first["authority_set_id"] == "default"
+
+
+def test_p6_corrupt_legacy_policy_blocks_without_mutating_policy(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("# plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        configure_planning_repair(root, canonical_plan="PLAN.md")
+
+        sd = repo_state_dir(root)
+        policy_path = sd / "planning-repair" / "policy.json"
+        policy = json.loads(policy_path.read_text())
+        policy["product_branch"] = "missing-branch"
+        policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n")
+        before = policy_path.read_bytes()
+
+        with pytest.raises(MigrationError, match="product branch does not resolve"):
+            normalise_legacy_planning_policy(root)
+
+        assert policy_path.read_bytes() == before
+        assert not (sd / "planning-repair" / "policy-migration.json").exists()
