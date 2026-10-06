@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 import tomllib
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from authority_set import AuthoritySetError, _resolve_selector, _tree, build_authority_snapshot
 from execution import run_repository_command
@@ -68,12 +68,17 @@ def _json_no_duplicates(text: str, *, where: str) -> Any:
         raise TaskSourceError(f"{where} contains invalid JSON: {exc.msg}") from exc
 
 
-def _git_blob(root: Path, object_id: str) -> bytes:
+def _git_blob(
+    root: Path,
+    object_id: str,
+    *,
+    git_env: Mapping[str, str] | None = None,
+) -> bytes:
     size_cp = subprocess.run(
         ["git", "-C", str(root), "cat-file", "-s", object_id],
         text=True,
         capture_output=True,
-        env=trusted_git_env(root),
+        env=(dict(git_env) if git_env is not None else trusted_git_env(root)),
     )
     if size_cp.returncode != 0:
         raise TaskSourceError(f"unable to inspect committed task-source blob {object_id}")
@@ -87,7 +92,7 @@ def _git_blob(root: Path, object_id: str) -> bytes:
     cp = subprocess.run(
         ["git", "-C", str(root), "cat-file", "blob", object_id],
         capture_output=True,
-        env=trusted_git_env(root),
+        env=(dict(git_env) if git_env is not None else trusted_git_env(root)),
     )
     if cp.returncode != 0:
         raise TaskSourceError(f"unable to read committed task-source blob {object_id}")
@@ -237,11 +242,15 @@ def _materialise_inputs(
     root: Path,
     inputs: list[dict[str, str]],
     destination: Path,
+    *,
+    git_env: Mapping[str, str] | None = None,
 ) -> None:
     for record in inputs:
         target = destination / record["path"]
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(_git_blob(root, record["blob"]))
+        target.write_bytes(
+            _git_blob(root, record["blob"], git_env=git_env)
+        )
         try:
             target.chmod(0o755 if record["git_mode"] == "100755" else 0o644)
         except OSError:
@@ -258,6 +267,7 @@ def _run_adapter_once(
     snapshot: dict[str, Any],
     *,
     runner: AdapterRunner,
+    git_env: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     caps = source["capabilities"]
     if caps.get("network") or caps.get("read_external"):
@@ -267,7 +277,12 @@ def _run_adapter_once(
 
     with tempfile.TemporaryDirectory(prefix="claude-auto-adapter-view-") as td:
         view = Path(td).resolve()
-        _materialise_inputs(root, inputs, view)
+        _materialise_inputs(
+            root,
+            inputs,
+            view,
+            git_env=git_env,
+        )
         cwd = view if source["cwd"] == "." else (view / source["cwd"]).resolve()
         try:
             cwd.relative_to(view)
@@ -336,10 +351,25 @@ def _resolve_adapter(
     snapshot: dict[str, Any],
     *,
     runner: AdapterRunner,
+    git_env: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     inputs = _resolve_declared_inputs(source, tree, field="inputs")
-    first, ev1 = _run_adapter_once(root, source, inputs, snapshot, runner=runner)
-    second, ev2 = _run_adapter_once(root, source, inputs, snapshot, runner=runner)
+    first, ev1 = _run_adapter_once(
+        root,
+        source,
+        inputs,
+        snapshot,
+        runner=runner,
+        git_env=git_env,
+    )
+    second, ev2 = _run_adapter_once(
+        root,
+        source,
+        inputs,
+        snapshot,
+        runner=runner,
+        git_env=git_env,
+    )
 
     first_digest = ev1["normalised_output_sha256"]
     second_digest = ev2["normalised_output_sha256"]
@@ -365,6 +395,8 @@ def _resolve_builtin(
     source: dict[str, Any],
     tree: dict[str, dict[str, str]],
     snapshot: dict[str, Any],
+    *,
+    git_env: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if source["kind"] == "static":
         records = _normalise_rows(source["tasks"], source=source, snapshot=snapshot)
@@ -386,7 +418,11 @@ def _resolve_builtin(
     inputs = _resolve_declared_inputs(source, tree, field="paths")
     all_records: list[dict[str, Any]] = []
     for record in inputs:
-        payload = _git_blob(root, record["blob"])
+        payload = _git_blob(
+            root,
+            record["blob"],
+            git_env=git_env,
+        )
         rows = _parse_blob_rows(
             source["kind"],
             payload,
@@ -427,6 +463,7 @@ def resolve_task_sources(
     runner: AdapterRunner = run_repository_command,
     persist: bool = True,
     ref: str = "HEAD",
+    git_env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     if persist and ref != "HEAD":
@@ -475,10 +512,21 @@ def resolve_task_sources(
     for source in sorted(sources, key=lambda item: item["id"]):
         if source["kind"] == "adapter":
             records, evidence = _resolve_adapter(
-                root, source, tree, snapshot, runner=runner
+                root,
+                source,
+                tree,
+                snapshot,
+                runner=runner,
+                git_env=git_env,
             )
         else:
-            records, evidence = _resolve_builtin(root, source, tree, snapshot)
+            records, evidence = _resolve_builtin(
+                root,
+                source,
+                tree,
+                snapshot,
+                git_env=git_env,
+            )
         merged.extend(records)
         source_evidence.append(evidence)
         if len(merged) > MAX_TASKS:
