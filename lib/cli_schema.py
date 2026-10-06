@@ -227,9 +227,19 @@ def build_parser(version: str) -> argparse.ArgumentParser:
     pr = prsp.add_parser("begin", help="Create or recover the dedicated planning repair worktree")
     pr.add_argument("--repo")
     pr.add_argument("--reason", default="", help="Concrete planning defect/reconciliation reason")
-    pr = prsp.add_parser("architect", help="Run the dedicated one-plan Planning Repair Architect")
+    pr.add_argument(
+        "--authority-set",
+        action="append",
+        help="Exact AuthoritySet ID to repair; repeat for an explicitly selected multi-set repair",
+    )
+    pr = prsp.add_parser("architect", help="Run the dedicated Planning Repair Architect")
     pr.add_argument("--repo")
     pr.add_argument("--reason", default="", help="Concrete planning defect/reconciliation reason")
+    pr.add_argument(
+        "--authority-set",
+        action="append",
+        help="Exact AuthoritySet ID to repair; repeat for an explicitly selected multi-set repair",
+    )
     pr.add_argument("--model")
     pr.add_argument("--timeout", type=int, default=0)
     pr.add_argument("--max-turns", type=int, default=40)
