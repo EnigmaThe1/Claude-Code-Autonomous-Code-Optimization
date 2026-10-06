@@ -779,3 +779,49 @@ def test_p6_migrate_adopt_state_cli_routes_real_claim_import(monkeypatch, capsys
         current = load_current_adoption(root)
         assert current["adoption_sha256"] == output["adoption_sha256"]
         assert current["source_state_id"] == "cli-state-001"
+
+
+def test_p6_migrate_status_is_read_only_for_absent_adoption_state(monkeypatch, capsys):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        sd = repo_state_dir(root)
+        assert not (sd / "adoption").exists()
+        assert not (sd / "session-adoption").exists()
+
+        args = build_parser("test").parse_args([
+            "migrate",
+            "status",
+            "--repo",
+            str(root),
+        ])
+        rc = claude_auto._p6_migration_cli_action(args)
+        assert rc == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "READY"
+        assert output["legacy_adoption"] is None
+        assert output["session_adoption"] is None
+        assert not (sd / "adoption").exists()
+        assert not (sd / "session-adoption").exists()
+
+
+def test_p6_migrate_status_reports_corrupt_session_adoption_instead_of_hiding(monkeypatch, capsys):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        sd = repo_state_dir(root)
+        path = sd / "session-adoption" / "active.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"schema_version":1,"corrupt":true}\n')
+
+        args = build_parser("test").parse_args([
+            "migrate",
+            "status",
+            "--repo",
+            str(root),
+        ])
+        rc = claude_auto._p6_migration_cli_action(args)
+        assert rc == 2
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "BLOCKED"
+        assert "SessionAdoptionRecord semantic integrity check failed" in output["error"]
