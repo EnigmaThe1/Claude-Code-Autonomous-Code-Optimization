@@ -23,6 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from authority_set import AuthoritySetError, build_authority_snapshot
+from execution_envelope import (
+    ExecutionEnvelopeError,
+    load_active_execution_envelope,
+    path_matches_any,
+    path_relates_to_protected,
+)
 from git_trust import trusted_git_env
 from governance_contract import canonical_json_bytes
 from planning_repair import load_active_repair
@@ -737,3 +743,312 @@ def begin_adopted_active_task(
     except TaskWorkspaceError as exc:
         raise StateAdoptionError(str(exc)) from exc
     return workspace
+
+
+def _wip_adoption_active_path(root: Path) -> Path:
+    return repo_state_dir(root) / "adoption" / "wip-active.json"
+
+
+def _wip_adoption_history_dir(root: Path) -> Path:
+    return ensure_private_dir(repo_state_dir(root) / "adoption" / "wip-history")
+
+
+def _path_identity(path: Path, rel: str) -> dict[str, Any]:
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return {"path": rel, "kind": "missing"}
+    except OSError as exc:
+        raise StateAdoptionError(
+            f"unable to inspect WIP adoption path {rel!r}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise StateAdoptionError(
+            f"WIP adoption refuses symlink path: {rel}"
+        )
+    if not stat.S_ISREG(st.st_mode):
+        raise StateAdoptionError(
+            f"WIP adoption supports regular files/deletions only: {rel}"
+        )
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise StateAdoptionError(
+            f"unable to read WIP adoption path {rel!r}: {exc}"
+        ) from exc
+    return {
+        "path": rel,
+        "kind": "file",
+        "mode": stat.S_IMODE(st.st_mode),
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _source_wip_records(root: Path, rels: list[str]) -> list[dict[str, Any]]:
+    return [
+        _path_identity(root / rel, rel)
+        for rel in sorted(set(rels))
+    ]
+
+
+def _persist_wip_adoption(root: Path, record: dict[str, Any]) -> None:
+    path = _wip_adoption_active_path(root)
+    ensure_private_dir(path.parent)
+    json_dump(path, record)
+
+
+def _archive_wip_adoption(root: Path, record: dict[str, Any]) -> None:
+    digest = str(record.get("wip_adoption_sha256") or "")
+    if not digest:
+        raise StateAdoptionError("WIP adoption record has no semantic digest")
+    json_dump(_wip_adoption_history_dir(root) / f"{digest}.json", record)
+    try:
+        _wip_adoption_active_path(root).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _apply_source_record(
+    *,
+    source_root: Path,
+    task_root: Path,
+    record: dict[str, Any],
+) -> None:
+    rel = str(record["path"])
+    source = source_root / rel
+    target = task_root / rel
+    current = _path_identity(source, rel)
+    if current != record:
+        raise StateAdoptionError(
+            f"primary WIP changed during adoption at {rel}"
+        )
+    if record["kind"] == "missing":
+        if target.is_symlink():
+            raise StateAdoptionError(
+                f"task workspace target became symlink during WIP adoption: {rel}"
+            )
+        if target.exists():
+            if not target.is_file():
+                raise StateAdoptionError(
+                    f"task workspace deletion target is not a regular file: {rel}"
+                )
+            target.unlink()
+        return
+
+    if target.is_symlink():
+        raise StateAdoptionError(
+            f"task workspace target became symlink during WIP adoption: {rel}"
+        )
+    if target.exists() and not target.is_file():
+        raise StateAdoptionError(
+            f"task workspace target is not a regular file: {rel}"
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = source.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != record["sha256"]:
+        raise StateAdoptionError(
+            f"primary WIP changed while copying {rel}"
+        )
+    target.write_bytes(payload)
+    target.chmod(int(record["mode"]))
+
+
+def adopt_active_task_primary_wip(
+    root: Path,
+) -> dict[str, Any]:
+    """Copy exact promotable legacy task WIP into a clean P4 task workspace.
+
+    The primary checkout is source-only and must remain byte/mode identical.
+    Declared runtime scratch is ignored by default. Any other visible WIP blocks
+    automatic adoption rather than being silently discarded.
+    """
+    root = root.expanduser().resolve()
+    adoption = load_current_adoption(root)
+    claim = adoption.get("active_task_claim")
+    if not isinstance(claim, dict) or claim.get("status") != "MAPPABLE_CURRENT_TASK":
+        raise StateAdoptionError(
+            "current AdoptionRecord has no mappable active task for WIP adoption"
+        )
+    task_id = str(claim["id"])
+    task_set, row = _current_task_record(root, task_id)
+    current_head = str(task_set["product_head"]).lower()
+    if claim.get("resolved_base_sha") != current_head:
+        raise StateAdoptionError(
+            "legacy active-task base is stale; WIP adoption will not rebase it"
+        )
+    task = row["task"]
+    promotable_selectors = [
+        *list(task.get("owned_paths") or []),
+        *list(task.get("evidence_paths") or []),
+    ]
+    scratch_selectors = list(task.get("runtime_scratch_paths") or [])
+    visible = sorted(_visible_primary_wip(root))
+    admitted: list[str] = []
+    scratch: list[str] = []
+    unexpected: list[str] = []
+    for rel in visible:
+        if path_matches_any(rel, scratch_selectors):
+            scratch.append(rel)
+        elif path_matches_any(rel, promotable_selectors):
+            admitted.append(rel)
+        else:
+            unexpected.append(rel)
+    if unexpected:
+        raise StateAdoptionError(
+            "primary checkout contains out-of-envelope WIP; explicit adoption "
+            "refuses to guess ownership: "
+            + ", ".join(unexpected[:40])
+        )
+    if not admitted:
+        raise StateAdoptionError(
+            "primary checkout has no owned/evidence WIP to adopt; declared "
+            "scratch is not durable implementation progress"
+        )
+
+    source_records = _source_wip_records(root, admitted)
+    source_digest = _digest(source_records)
+    semantic = {
+        "schema_version": 1,
+        "adoption_sha256": adoption["adoption_sha256"],
+        "task_id": task_id,
+        "task_spec_sha256": row["task_spec_sha256"],
+        "product_base_sha": current_head,
+        "source_wip_sha256": source_digest,
+        "source_records": source_records,
+        "ignored_scratch_paths": scratch,
+    }
+    wip_digest = _digest(semantic)
+    active_record = load_json(_wip_adoption_active_path(root), {})
+    if active_record:
+        if (
+            not isinstance(active_record, dict)
+            or active_record.get("wip_adoption_sha256") != wip_digest
+        ):
+            raise StateAdoptionError(
+                "another WIP adoption transaction is already active"
+            )
+        record = active_record
+    else:
+        record = {
+            **semantic,
+            "wip_adoption_sha256": wip_digest,
+            "lifecycle_state": "PREPARING",
+            "started_at": utcnow(),
+        }
+        _persist_wip_adoption(root, record)
+
+    existing = load_active_task_workspace(root)
+    if existing is not None:
+        if (
+            existing.get("task_id") != task_id
+            or existing.get("adoption_sha256")
+            not in (None, adoption["adoption_sha256"])
+            or existing.get("adoption_mode")
+            not in (None, "active-task-wip")
+        ):
+            raise StateAdoptionError(
+                "another task workspace conflicts with WIP adoption"
+            )
+        workspace = existing
+    else:
+        try:
+            workspace = begin_task_workspace(root, task_id=task_id)
+        except TaskWorkspaceError as exc:
+            raise StateAdoptionError(str(exc)) from exc
+
+    task_root = Path(workspace["task_worktree"]).expanduser().resolve()
+    try:
+        envelope = load_active_execution_envelope(
+            task_root,
+            state_dir=repo_state_dir(root),
+            authority_root=root,
+            git_state_dir=repo_state_dir(root),
+        )
+    except ExecutionEnvelopeError as exc:
+        raise StateAdoptionError(str(exc)) from exc
+    for rel in admitted:
+        if path_relates_to_protected(rel, envelope["protected_paths"]):
+            raise StateAdoptionError(
+                f"WIP adoption path is protected semantic/control state: {rel}"
+            )
+        if not path_matches_any(rel, envelope["promotion_paths"]):
+            raise StateAdoptionError(
+                f"WIP adoption path escaped current task promotion authority: {rel}"
+            )
+        if path_matches_any(rel, envelope["runtime_scratch_paths"]):
+            raise StateAdoptionError(
+                f"WIP adoption path is runtime scratch, not promotable progress: {rel}"
+            )
+
+    record.update({
+        "lifecycle_state": "APPLYING",
+        "task_workspace_sha256": workspace["task_workspace_sha256"],
+        "task_worktree": str(task_root),
+    })
+    _persist_wip_adoption(root, record)
+
+    for source_record in source_records:
+        _apply_source_record(
+            source_root=root,
+            task_root=task_root,
+            record=source_record,
+        )
+
+    # Primary source must still equal the exact captured snapshot after copy.
+    after_source = _source_wip_records(root, admitted)
+    if after_source != source_records:
+        record.update({
+            "lifecycle_state": "BLOCKED",
+            "blocker": "primary WIP changed during adoption",
+            "blocked_at": utcnow(),
+        })
+        _persist_wip_adoption(root, record)
+        raise StateAdoptionError(
+            "primary WIP changed during adoption; copied workspace is preserved"
+        )
+    target_records = _source_wip_records(task_root, admitted)
+    if target_records != source_records:
+        record.update({
+            "lifecycle_state": "BLOCKED",
+            "blocker": "task workspace bytes/modes do not match source WIP",
+            "blocked_at": utcnow(),
+        })
+        _persist_wip_adoption(root, record)
+        raise StateAdoptionError(
+            "task workspace did not reproduce exact primary WIP bytes/modes"
+        )
+
+    try:
+        workspace = update_task_workspace_package_state(
+            root,
+            expected_states={"ACTIVE"},
+            updates={
+                "adoption_sha256": adoption["adoption_sha256"],
+                "adoption_mode": "active-task-wip",
+                "legacy_source_state_id": adoption["source_state_id"],
+                "legacy_active_base_sha": current_head,
+                "adoption_wip_sha256": wip_digest,
+                "adoption_wip_paths": admitted,
+                "adoption_ignored_scratch_paths": scratch,
+            },
+        )
+    except TaskWorkspaceError as exc:
+        raise StateAdoptionError(str(exc)) from exc
+
+    record.update({
+        "lifecycle_state": "COMPLETED",
+        "task_workspace_sha256": workspace["task_workspace_sha256"],
+        "completed_at": utcnow(),
+    })
+    _persist_wip_adoption(root, record)
+    _archive_wip_adoption(root, record)
+    return {
+        "status": "ACTIVE",
+        "task_id": task_id,
+        "task_worktree": str(task_root),
+        "task_workspace_sha256": workspace["task_workspace_sha256"],
+        "wip_adoption_sha256": wip_digest,
+        "adopted_paths": admitted,
+        "ignored_scratch_paths": scratch,
+    }
