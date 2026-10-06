@@ -270,6 +270,20 @@ from task_acceptance import (
     verify_task_candidate_independent,
 )
 from shadow_validation import shadow_action
+from migration import MigrationError, migrate_legacy_planning_repair
+from state_adoption import (
+    StateAdoptionError,
+    adopt_active_task_primary_wip,
+    begin_adopted_active_task,
+    begin_adopted_task_reattestation,
+    import_legacy_state_claims,
+    load_current_adoption,
+)
+from state_migration import (
+    StateMigrationError,
+    migrate_state_on_disk,
+    preflight_state_schema,
+)
 from operator_authority import require_top_level_operator
 from environment_policy import apply_resume_environment, capture_resume_environment
 from git_trust import git_trust_action
@@ -299,6 +313,7 @@ from session_adoption import (
     block_session_adoption,
     capture_adopted_session_id,
     finish_session_adoption,
+    load_session_adoption,
     mark_session_adoption_launched,
     prepare_session_adoption,
 )
@@ -3619,6 +3634,133 @@ def build_parser() -> argparse.ArgumentParser:
     return _build_parser(VERSION)
 
 
+def _p6_migration_cli_action(args: argparse.Namespace) -> int:
+    root = find_repo_root(getattr(args, "repo", None))
+    sd = repo_state_dir(root)
+    action = getattr(args, "migrate_command", None)
+
+    def _git_head() -> str:
+        cp = run([
+            "git",
+            "-C",
+            str(root),
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+        ])
+        if cp.returncode != 0 or not cp.stdout.strip():
+            raise ValueError("migration requires a valid current Git HEAD")
+        return cp.stdout.strip().lower()
+
+    try:
+        if action == "status":
+            schema = preflight_state_schema(sd)
+            state = load_json(sd / "state.json", {})
+            if not isinstance(state, dict):
+                state = {}
+            try:
+                adoption = load_current_adoption(root)
+            except StateAdoptionError:
+                adoption = None
+            try:
+                session = load_session_adoption(root, state_dir=sd)
+            except SessionAdoptionError:
+                session = None
+            result = {
+                "status": "READY",
+                "repository": str(root),
+                "state_schema": schema,
+                "current_state_schema": state.get("schema_version"),
+                "state_migration": load_json(
+                    sd / "migrations" / "active.json",
+                    {},
+                ) or None,
+                "planning_repair_migration": load_json(
+                    sd / "planning-repair" / "migration-active.json",
+                    {},
+                ) or None,
+                "legacy_adoption": (
+                    {
+                        "adoption_sha256": adoption.get("adoption_sha256"),
+                        "source_system": adoption.get("source_system"),
+                        "source_state_id": adoption.get("source_state_id"),
+                    }
+                    if isinstance(adoption, dict)
+                    else None
+                ),
+                "session_adoption": (
+                    {
+                        "lifecycle_state": session.get("lifecycle_state"),
+                        "selector_display": session.get("selector_display"),
+                        "adopted_session_id": session.get("adopted_session_id"),
+                        "role": session.get("role"),
+                    }
+                    if isinstance(session, dict)
+                    else None
+                ),
+                "active_planning_repair": load_active_repair(root),
+            }
+        elif action == "state":
+            require_top_level_operator(root, "P6 state migration")
+            with SupervisorLease(sd, root):
+                result = migrate_state_on_disk(
+                    sd,
+                    repository_identity=repository_identity(root),
+                    git_head=_git_head(),
+                )
+        elif action == "planning-repair":
+            require_top_level_operator(root, "P6 planning-repair migration")
+            with SupervisorLease(sd, root):
+                result = migrate_legacy_planning_repair(root)
+        elif action == "adopt-state":
+            require_top_level_operator(root, "P6 legacy state adoption")
+            with SupervisorLease(sd, root):
+                # Activation performs the explicit schema migration preflight
+                # and establishes current RC4 governance before claims import.
+                activate(root)
+                result = import_legacy_state_claims(
+                    root,
+                    Path(args.source),
+                )
+        elif action == "reattest":
+            require_top_level_operator(root, "P6 accepted-task re-attestation")
+            result = begin_adopted_task_reattestation(root, args.task_id)
+        elif action == "adopt-active":
+            require_top_level_operator(root, "P6 active-task adoption")
+            result = begin_adopted_active_task(root)
+        elif action == "adopt-wip":
+            require_top_level_operator(root, "P6 active-task WIP adoption")
+            result = adopt_active_task_primary_wip(root)
+        else:
+            raise ValueError(f"unsupported migrate command: {action}")
+    except (
+        MigrationError,
+        StateAdoptionError,
+        StateMigrationError,
+        SessionAdoptionError,
+        TaskWorkspaceError,
+        TaskAcceptanceError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(json.dumps({
+            "status": "BLOCKED",
+            "repository": str(root),
+            "error": str(exc),
+        }, indent=2))
+        return 2
+
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 2 if result.get("status") in {
+        "BLOCKED",
+        "FAIL",
+        "UNVERIFIED",
+        "REJECTED",
+        "STALE_BASE",
+        "PRIMARY_DRIFT",
+    } else 0
+
+
 def _p4_task_cli_action(args: argparse.Namespace) -> int:
     root = find_repo_root(getattr(args, "repo", None))
     action = getattr(args, "tasks_command", None)
@@ -3729,6 +3871,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "planning-repair": return planning_repair_action(args, find_repo_root=find_repo_root)
     if args.command == "governance": return governance_action(args, find_repo_root=find_repo_root)
     if args.command == "shadow": return shadow_action(args, find_repo_root=find_repo_root)
+    if args.command == "migrate": return _p6_migration_cli_action(args)
     if args.command == "tasks": return _p4_task_cli_action(args)
     if args.command == "promote-ff": return promote_ff_action(args, find_repo_root=find_repo_root)
     if args.command == "cleanup-untracked": return cleanup_untracked_action(args, find_repo_root=find_repo_root)
