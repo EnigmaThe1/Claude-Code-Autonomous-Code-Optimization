@@ -28,6 +28,7 @@ from repo_runtime import activate
 from state_adoption import (
     MAX_ADOPTION_BYTES,
     StateAdoptionError,
+    adopt_active_task_primary_wip,
     begin_adopted_active_task,
     begin_adopted_task_reattestation,
     import_legacy_state_claims,
@@ -518,4 +519,191 @@ def test_p6_imported_active_task_with_owned_primary_wip_requires_explicit_adopti
             begin_adopted_active_task(root)
 
         assert owned.read_bytes() == before
+        assert load_active_task_workspace(root) is None
+
+
+def test_p6_explicit_wip_adoption_preserves_bytes_modes_deletions_and_primary(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        existing = root / "src" / "T1" / "existing.py"
+        deleted = root / "src" / "T1" / "delete.py"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("print('base')\n")
+        deleted.write_text("delete me\n")
+        _run(root, "git", "add", "src/T1")
+        _run(root, "git", "commit", "-qm", "task source baseline")
+
+        task_set = _configure(root, [_task("T1")])
+        row = _task_rows(task_set)["T1"]
+        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+        doc = _write_document(
+            Path(td) / "wip-adopt.json",
+            {
+                "schema_version": 1,
+                "source_system": "legacy-harness",
+                "source_state_id": "wip-001",
+                "product_sha": head,
+                "active_task": {
+                    "id": "T1",
+                    "task_spec_sha256": row["task_spec_sha256"],
+                    "base_sha": head,
+                },
+                "accepted_tasks": [],
+                "blockers": [],
+                "reservations": [],
+            },
+        )
+        import_legacy_state_claims(root, doc)
+
+        existing.write_text("print('legacy progress')\n")
+        existing.chmod(0o755)
+        deleted.unlink()
+        new_file = root / "src" / "T1" / "new.bin"
+        new_file.write_bytes(b"\x00legacy-progress\xff")
+        new_file.chmod(0o640)
+        scratch = root / ".scratch" / "T1" / "cache.bin"
+        scratch.parent.mkdir(parents=True)
+        scratch.write_bytes(b"non-durable scratch")
+
+        primary_existing = existing.read_bytes()
+        primary_existing_mode = existing.stat().st_mode & 0o777
+        primary_new = new_file.read_bytes()
+        primary_new_mode = new_file.stat().st_mode & 0o777
+        primary_scratch = scratch.read_bytes()
+
+        result = adopt_active_task_primary_wip(root)
+        assert result["status"] == "ACTIVE"
+        assert result["task_id"] == "T1"
+        assert result["adopted_paths"] == [
+            "src/T1/delete.py",
+            "src/T1/existing.py",
+            "src/T1/new.bin",
+        ]
+        assert result["ignored_scratch_paths"] == [
+            ".scratch/T1/cache.bin"
+        ]
+
+        task_root = Path(result["task_worktree"])
+        assert (task_root / "src/T1/existing.py").read_bytes() == primary_existing
+        assert (
+            (task_root / "src/T1/existing.py").stat().st_mode & 0o777
+        ) == primary_existing_mode
+        assert not (task_root / "src/T1/delete.py").exists()
+        assert (task_root / "src/T1/new.bin").read_bytes() == primary_new
+        assert (
+            (task_root / "src/T1/new.bin").stat().st_mode & 0o777
+        ) == primary_new_mode
+        assert not (task_root / ".scratch/T1/cache.bin").exists()
+
+        # Primary checkout remains exactly the dirty legacy source of truth.
+        assert existing.read_bytes() == primary_existing
+        assert (existing.stat().st_mode & 0o777) == primary_existing_mode
+        assert not deleted.exists()
+        assert new_file.read_bytes() == primary_new
+        assert (new_file.stat().st_mode & 0o777) == primary_new_mode
+        assert scratch.read_bytes() == primary_scratch
+
+        workspace = load_active_task_workspace(root)
+        assert workspace is not None
+        assert workspace["adoption_mode"] == "active-task-wip"
+        assert workspace["adoption_wip_sha256"] == result[
+            "wip_adoption_sha256"
+        ]
+        assert workspace["adoption_ignored_scratch_paths"] == [
+            ".scratch/T1/cache.bin"
+        ]
+        assert not (
+            repo_state_dir(root) / "adoption" / "wip-active.json"
+        ).exists()
+        assert (
+            repo_state_dir(root)
+            / "adoption"
+            / "wip-history"
+            / f"{result['wip_adoption_sha256']}.json"
+        ).is_file()
+
+
+def test_p6_wip_adoption_blocks_unrelated_primary_changes_without_creating_workspace(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        task_set = _configure(root, [_task("T1")])
+        row = _task_rows(task_set)["T1"]
+        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+        doc = _write_document(
+            Path(td) / "wip-block.json",
+            {
+                "schema_version": 1,
+                "source_system": "legacy-harness",
+                "source_state_id": "wip-block-001",
+                "product_sha": head,
+                "active_task": {
+                    "id": "T1",
+                    "task_spec_sha256": row["task_spec_sha256"],
+                    "base_sha": head,
+                },
+                "accepted_tasks": [],
+                "blockers": [],
+                "reservations": [],
+            },
+        )
+        import_legacy_state_claims(root, doc)
+
+        owned = root / "src" / "T1" / "work.py"
+        owned.parent.mkdir(parents=True)
+        owned.write_text("legacy work\n")
+        unrelated = root / "README.md"
+        unrelated.write_text("unrelated primary edit\n")
+        owned_before = owned.read_bytes()
+        unrelated_before = unrelated.read_bytes()
+
+        with pytest.raises(StateAdoptionError, match="out-of-envelope WIP"):
+            adopt_active_task_primary_wip(root)
+
+        assert owned.read_bytes() == owned_before
+        assert unrelated.read_bytes() == unrelated_before
+        assert load_active_task_workspace(root) is None
+        assert not (
+            repo_state_dir(root) / "adoption" / "wip-active.json"
+        ).exists()
+
+
+def test_p6_wip_adoption_refuses_symlink_task_progress(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        task_set = _configure(root, [_task("T1")])
+        row = _task_rows(task_set)["T1"]
+        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+        doc = _write_document(
+            Path(td) / "wip-symlink.json",
+            {
+                "schema_version": 1,
+                "source_system": "legacy-harness",
+                "source_state_id": "wip-symlink-001",
+                "product_sha": head,
+                "active_task": {
+                    "id": "T1",
+                    "task_spec_sha256": row["task_spec_sha256"],
+                    "base_sha": head,
+                },
+                "accepted_tasks": [],
+                "blockers": [],
+                "reservations": [],
+            },
+        )
+        import_legacy_state_claims(root, doc)
+
+        outside = Path(td) / "outside.txt"
+        outside.write_text("outside\n")
+        link = root / "src" / "T1" / "link.txt"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(outside)
+
+        with pytest.raises(StateAdoptionError, match="symlink"):
+            adopt_active_task_primary_wip(root)
+
+        assert link.is_symlink()
+        assert outside.read_text() == "outside\n"
         assert load_active_task_workspace(root) is None
