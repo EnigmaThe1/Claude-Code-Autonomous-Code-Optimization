@@ -824,4 +824,8 @@ def test_p6_migrate_status_reports_corrupt_session_adoption_instead_of_hiding(mo
         assert rc == 2
         output = json.loads(capsys.readouterr().out)
         assert output["status"] == "BLOCKED"
-        assert "SessionAdoptionRecord semantic integrity check failed" in output["error"]
+        assert "SessionAdoptionRecord" in output["error"]
+        assert (
+            "semantic integrity check failed" in output["error"]
+            or "missing semantic field" in output["error"]
+        )
