@@ -1666,6 +1666,65 @@ def test_p7_install_refuses_corrupt_foreign_or_mismatched_existing_marker():
             assert (bindir / "claude-auto").is_symlink()
 
 
+def test_p7_install_and_uninstall_refuse_symlink_package_marker():
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as install:
+        bindir = Path(home) / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        dest = Path(install) / "pack"
+        env = os.environ.copy()
+        env.update({
+            "HOME": home,
+            "CLAUDE_AUTONOMY_HOME": str(dest),
+            "CLAUDE_AUTONOMY_BIN": str(bindir),
+        })
+        first = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), "--no-plugins"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert first.returncode == 0, first.stderr
+
+        marker = dest / ".claude-autonomy-install.json"
+        marker_bytes = marker.read_bytes()
+        external = Path(install) / "external-marker.json"
+        external.write_bytes(marker_bytes)
+        marker.unlink()
+        marker.symlink_to(external)
+
+        before_version = (dest / "VERSION").read_bytes()
+        sentinel = dest / "repos" / "keep" / "state.json"
+        sentinel.parent.mkdir(parents=True)
+        sentinel.write_bytes(b"symlink-marker-state\n")
+
+        attempted = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), "--no-plugins"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert attempted.returncode != 0
+        assert "regular non-symlink" in attempted.stderr
+        assert external.read_bytes() == marker_bytes
+        assert marker.is_symlink()
+        assert (dest / "VERSION").read_bytes() == before_version
+        assert sentinel.read_bytes() == b"symlink-marker-state\n"
+
+        removed = subprocess.run(
+            ["bash", str(dest / "uninstall.sh"), "--purge-state"],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert removed.returncode != 0
+        assert "regular non-symlink" in removed.stderr
+        assert external.read_bytes() == marker_bytes
+        assert dest.is_dir()
+        assert sentinel.read_bytes() == b"symlink-marker-state\n"
+
+
 def test_p7_rc3_identity_upgrade_preserves_durable_state():
     with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as install:
         bindir = Path(home) / ".local" / "bin"
