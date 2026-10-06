@@ -443,3 +443,157 @@ def test_interactive_hot_switch_resumes_exact_session_and_preserves_objective(mo
         assert after["objective"] == "keep-the-objective"
         assert after["autonomy_profile"] == "unattended"
         assert pending_profile_switch(sd) is None
+
+
+def test_start_parser_exposes_forked_session_adoption_selector_and_role():
+    spec = importlib.util.spec_from_file_location(
+        "claude_auto_session_adoption_parser",
+        LIB / "claude_auto.py",
+    )
+    ca = importlib.util.module_from_spec(spec)
+    sys.modules["claude_auto_session_adoption_parser"] = ca
+    spec.loader.exec_module(ca)
+    parser = ca.build_parser()
+
+    product = parser.parse_args([
+        "start",
+        "--resume-session",
+        "legacy-session-name",
+    ])
+    assert product.resume_session == "legacy-session-name"
+    assert product.resume_role == "product"
+
+    architect = parser.parse_args([
+        "start",
+        "--resume-session",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "--resume-role",
+        "planning-architect",
+    ])
+    assert architect.resume_role == "planning-architect"
+
+
+def test_interactive_external_session_adoption_forks_and_records_new_session(monkeypatch):
+    spec = importlib.util.spec_from_file_location(
+        "claude_auto_session_adoption_interactive",
+        LIB / "claude_auto.py",
+    )
+    ca = importlib.util.module_from_spec(spec)
+    sys.modules["claude_auto_session_adoption_interactive"] = ca
+    spec.loader.exec_module(ca)
+
+    from session_adoption import load_session_adoption, prepare_session_adoption
+    from state_store import json_dump
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        sd = base / "state"
+        root = base / "repo"
+        sd.mkdir()
+        root.mkdir()
+        _git_repo(root)
+        json_dump(sd / "state.json", {
+            "schema_version": 10,
+            "autonomy_profile": "balanced",
+            "objective": "preserve objective",
+            "session_settings_explicit": False,
+            "governance_snapshot_sha256": None,
+            "task_source_sha256": None,
+        })
+        settings = sd / "settings-balanced-external.json"
+        settings.write_text("{}\n")
+
+        prepare_session_adoption(
+            root,
+            "legacy-session-name",
+            working_directory=root,
+            settings_path=settings,
+            autonomy_profile="balanced",
+            role="product",
+            state_dir=sd,
+        )
+
+        args = argparse.Namespace(
+            profile="balanced",
+            session_settings="hermetic",
+            objective=None,
+            permission_mode="auto",
+            memory_mode="external",
+            model=None,
+            effort="high",
+            subagent_model=None,
+            verifier_model=None,
+            researcher_model=None,
+            provider="native",
+        )
+        monkeypatch.setattr(
+            ca,
+            "provider_from_args",
+            lambda _args: (os.environ.copy(), {"provider": "native"}),
+        )
+        monkeypatch.setattr(ca, "warn_model_qualification", lambda *a, **k: None)
+        monkeypatch.setattr(
+            ca,
+            "claude_base_args",
+            lambda *a, **k: [
+                "fake-claude",
+                "--settings-path",
+                str(k.get("settings_path") or ""),
+            ],
+        )
+
+        commands = []
+
+        class FakeProc:
+            def __init__(self, cmd, **kwargs):
+                self.cmd = list(cmd)
+                self.pid = 42001
+                self.returncode = None
+                self.cwd = kwargs.get("cwd")
+                commands.append(self.cmd)
+                with (sd / "runtime-events.jsonl").open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({
+                        "event": "SessionStart",
+                        "session_id": "fresh-forked-session-456",
+                    }) + "\n")
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                del timeout
+                self.returncode = 0
+                return 0
+
+        monkeypatch.setattr(ca.subprocess, "Popen", FakeProc)
+        rc = ca._do_start_unlocked(
+            args,
+            root,
+            sd,
+            settings_path_override=settings,
+            adoption_coordinator_root=root,
+            initial_resume_selector="legacy-session-name",
+        )
+        assert rc == 0
+        assert len(commands) == 1
+        command = commands[0]
+        assert "--resume" in command
+        resume_idx = command.index("--resume")
+        assert command[resume_idx + 1] == "legacy-session-name"
+        assert "--fork-session" in command
+        assert "--setting-sources" in command
+        sources_idx = command.index("--setting-sources")
+        assert command[sources_idx + 1] == ""
+
+        adoption = load_session_adoption(root, state_dir=sd)
+        assert adoption is not None
+        assert adoption["lifecycle_state"] == "ENDED"
+        assert adoption["adopted_session_id"] == "fresh-forked-session-456"
+        assert adoption["selector_display"] == "legacy-session-name"
+        assert adoption["return_code"] == 0
