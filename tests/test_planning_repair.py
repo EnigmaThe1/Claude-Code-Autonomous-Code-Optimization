@@ -15,6 +15,7 @@ from planning_repair import (
     begin_planning_repair,
     configure_planning_repair,
     load_active_repair,
+    planning_repair_session_context,
     promote_planning_repair,
     refresh_planning_repair_base,
     run_planning_repair_architect,
@@ -23,12 +24,14 @@ from planning_repair import (
     verify_planning_repair,
 )
 from promotion_policy import load_promotion_attestation
+from repo_runtime import activate
 from repair_envelope import (
     RepairEnvelopeError,
     derive_repair_envelope,
     load_repair_envelope,
     persist_repair_envelope,
 )
+from session_adoption import prepare_session_adoption
 from settings_policy import make_settings
 from state_store import json_dump
 from task_sources import resolve_task_sources
@@ -2074,3 +2077,70 @@ def test_p6_p5_candidate_worktree_recovery_uses_recorded_candidate_head(monkeypa
             "HEAD",
         ).stdout.strip() == candidate
         assert recovered["repair_envelope_sha256"]
+
+
+def test_p6_planning_architect_session_context_binds_exact_repair_and_session_logger(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "main.md").write_text("plan\n")
+        _git(root, "add", "plans/main.md")
+        _git(root, "commit", "-qm", "planning authority")
+        _p5_write_governance(
+            root,
+            _p5_contract([
+                _p5_set("a", [
+                    _p5_member(
+                        "plans/*.md",
+                        role="source",
+                        repair="repairable",
+                    ),
+                ]),
+            ]),
+        )
+        activate(root)
+        active = begin_planning_repair(
+            root,
+            reason="adopt architect session",
+            authority_sets=["a"],
+        )
+        assert active["schema_version"] == 2
+        assert active["status"] == "ACTIVE"
+
+        worktree, settings_path, current = planning_repair_session_context(root)
+        assert worktree == Path(active["worktree"]).resolve()
+        assert current["repair_envelope_sha256"] == active[
+            "repair_envelope_sha256"
+        ]
+        settings = json.loads(settings_path.read_text())
+        assert settings["env"]["CLAUDE_AUTO_PLAN_REPAIR_ROOT"] == str(worktree)
+        assert settings["env"]["CLAUDE_AUTONOMY_STATE_DIR"] == str(
+            pr.repo_state_dir(root)
+        )
+        session_hooks = settings["hooks"]["SessionStart"]
+        commands = [
+            hook["command"]
+            for group in session_hooks
+            for hook in group.get("hooks", [])
+        ]
+        assert any("runtime_event_logger.py" in command for command in commands)
+        assert "planning_repair_guard.py" in str(
+            settings["hooks"]["PreToolUse"]
+        )
+
+        record = prepare_session_adoption(
+            root,
+            "legacy-architect-session",
+            working_directory=worktree,
+            settings_path=settings_path,
+            autonomy_profile="balanced",
+            role="planning-architect",
+            state_dir=pr.repo_state_dir(root),
+        )
+        assert record["lifecycle_state"] == "PREPARING"
+        assert record["role"] == "planning-architect"
+        assert record["working_directory"] == str(worktree)
+        assert record["repair_envelope_sha256"] == active[
+            "repair_envelope_sha256"
+        ]
