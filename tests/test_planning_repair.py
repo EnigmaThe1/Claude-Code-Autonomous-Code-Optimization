@@ -1814,3 +1814,215 @@ def test_p5_independent_verifier_nonverified_outcome_creates_no_attestation(monk
         current = load_active_repair(root)
         assert current["verified_sha"] is None
         assert current["last_verifier"]["verdict"] == verdict
+
+
+def test_p5_large_multifile_authority_envelope_is_deterministic(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        plans = root / "plans"
+        plans.mkdir()
+        expected = []
+        for index in range(300):
+            rel = f"plans/plan-{index:03d}.md"
+            (root / rel).write_text(f"plan {index}\n")
+            expected.append(rel)
+        _git(root, "add", "plans")
+        _git(root, "commit", "-qm", "large planning authority")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    "plans/*.md",
+                    role="source",
+                    repair="repairable",
+                )],
+            ),
+        ]))
+
+        first = derive_repair_envelope(
+            root,
+            reason="large multi-file repair",
+            authority_sets=["a"],
+        )
+        second = derive_repair_envelope(
+            root,
+            reason="large multi-file repair",
+            authority_sets=["a"],
+        )
+        assert first["repairable_paths"] == expected
+        assert second["repairable_paths"] == expected
+        assert first["repair_envelope_sha256"] == second[
+            "repair_envelope_sha256"
+        ]
+
+
+def test_p5_unicode_space_repairable_path_is_preserved_exactly(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        plans = root / "plans"
+        plans.mkdir()
+        rel = "plans/Δ planning file.md"
+        (root / rel).write_text("unicode plan\n")
+        _git(root, "add", "--", rel)
+        _git(root, "commit", "-qm", "unicode planning member")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    rel,
+                    role="source",
+                    repair="repairable",
+                )],
+            ),
+        ]))
+
+        active = begin_planning_repair(
+            root,
+            reason="repair unicode planning member",
+            authority_sets=["a"],
+        )
+        envelope = load_repair_envelope(root)
+        assert envelope is not None
+        assert envelope["repairable_paths"] == [rel]
+
+        env = {
+            "CLAUDE_AUTO_PLAN_REPAIR_ROOT": active["worktree"],
+            "CLAUDE_AUTO_PLAN_REPAIR_ENVELOPE": str(
+                pr.repo_state_dir(root)
+                / "planning-repair"
+                / "repair-envelope.json"
+            ),
+        }
+        result = _hook(
+            "Write",
+            {"file_path": str(Path(active["worktree"]) / rel)},
+            env,
+        )
+        assert result["permissionDecision"] == "allow"
+
+
+def test_p5_symlink_authority_member_is_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        plans = root / "plans"
+        plans.mkdir()
+        (plans / "real.md").write_text("real\n")
+        (plans / "link.md").symlink_to("real.md")
+        _git(root, "add", "plans")
+        _git(root, "commit", "-qm", "symlink planning member")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    "plans/link.md",
+                    role="source",
+                    repair="repairable",
+                )],
+            ),
+        ]))
+
+        with pytest.raises(RepairEnvelopeError, match="symlink"):
+            derive_repair_envelope(
+                root,
+                reason="unsafe symlink authority",
+                authority_sets=["a"],
+            )
+
+
+def test_p5_gitlink_authority_member_is_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        object_id = _git(root, "rev-parse", "HEAD").stdout.strip()
+        _git(
+            root,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{object_id},nested",
+        )
+        _git(root, "commit", "-qm", "gitlink planning member")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    "nested",
+                    role="source",
+                    repair="repairable",
+                )],
+            ),
+        ]))
+
+        with pytest.raises(RepairEnvelopeError, match="gitlink|submodule"):
+            derive_repair_envelope(
+                root,
+                reason="unsafe gitlink authority",
+                authority_sets=["a"],
+            )
+
+
+def test_p5_unattended_does_not_bypass_repair_envelope(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "main.md").write_text("repairable\n")
+        (root / "requirements.md").write_text("immutable\n")
+        _git(root, "add", "plans/main.md", "requirements.md")
+        _git(root, "commit", "-qm", "planning authority")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [
+                    _p5_member(
+                        "plans/main.md",
+                        role="source",
+                        repair="repairable",
+                    ),
+                    _p5_member(
+                        "requirements.md",
+                        role="contract",
+                        repair="immutable",
+                    ),
+                ],
+            ),
+        ]))
+        active = begin_planning_repair(
+            root,
+            reason="unattended governance qualification",
+            authority_sets=["a"],
+        )
+        worktree = Path(active["worktree"])
+        env = {
+            "CLAUDE_AUTO_PLAN_REPAIR_ROOT": str(worktree),
+            "CLAUDE_AUTO_PLAN_REPAIR_ENVELOPE": str(
+                pr.repo_state_dir(root)
+                / "planning-repair"
+                / "repair-envelope.json"
+            ),
+            "CLAUDE_AUTONOMY_PROFILE": "unattended",
+            "CLAUDE_AUTO_SEMANTIC_ONLY_WRITE_GUARD": "1",
+        }
+
+        allowed = _hook(
+            "Write",
+            {"file_path": str(worktree / "plans" / "main.md")},
+            env,
+        )
+        denied = _hook(
+            "Write",
+            {"file_path": str(worktree / "requirements.md")},
+            env,
+        )
+        bash = _hook(
+            "Bash",
+            {"command": "printf x > plans/main.md"},
+            env,
+        )
+        assert allowed["permissionDecision"] == "allow"
+        assert denied["permissionDecision"] == "deny"
+        assert "immutable" in denied["permissionDecisionReason"].lower()
+        assert bash["permissionDecision"] == "deny"
