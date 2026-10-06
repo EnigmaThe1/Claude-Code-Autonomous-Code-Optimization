@@ -1666,6 +1666,61 @@ def test_p7_install_refuses_corrupt_foreign_or_mismatched_existing_marker():
             assert (bindir / "claude-auto").is_symlink()
 
 
+def test_p7_install_and_uninstall_refuse_symlink_destination():
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as install:
+        bindir = Path(home) / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        target = Path(install) / "real-pack"
+        env = os.environ.copy()
+        env.update({
+            "HOME": home,
+            "CLAUDE_AUTONOMY_HOME": str(target),
+            "CLAUDE_AUTONOMY_BIN": str(bindir),
+        })
+        first = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), "--no-plugins"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert first.returncode == 0, first.stderr
+
+        sentinel = target / "repos" / "keep" / "state.json"
+        sentinel.parent.mkdir(parents=True)
+        sentinel.write_bytes(b"symlink-destination-state\n")
+        marker_before = (target / ".claude-autonomy-install.json").read_bytes()
+        link = Path(install) / "linked-pack"
+        link.symlink_to(target, target_is_directory=True)
+        linked_env = dict(env)
+        linked_env["CLAUDE_AUTONOMY_HOME"] = str(link)
+
+        attempted = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), "--no-plugins"],
+            cwd=ROOT,
+            env=linked_env,
+            text=True,
+            capture_output=True,
+        )
+        assert attempted.returncode != 0
+        assert "symlink install destination" in attempted.stderr
+        assert link.is_symlink()
+        assert sentinel.read_bytes() == b"symlink-destination-state\n"
+        assert (target / ".claude-autonomy-install.json").read_bytes() == marker_before
+
+        removed = subprocess.run(
+            ["bash", str(target / "uninstall.sh"), "--purge-state"],
+            env=linked_env,
+            text=True,
+            capture_output=True,
+        )
+        assert removed.returncode != 0
+        assert "symlink uninstall destination" in removed.stderr
+        assert link.is_symlink()
+        assert target.is_dir()
+        assert sentinel.read_bytes() == b"symlink-destination-state\n"
+
+
 def test_p7_install_and_uninstall_refuse_symlink_package_marker():
     with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as install:
         bindir = Path(home) / ".local" / "bin"
