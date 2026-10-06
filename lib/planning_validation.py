@@ -23,6 +23,7 @@ from authority_set import (
     AuthoritySetError,
     authority_content_sha256,
     build_authority_snapshot,
+    planning_repair_control_digest,
 )
 from execution import run_repository_command
 from git_trust import trusted_git_env
@@ -265,12 +266,15 @@ def validate_planning_candidate(
         raise PlanningValidationError(
             "candidate changed TaskSource contract authority"
         )
-    if (
-        candidate_snapshot.get("control_surfaces")
-        != base_snapshot.get("control_surfaces")
-        or candidate_snapshot.get("control_surface_digest")
-        != base_snapshot.get("control_surface_digest")
-    ):
+    try:
+        base_control_digest = planning_repair_control_digest(root, base)
+        candidate_control_digest = planning_repair_control_digest(
+            root,
+            candidate,
+        )
+    except AuthoritySetError as exc:
+        raise PlanningValidationError(str(exc)) from exc
+    if candidate_control_digest != base_control_digest:
         raise PlanningValidationError(
             "candidate changed planning/control surface authority"
         )
