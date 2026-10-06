@@ -33,8 +33,51 @@ jobs:
             exit 1
           fi
           test -f .release-finalize || { echo "::error title=Finalization request missing::.release-finalize is required."; exit 1; }
-          grep -Fxq "version=$VERSION" .release-finalize || { echo "::error title=Finalization request/version mismatch::.release-finalize must contain version=$VERSION."; exit 1; }
-          grep -Eq '^sequence=[1-9][0-9]*$' .release-finalize || { echo "::error title=Invalid finalization sequence::.release-finalize requires sequence=<positive integer>."; exit 1; }
+
+          mapfile -t FINALIZE_LINES < .release-finalize
+          if (( ${#FINALIZE_LINES[@]} != 2 )); then
+            echo "::error title=Invalid finalization request::.release-finalize must contain exactly two lines: version and sequence."
+            exit 1
+          fi
+          if [[ "${FINALIZE_LINES[0]}" != "version=$VERSION" ]]; then
+            echo "::error title=Finalization request/version mismatch::.release-finalize must start with version=$VERSION."
+            exit 1
+          fi
+          if [[ ! "${FINALIZE_LINES[1]}" =~ ^sequence=([1-9][0-9]*)$ ]]; then
+            echo "::error title=Invalid finalization sequence::.release-finalize requires sequence=<positive integer> as its second line."
+            exit 1
+          fi
+          SEQUENCE="${BASH_REMATCH[1]}"
+
+          mapfile -d '' -t REQUEST_PATHS < <(git diff --name-only -z "$GITHUB_SHA^" "$GITHUB_SHA" --)
+          if (( ${#REQUEST_PATHS[@]} != 1 )) || [[ "${REQUEST_PATHS[0]}" != ".release-finalize" ]]; then
+            printf '::error title=Unsafe finalization request::The request commit must change only .release-finalize; changed paths:'
+            printf ' %q' "${REQUEST_PATHS[@]}"
+            printf '\n'
+            exit 1
+          fi
+
+          PARENT_SEQUENCE=0
+          if git cat-file -e "$GITHUB_SHA^:.release-finalize" 2>/dev/null; then
+            mapfile -t PARENT_LINES < <(git show "$GITHUB_SHA^:.release-finalize")
+            if (( ${#PARENT_LINES[@]} != 2 )); then
+              echo "::error title=Invalid parent finalization marker::Parent .release-finalize must contain exactly two lines."
+              exit 1
+            fi
+            if [[ ! "${PARENT_LINES[0]}" =~ ^version=.+$ ]]; then
+              echo "::error title=Invalid parent finalization marker::Parent .release-finalize has no valid version line."
+              exit 1
+            fi
+            if [[ ! "${PARENT_LINES[1]}" =~ ^sequence=([1-9][0-9]*)$ ]]; then
+              echo "::error title=Invalid parent finalization marker::Parent .release-finalize has no valid positive sequence."
+              exit 1
+            fi
+            PARENT_SEQUENCE="${BASH_REMATCH[1]}"
+          fi
+          if (( SEQUENCE <= PARENT_SEQUENCE )); then
+            echo "::error title=Non-monotonic finalization sequence::Requested sequence $SEQUENCE must be greater than parent sequence $PARENT_SEQUENCE."
+            exit 1
+          fi
       - name: Rebuild final package manifest
         run: |
           set -euo pipefail
