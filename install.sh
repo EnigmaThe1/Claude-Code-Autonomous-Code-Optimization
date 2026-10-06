@@ -41,7 +41,12 @@ done
 
 python3 - "$DEST" "$HOME" "${XDG_DATA_HOME:-$HOME/.local/share}" <<'PY'
 import os, sys
-dest, home, xdg = map(lambda x: os.path.realpath(os.path.expanduser(x)), sys.argv[1:4])
+raw_dest = os.path.abspath(os.path.expanduser(sys.argv[1]))
+if os.path.islink(raw_dest):
+    raise SystemExit(f"Refusing symlink install destination: {raw_dest}")
+dest = os.path.realpath(raw_dest)
+home = os.path.realpath(os.path.expanduser(sys.argv[2]))
+xdg = os.path.realpath(os.path.expanduser(sys.argv[3]))
 bad = {"/", home, xdg, os.path.dirname(home)}
 if dest in bad or len([p for p in dest.split(os.sep) if p]) < 3:
     raise SystemExit(f"Refusing unsafe install destination: {dest}")
