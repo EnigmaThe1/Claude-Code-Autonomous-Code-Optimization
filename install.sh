@@ -47,6 +47,33 @@ if dest in bad or len([p for p in dest.split(os.sep) if p]) < 3:
     raise SystemExit(f"Refusing unsafe install destination: {dest}")
 PY
 
+# Existing installations must prove package ownership before any staged
+# upgrade copies or rewrites their contents.  A corrupt/foreign marker is not
+# evidence that Claude Auto may adopt the destination.
+python3 - "$DEST" "$MARKER" <<'PY'
+import json, os, sys
+dest, marker = sys.argv[1:3]
+dest = os.path.realpath(os.path.expanduser(dest))
+marker = os.path.realpath(os.path.expanduser(marker))
+if os.path.exists(marker):
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            obj = json.load(fh)
+    except Exception as exc:
+        raise SystemExit(
+            f"Refusing upgrade: existing package marker is invalid at {marker}: {exc}"
+        )
+    if not isinstance(obj, dict):
+        raise SystemExit("Refusing upgrade: existing package marker is not a JSON object")
+    if obj.get("package_id") != "claude-autonomous-optimisation-pack":
+        raise SystemExit("Refusing upgrade: existing package marker identity mismatch")
+    recorded = os.path.realpath(
+        os.path.expanduser(str(obj.get("canonical_install_path") or ""))
+    )
+    if recorded != dest:
+        raise SystemExit("Refusing upgrade: existing package marker path mismatch")
+PY
+
 mkdir -p "$BIN_DIR" "$(dirname "$DEST")"
 EXPECTED_TARGET="$DEST/bin/claude-auto"
 if [[ -e "$LINK" || -L "$LINK" ]]; then
@@ -127,9 +154,9 @@ python3 - "$MARKER" "$STAGE/.claude-autonomy-install.json" "$DEST" <<'PY'
 import json, os, secrets, sys
 old_marker, stage_marker, dest = sys.argv[1:4]
 old = {}
-try:
-    with open(old_marker) as f: old = json.load(f)
-except Exception: pass
+if os.path.exists(old_marker):
+    with open(old_marker, encoding="utf-8") as f:
+        old = json.load(f)
 obj = {
     "package_id": "claude-autonomous-optimisation-pack",
     "install_uuid": old.get("install_uuid") or secrets.token_hex(16),
