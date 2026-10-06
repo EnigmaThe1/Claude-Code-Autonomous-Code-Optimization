@@ -380,6 +380,31 @@ def capture_adopted_session_id(
     })
 
 
+def block_session_adoption(
+    root: Path,
+    reason: str,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    root = root.expanduser().resolve()
+    state_root = _state_root(root, state_dir)
+    record = load_session_adoption(root, state_dir=state_root)
+    if record is None:
+        raise SessionAdoptionError(
+            "cannot block session adoption without an active record"
+        )
+    if record["lifecycle_state"] == "ENDED":
+        raise SessionAdoptionError(
+            "cannot block an already-ended session adoption"
+        )
+    return _persist(state_root, {
+        **record,
+        "lifecycle_state": "BLOCKED",
+        "blocker": str(reason)[:2000],
+        "blocked_at": utcnow(),
+    })
+
+
 def finish_session_adoption(
     root: Path,
     *,
