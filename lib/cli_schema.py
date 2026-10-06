@@ -272,6 +272,49 @@ def build_parser(version: str) -> argparse.ArgumentParser:
     pr = prsp.add_parser("abort", help="Remove the dedicated repair worktree/branch without touching product work")
     pr.add_argument("--repo")
 
+    q = sp.add_parser(
+        "migrate",
+        help="Inspect or explicitly perform RC4 migration/adoption operations",
+    )
+    msp = q.add_subparsers(dest="migrate_command", required=True)
+    mq = msp.add_parser(
+        "status",
+        help="Show state-schema, legacy adoption, session adoption and planning-migration status",
+    )
+    mq.add_argument("--repo")
+    mq = msp.add_parser(
+        "state",
+        help="Explicitly migrate package durable state to the current schema",
+    )
+    mq.add_argument("--repo")
+    mq = msp.add_parser(
+        "planning-repair",
+        help="Explicitly migrate an in-flight legacy planning repair into the P5 RepairEnvelope lifecycle",
+    )
+    mq.add_argument("--repo")
+    mq = msp.add_parser(
+        "adopt-state",
+        help="Import a bounded legacy harness observation as untrusted P6 claims",
+    )
+    mq.add_argument("--repo")
+    mq.add_argument("--from", dest="source", required=True)
+    mq = msp.add_parser(
+        "reattest",
+        help="Prepare one imported accepted-task claim for ordinary P4 re-attestation",
+    )
+    mq.add_argument("task_id")
+    mq.add_argument("--repo")
+    mq = msp.add_parser(
+        "adopt-active",
+        help="Map the imported current active-task claim into the ordinary P4 workspace",
+    )
+    mq.add_argument("--repo")
+    mq = msp.add_parser(
+        "adopt-wip",
+        help="Explicitly copy admitted primary task WIP into the P4 task workspace",
+    )
+    mq.add_argument("--repo")
+
     q = sp.add_parser("shadow", help="Read-only RC4/legacy governance and task-frontier comparison")
     ssp = q.add_subparsers(dest="shadow_command", required=True)
     sq = ssp.add_parser("snapshot", help="Compute the current RC4 ShadowObservation without activating work")
