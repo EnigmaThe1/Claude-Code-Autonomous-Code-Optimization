@@ -317,7 +317,7 @@ def compute_rc4_shadow_observation(
             ["git", "-C", str(root), "rev-parse", "--verify", "HEAD^{commit}"],
             text=True,
             capture_output=True,
-            env=trusted_git_env(root, state_dir=state_root),
+            env=sanitised_subprocess_env(),
             check=True,
         ).stdout.strip().lower()
     )
