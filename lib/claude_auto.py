@@ -3095,6 +3095,92 @@ def do_run_goal(args: argparse.Namespace) -> int:
 def do_run(args: argparse.Namespace) -> int:
     return do_run_goal(args)
 
+def _interactive_start_context(
+    root: Path,
+    sd: Path,
+    args: argparse.Namespace,
+) -> tuple[Path, dict[str, Any] | None, Path | None, dict[str, Any]]:
+    """Resolve the exact current interactive worker boundary under SupervisorLease."""
+    state = load_json(sd / "state.json", {})
+    requested_session_settings = getattr(args, "session_settings", None)
+    args.profile = resolve_autonomy_profile(
+        getattr(args, "profile", None),
+        state.get("autonomy_profile"),
+    )
+    args.session_settings = resolve_session_settings(
+        requested_session_settings,
+        args.profile,
+    )
+
+    role = str(getattr(args, "resume_role", "product") or "product")
+    selector = str(getattr(args, "resume_session", "") or "").strip()
+    if role == "planning-architect":
+        if not selector:
+            raise SessionAdoptionError(
+                "--resume-role planning-architect requires --resume-session"
+            )
+        try:
+            repair_root, repair_settings, active = (
+                planning_repair_session_context(root)
+            )
+        except ValueError as exc:
+            raise SessionAdoptionError(str(exc)) from exc
+        return (
+            repair_root,
+            None,
+            repair_settings,
+            {
+                "status": "PLANNING_REPAIR",
+                "repair_envelope_sha256": active.get(
+                    "repair_envelope_sha256"
+                ),
+                "worktree": str(repair_root),
+            },
+        )
+
+    active_repair = load_active_repair(root)
+    if active_repair:
+        raise SessionAdoptionError(
+            "product interactive session is blocked while planning repair is active"
+        )
+
+    try:
+        activation = ensure_supervisor_task_workspace(
+            root,
+            state_dir=sd,
+        )
+    except TaskWorkspaceError:
+        raise
+    status = str(activation.get("status") or "")
+    if status == "BLOCKED":
+        raise TaskWorkspaceError(
+            str(
+                activation.get("reason")
+                or "P4 task workspace preparation is blocked"
+            )
+        )
+    if status == "CHECKPOINT":
+        raise TaskWorkspaceError(
+            "P4 task workspace is at an acceptance checkpoint; "
+            "reconcile/verify/accept it before interactive worker execution"
+        )
+    if status == "ACTIVE":
+        worker_root, task_context, settings_path = (
+            _p4_worker_execution_context(
+                root,
+                sd,
+                args,
+                activation,
+            )
+        )
+        return worker_root, task_context, settings_path, activation
+    if status in {"UNCONFIGURED", "COMPLETE"}:
+        return root, None, None, activation
+    raise TaskWorkspaceError(
+        "unsupported P4 interactive task state: " + status
+    )
+
+
 def do_start(args: argparse.Namespace) -> int:
     refuse_nested_claude_launch()
     require_supported_claude()
@@ -3135,24 +3221,75 @@ def do_start(args: argparse.Namespace) -> int:
             json_dump(sd / "state.json", state)
             try:
                 try:
-                    task_activation = ensure_supervisor_task_activation(root)
-                except TaskAuthorityError as exc:
+                    worker_root, task_context, settings_override, start_state = (
+                        _interactive_start_context(root, sd, args)
+                    )
+                except (
+                    TaskWorkspaceError,
+                    TaskAcceptanceError,
+                    SessionAdoptionError,
+                ) as exc:
                     state = load_json(sd / "state.json", state)
                     state.update({
                         "status": "BLOCKED",
                         "last_result_status": "BLOCKED",
-                        "blocker": f"Task authority activation blocked: {exc}",
+                        "blocker": f"Interactive session boundary blocked: {exc}",
                         "updated_at": utcnow(),
                     })
                     json_dump(sd / "state.json", state)
                     print(state["blocker"], file=sys.stderr)
                     return 3
+
+                adoption_selector = str(
+                    getattr(args, "resume_session", "") or ""
+                ).strip()
+                if adoption_selector:
+                    settings_for_adoption = settings_override or (
+                        sd
+                        / (
+                            f"settings-{args.profile}-"
+                            f"{args.memory_mode}.json"
+                        )
+                    )
+                    try:
+                        prepare_session_adoption(
+                            root,
+                            adoption_selector,
+                            working_directory=worker_root,
+                            settings_path=settings_for_adoption,
+                            autonomy_profile=args.profile,
+                            role=str(
+                                getattr(args, "resume_role", "product")
+                                or "product"
+                            ),
+                            state_dir=sd,
+                        )
+                    except SessionAdoptionError as exc:
+                        state = load_json(sd / "state.json", state)
+                        state.update({
+                            "status": "BLOCKED",
+                            "last_result_status": "BLOCKED",
+                            "blocker": f"Session adoption blocked: {exc}",
+                            "updated_at": utcnow(),
+                        })
+                        json_dump(sd / "state.json", state)
+                        print(state["blocker"], file=sys.stderr)
+                        return 3
+
                 return _do_start_unlocked(
                     args,
-                    root,
+                    worker_root,
                     sd,
                     child_control=child_control,
-                    task_activation=task_activation,
+                    task_activation=start_state,
+                    task_context=task_context,
+                    settings_path_override=settings_override,
+                    adoption_coordinator_root=(
+                        root if adoption_selector else None
+                    ),
+                    initial_resume_selector=(
+                        adoption_selector or None
+                    ),
                 )
             finally:
                 final_state = load_json(sd / "state.json", {})
