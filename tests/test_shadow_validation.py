@@ -38,6 +38,7 @@ from shadow_validation import (
     load_legacy_shadow_observation,
     shadow_compare,
 )
+from state_adoption import import_legacy_state_claims
 from state_store import json_dump, load_json
 from task_sources import resolve_task_sources
 from task_workspace import begin_task_workspace, load_active_task_workspace
@@ -640,3 +641,55 @@ def test_p7_complex_multiledger_shadow_matches_independent_legacy_observation(mo
         added = sorted(set(files_after) - set(files_before))
         assert len(added) == 1
         assert added[0].startswith("shadow/audits/")
+
+        # Use the same complex fixture to qualify bounded legacy-state import.
+        # Import is evidence-only: it may write AdoptionRecord files and the
+        # legacy_adoption pointer, but it may not mutate product refs or current
+        # accepted/active RC4 authority.
+        state_before_adoption = load_json(state_root / "state.json", {})
+        authority_before = {
+            key: state_before_adoption.get(key)
+            for key in (
+                "accepted_tasks",
+                "active_task_id",
+                "active_task_spec_sha256",
+                "active_execution_envelope_sha256",
+            )
+        }
+        git_before_adoption = _git_truth(root)
+        legacy_adoption = Path(td) / "legacy-adoption.json"
+        legacy_adoption.write_text(json.dumps({
+            "schema_version": 1,
+            "source_system": "neutral-legacy-harness",
+            "source_state_id": "complex-field-001",
+            "product_sha": product_sha,
+            "verified_through_sha": product_sha,
+            "authority_snapshot_sha256": snapshot["snapshot_sha256"],
+            "active_task": {
+                "id": "T1",
+                "task_spec_sha256": rows["T1"]["task_spec_sha256"],
+                "base_sha": product_sha,
+            },
+            "accepted_tasks": [{
+                "id": "T0",
+                "task_spec_sha256": rows["T0"]["task_spec_sha256"],
+                "accepted_product_sha": product_sha,
+            }],
+            "blockers": ["T2 waits for T1 acceptance"],
+            "reservations": ["legacy-worker-complex"],
+        }, indent=2) + "\n")
+
+        adoption = import_legacy_state_claims(root, legacy_adoption)
+        assert adoption["legacy_product_relationship"]["status"] == "MATCH"
+        assert adoption["legacy_verified_relationship"]["status"] == "MATCH"
+        assert adoption["legacy_authority_status"] == "MATCH"
+        assert adoption["source_system"] == "neutral-legacy-harness"
+        assert adoption["source_state_id"] == "complex-field-001"
+        assert _git_truth(root) == git_before_adoption
+
+        state_after_adoption = load_json(state_root / "state.json", {})
+        for key, value in authority_before.items():
+            assert state_after_adoption.get(key) == value
+        assert state_after_adoption["legacy_adoption"]["adoption_sha256"] == (
+            adoption["adoption_sha256"]
+        )
