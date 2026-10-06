@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0-rc4
+
+Fourth public release candidate.
+
+- align VERSION with the release/1.0.0-rc4 branch.
+
 ## 1.0.0-rc3
 
 Third public release candidate.
