@@ -302,7 +302,11 @@ def compute_rc4_shadow_observation(
     except AuthoritySetError as exc:
         raise ShadowValidationError(str(exc)) from exc
     try:
-        task_set = resolve_task_sources(root, persist=False)
+        task_set = resolve_task_sources(
+            root,
+            persist=False,
+            git_env=sanitised_subprocess_env(),
+        )
     except TaskSourceError as exc:
         raise ShadowValidationError(str(exc)) from exc
 
