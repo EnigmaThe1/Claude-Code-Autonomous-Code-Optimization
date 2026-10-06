@@ -421,6 +421,24 @@ def test_p7_scenario_traceability_has_all_64_live_pytest_references():
             assert f"def {function}(" in source, ref
 
 
+def test_p7_ci_treats_release_pull_request_head_as_development_release():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "ci.yml"
+    ).read_text(encoding="utf-8")
+    assert 'EFFECTIVE_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"' in workflow
+    release_expr = (
+        "startsWith(github.ref, 'refs/heads/release/') || "
+        "startsWith(github.head_ref, 'release/')"
+    )
+    assert release_expr in workflow
+    assert (
+        "if: ${{ !(startsWith(github.ref, 'refs/heads/release/') || "
+        "startsWith(github.head_ref, 'release/')) }}"
+    ) in workflow
+
 def test_p7_interruption_traceability_references_live_evidence():
     root = Path(__file__).resolve().parents[1]
     traceability = json.loads(
