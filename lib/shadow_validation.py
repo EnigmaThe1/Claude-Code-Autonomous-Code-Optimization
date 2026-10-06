@@ -555,6 +555,12 @@ def compare_shadow_observations(
     mismatch_count = sum(
         1 for row in results if row["classification"] == "MISMATCH"
     )
+    evidence_gap_count = sum(
+        1
+        for row in results
+        if row["classification"]
+        in {"MISSING_LEGACY_EVIDENCE", "MISSING_RC4_EVIDENCE"}
+    )
     unresolved = [
         row["dimension"]
         for row in results
@@ -565,6 +571,7 @@ def compare_shadow_observations(
         "schema_version": 1,
         "results": results,
         "mismatch_count": mismatch_count,
+        "evidence_gap_count": evidence_gap_count,
         "unresolved_mismatch_count": len(unresolved),
         "unresolved_mismatches": unresolved,
     }
@@ -653,12 +660,16 @@ def shadow_compare(
     )
     return {
         "status": (
-            "MATCH"
-            if comparison["mismatch_count"] == 0
+            "INCOMPLETE"
+            if comparison["evidence_gap_count"] > 0
             else (
-                "REVIEWED"
-                if comparison["unresolved_mismatch_count"] == 0
-                else "MISMATCH"
+                "MATCH"
+                if comparison["mismatch_count"] == 0
+                else (
+                    "REVIEWED"
+                    if comparison["unresolved_mismatch_count"] == 0
+                    else "MISMATCH"
+                )
             )
         ),
         "rc4": rc4,
@@ -694,4 +705,4 @@ def shadow_action(args: Any, *, find_repo_root) -> int:
         }, indent=2))
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 2 if result.get("status") == "MISMATCH" else 0
+    return 2 if result.get("status") in {"MISMATCH", "INCOMPLETE"} else 0
