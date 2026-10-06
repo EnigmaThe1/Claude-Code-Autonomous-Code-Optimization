@@ -28,10 +28,13 @@ from repo_runtime import activate
 from state_adoption import (
     MAX_ADOPTION_BYTES,
     StateAdoptionError,
+    begin_adopted_active_task,
+    begin_adopted_task_reattestation,
     import_legacy_state_claims,
 )
 from state_store import load_json
 from task_authority import task_readiness
+from task_workspace import load_active_task_workspace
 from task_sources import resolve_task_sources
 
 
@@ -391,3 +394,128 @@ def test_p6_adoption_import_is_deterministic_for_same_document(monkeypatch):
             (repo_state_dir(root) / "adoption" / "history").glob("*.json")
         )
         assert len(history) == 1
+
+
+def test_p6_imported_accepted_task_prepares_noop_p4_reattestation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        task_set = _configure(root, [_task("T1")])
+        row = _task_rows(task_set)["T1"]
+        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+        doc = _write_document(
+            Path(td) / "accepted.json",
+            {
+                "schema_version": 1,
+                "source_system": "legacy-harness",
+                "source_state_id": "accepted-001",
+                "product_sha": head,
+                "accepted_tasks": [{
+                    "id": "T1",
+                    "task_spec_sha256": row["task_spec_sha256"],
+                    "accepted_product_sha": head,
+                }],
+                "blockers": [],
+                "reservations": [],
+            },
+        )
+        adoption = import_legacy_state_claims(root, doc)
+        before = load_json(repo_state_dir(root) / "state.json", {})
+        assert before["accepted_tasks"] == {}
+
+        prepared = begin_adopted_task_reattestation(root, "T1")
+        assert prepared["status"] == "CANDIDATE"
+        assert prepared["candidate_sha"] == head
+        assert prepared["no_op"] is True
+        assert prepared["next_gate"] == "deterministic-verification"
+        assert prepared["adoption_sha256"] == adoption["adoption_sha256"]
+
+        workspace = load_active_task_workspace(root)
+        assert workspace is not None
+        assert workspace["task_id"] == "T1"
+        assert workspace["lifecycle_state"] == "CANDIDATE"
+        assert workspace["no_op_candidate"] is True
+        assert workspace["adoption_mode"] == "accepted-claim-reattestation"
+        assert workspace["adoption_sha256"] == adoption["adoption_sha256"]
+        assert workspace["legacy_accepted_product_sha"] == head
+
+        after = load_json(repo_state_dir(root) / "state.json", {})
+        # Preparing re-attestation must not itself create current acceptance.
+        assert after["accepted_tasks"] == {}
+
+
+def test_p6_imported_active_task_maps_to_clean_p4_workspace(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        task_set = _configure(root, [_task("T1")])
+        row = _task_rows(task_set)["T1"]
+        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+
+        # Unrelated primary WIP is allowed and remains in the primary checkout.
+        (root / "notes.local").write_text("unrelated human WIP\n")
+        doc = _write_document(
+            Path(td) / "active-map.json",
+            {
+                "schema_version": 1,
+                "source_system": "legacy-harness",
+                "source_state_id": "active-map-001",
+                "product_sha": head,
+                "active_task": {
+                    "id": "T1",
+                    "task_spec_sha256": row["task_spec_sha256"],
+                    "base_sha": head,
+                },
+                "accepted_tasks": [],
+                "blockers": [],
+                "reservations": [],
+            },
+        )
+        adoption = import_legacy_state_claims(root, doc)
+        mapped = begin_adopted_active_task(root)
+        assert mapped["task_id"] == "T1"
+        assert mapped["lifecycle_state"] == "ACTIVE"
+        assert mapped["adoption_mode"] == "active-task-map"
+        assert mapped["adoption_sha256"] == adoption["adoption_sha256"]
+        task_root = Path(mapped["task_worktree"])
+        assert task_root.is_dir()
+        assert not (task_root / "notes.local").exists()
+        assert (root / "notes.local").read_text() == "unrelated human WIP\n"
+
+
+def test_p6_imported_active_task_with_owned_primary_wip_requires_explicit_adoption(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        task_set = _configure(root, [_task("T1")])
+        row = _task_rows(task_set)["T1"]
+        head = _run(root, "git", "rev-parse", "HEAD").stdout.strip()
+        owned = root / "src" / "T1" / "work.py"
+        owned.parent.mkdir(parents=True)
+        owned.write_text("legacy active task WIP\n")
+
+        doc = _write_document(
+            Path(td) / "active-wip.json",
+            {
+                "schema_version": 1,
+                "source_system": "legacy-harness",
+                "source_state_id": "active-wip-001",
+                "product_sha": head,
+                "active_task": {
+                    "id": "T1",
+                    "task_spec_sha256": row["task_spec_sha256"],
+                    "base_sha": head,
+                },
+                "accepted_tasks": [],
+                "blockers": [],
+                "reservations": [],
+            },
+        )
+        import_legacy_state_claims(root, doc)
+        before = owned.read_bytes()
+
+        with pytest.raises(StateAdoptionError, match="explicit P6 WIP adoption"):
+            begin_adopted_active_task(root)
+
+        assert owned.read_bytes() == before
+        assert load_active_task_workspace(root) is None
