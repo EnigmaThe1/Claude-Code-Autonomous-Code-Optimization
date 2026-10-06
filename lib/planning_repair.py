@@ -1138,6 +1138,20 @@ def _verify_p5_planning_repair(
             "P5 Planning Verifier requires the exact current repair-branch HEAD"
         )
     if active.get("validated_candidate_sha") != candidate:
+        # Preserve legacy one-file durable state where an exact candidate SHA
+        # was recorded before schema-2 introduced an explicit CANDIDATE state.
+        # Normalise only when the persisted SHA is exactly the current repair
+        # branch HEAD; never infer or create a candidate here.
+        if (
+            active.get("status") == "ACTIVE"
+            and str(active.get("candidate_sha") or "") == candidate
+        ):
+            active["status"] = "CANDIDATE"
+            active["candidate_created_at"] = (
+                active.get("candidate_created_at") or utcnow()
+            )
+            json_dump(_active_path(root), active)
+
         # Preserve the legacy one-command verify workflow while retaining P5's
         # mandatory gate order. Mechanical AuthoritySet/TaskSource validation
         # and declared validators run package-side before the independent model.
