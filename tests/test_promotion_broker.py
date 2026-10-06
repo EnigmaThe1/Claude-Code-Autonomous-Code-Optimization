@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -11,6 +13,7 @@ import pytest
 from authority_set import authority_content_sha256, build_authority_snapshot
 from git_trust import (
     configure_trusted_excludes,
+    trusted_git_config,
     trusted_git_env,
 )
 from promotion_policy import (
@@ -673,3 +676,115 @@ def test_p5_generic_promote_ordinary_path_still_needs_no_planning_attestation(mo
         result = promote_fast_forward(root, target)
         assert result["status"] == "promoted"
         assert result["attestation"] is None
+
+
+def test_p7_trusted_git_env_strips_truth_redirection_but_keeps_transport(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        env = trusted_git_env(
+            root,
+            {
+                "PATH": os.environ.get("PATH", "/usr/bin"),
+                "GIT_DIR": "/tmp/attacker.git",
+                "GIT_COMMON_DIR": "/tmp/attacker-common",
+                "GIT_WORK_TREE": "/tmp/attacker-tree",
+                "GIT_INDEX_FILE": "/tmp/attacker-index",
+                "GIT_OBJECT_DIRECTORY": "/tmp/attacker-objects",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/tmp/alternate",
+                "GIT_NAMESPACE": "attacker",
+                "GIT_EXTERNAL_DIFF": "sh -c 'exit 99'",
+                "GIT_DIFF_OPTS": "--stat",
+                "GIT_CONFIG_GLOBAL": "/tmp/attacker-config",
+                "GIT_SSH_COMMAND": "ssh -F /tmp/test-ssh-config",
+            },
+        )
+        for key in (
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_NAMESPACE",
+            "GIT_EXTERNAL_DIFF",
+            "GIT_DIFF_OPTS",
+            "GIT_CONFIG_GLOBAL",
+        ):
+            assert key not in env
+        assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
+        assert env["GIT_SSH_COMMAND"] == "ssh -F /tmp/test-ssh-config"
+
+
+def test_p7_broker_neutralises_filters_textconv_and_hooks(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        base_dir = Path(td)
+        root = _repo(base_dir / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+
+        (root / ".gitattributes").write_text("*.dat filter=evil diff=evil\n")
+        (root / "payload.dat").write_bytes(b"base\n")
+        _run("git", "-C", str(root), "add", ".gitattributes", "payload.dat")
+        _run("git", "-C", str(root), "commit", "-qm", "attributes and payload")
+        base = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+
+        (root / "payload.dat").write_bytes(b"target\n")
+        _run("git", "-C", str(root), "add", "payload.dat")
+        _run("git", "-C", str(root), "commit", "-qm", "target payload")
+        target = _run("git", "-C", str(root), "rev-parse", "HEAD").stdout.strip()
+        _run("git", "-C", str(root), "reset", "--hard", "-q", base)
+
+        marker = base_dir / "git-driver-executed"
+        helper = base_dir / "driver.py"
+        helper.write_text(
+            "from pathlib import Path\n"
+            "import sys\n"
+            "marker=Path(sys.argv[1]); mode=sys.argv[2]\n"
+            "marker.write_text((marker.read_text() if marker.exists() else '') + mode + '\\n')\n"
+            "if mode == 'textconv': data=Path(sys.argv[3]).read_bytes()\n"
+            "else: data=sys.stdin.buffer.read()\n"
+            "sys.stdout.buffer.write(data)\n"
+        )
+        helper.chmod(0o700)
+        py = shlex.quote(sys.executable)
+        hp = shlex.quote(str(helper))
+        mp = shlex.quote(str(marker))
+        _run(
+            "git", "-C", str(root), "config", "filter.evil.clean",
+            f"{py} {hp} {mp} clean",
+        )
+        _run(
+            "git", "-C", str(root), "config", "filter.evil.smudge",
+            f"{py} {hp} {mp} smudge",
+        )
+        _run(
+            "git", "-C", str(root), "config", "filter.evil.process",
+            f"{py} {hp} {mp} process",
+        )
+        _run("git", "-C", str(root), "config", "filter.evil.required", "true")
+        _run(
+            "git", "-C", str(root), "config", "diff.evil.textconv",
+            f"{py} {hp} {mp} textconv",
+        )
+
+        hooks = root / ".git" / "hooks"
+        hooks.mkdir(exist_ok=True)
+        post_merge = hooks / "post-merge"
+        post_merge.write_text(
+            "#!/bin/sh\n"
+            + "printf 'hook\\n' >> "
+            + shlex.quote(str(marker))
+            + "\n"
+        )
+        post_merge.chmod(0o700)
+
+        config = dict(trusted_git_config(root))
+        assert config["filter.evil.process"] == ""
+        assert config["filter.evil.clean"] == "cat"
+        assert config["filter.evil.smudge"] == "cat"
+        assert config["filter.evil.required"] == "false"
+
+        result = promote_fast_forward(root, target)
+        assert result["status"] == "promoted"
+        assert (root / "payload.dat").read_bytes() == b"target\n"
+        assert not marker.exists()
