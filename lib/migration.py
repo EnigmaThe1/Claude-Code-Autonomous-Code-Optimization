@@ -149,32 +149,34 @@ def normalise_legacy_planning_policy(root: Path) -> dict[str, Any] | None:
     sets = snapshot.get("sets")
     if not isinstance(sets, list):
         raise MigrationError("resolved AuthoritySet snapshot is malformed")
-    default_sets = [
-        item
-        for item in sets
-        if isinstance(item, dict) and item.get("id") == "default"
-    ]
-    if len(default_sets) != 1:
-        raise MigrationError(
-            "legacy one-file policy must resolve to exactly one synthetic/default AuthoritySet"
-        )
-    members = default_sets[0].get("members")
-    if not isinstance(members, list):
-        raise MigrationError("resolved default AuthoritySet members are malformed")
     canonical_plan = semantic["canonical_plan"]
-    matching = [
-        member
-        for member in members
-        if isinstance(member, dict) and member.get("path") == canonical_plan
-    ]
-    if len(matching) != 1:
+    matching_sets: list[str] = []
+    for authority_set in sets:
+        if not isinstance(authority_set, dict) or not isinstance(
+            authority_set.get("id"), str
+        ):
+            raise MigrationError("resolved AuthoritySet snapshot is malformed")
+        members = authority_set.get("members")
+        if not isinstance(members, list):
+            raise MigrationError("resolved AuthoritySet members are malformed")
+        for member in members:
+            if (
+                isinstance(member, dict)
+                and member.get("path") == canonical_plan
+                and member.get("role") == "source"
+                and member.get("repair") == "repairable"
+            ):
+                matching_sets.append(authority_set["id"])
+                break
+
+    matching_sets = sorted(set(matching_sets))
+    if not matching_sets:
         raise MigrationError(
-            "legacy canonical plan is not represented exactly once in the default AuthoritySet"
+            "legacy canonical plan is not represented as repairable source authority"
         )
-    member = matching[0]
-    if member.get("role") != "source" or member.get("repair") != "repairable":
+    if snapshot.get("source_mode") == "legacy" and matching_sets != ["default"]:
         raise MigrationError(
-            "legacy canonical plan did not preserve repairable source semantics"
+            "pure legacy one-file policy did not resolve to synthetic default AuthoritySet"
         )
 
     semantic_digest = _digest(semantic)
@@ -204,7 +206,12 @@ def normalise_legacy_planning_policy(root: Path) -> dict[str, Any] | None:
         "product_branch": branch,
         "canonical_plan": canonical_plan,
         "source_mode": snapshot["source_mode"],
-        "authority_set_id": "default",
+        "authority_set_ids": matching_sets,
+        "authority_set_id": (
+            "default"
+            if snapshot["source_mode"] == "legacy"
+            else (matching_sets[0] if len(matching_sets) == 1 else None)
+        ),
         "authority_content_sha256": content_digest,
         "authority_snapshot_sha256": snapshot["snapshot_sha256"],
     }
