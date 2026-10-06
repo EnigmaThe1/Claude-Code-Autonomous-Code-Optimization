@@ -72,20 +72,32 @@ jobs:
           }
 
           gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/release-candidate.yml/runs"             -f branch="$RELEASE_BRANCH" -f status=success -f per_page=100 > /tmp/release-runs.json
+          gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"             -f branch="main" -f status=success -f per_page=100 > /tmp/main-ci-runs.json
           MAIN_SHA="$MAIN_SHA" python - <<'PY'
           import json
           import os
           from pathlib import Path
 
           sha = os.environ["MAIN_SHA"]
-          data = json.loads(Path("/tmp/release-runs.json").read_text())
-          matches = [
-              run for run in data.get("workflow_runs", [])
+
+          release_data = json.loads(Path("/tmp/release-runs.json").read_text())
+          release_matches = [
+              run for run in release_data.get("workflow_runs", [])
               if run.get("head_sha") == sha and run.get("conclusion") == "success"
           ]
-          if not matches:
+          if not release_matches:
               raise SystemExit(f"No successful release qualification found for exact SHA {sha}")
-          print(f"qualification_run={matches[0]['id']}")
+
+          ci_data = json.loads(Path("/tmp/main-ci-runs.json").read_text())
+          ci_matches = [
+              run for run in ci_data.get("workflow_runs", [])
+              if run.get("head_sha") == sha and run.get("conclusion") == "success"
+          ]
+          if not ci_matches:
+              raise SystemExit(f"No successful main CI found for exact SHA {sha}")
+
+          print(f"qualification_run={release_matches[0]['id']}")
+          print(f"main_ci_run={ci_matches[0]['id']}")
           PY
 
           EXISTING="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}' || true)"
