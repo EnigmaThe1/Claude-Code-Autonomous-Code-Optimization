@@ -22,7 +22,8 @@ The system has an always-on low-risk user layer and an explicit autonomous super
 - `workspace_recovery.py`: narrow local/remote promotion and workspace recovery broker.
 - `git_trust.py`: deterministic package-owned Git execution context.
 - `promotion_policy.py`: durable exact-SHA promotion-attestation policy.
-- `planning_repair.py`: repository-owned canonical-plan repair, verification, refresh and promotion.
+- `repair_envelope.py` / `planning_repair.py`: universal one-file/multi-file Planning Repair authority, lifecycle, refresh and promotion.
+- `planning_helpers.py` / `planning_validation.py`: bounded deterministic reconcilers/validators and exact candidate AuthoritySet/TaskSource validation.
 - `user_layer.py`: package-owned Claude user-layer installation.
 - `telemetry.py` / `protocols.py`: structured outcomes, redaction and budgets.
 
@@ -73,7 +74,9 @@ P3 derives one active ExecutionEnvelope from a verified dependency-safe TaskSpec
 
 P4 separates the **coordinator authority root** from the **task execution root**. One coordinator lease/state remains authoritative while the worker runs in a package-owned linked task worktree. The primary checkout and relevant Git refs are independent semantic boundaries, so opaque commands cannot escape from the task worktree into user WIP or package refs. Candidate sealing is package-owned and uses exact Git plumbing while keeping task HEAD pinned to its base. Deterministic base/candidate verification runs in detached worktrees; a separate read-only Task Verifier binds one immutable candidate SHA; the existing promotion broker then admits only that exact attested candidate. Acceptance is crash-recoverable, persists full AcceptedTaskRecord evidence, supports verified no-op tasks and re-resolves TaskSources before the next task is selected.
 
-Legacy one-file material planning repair continues through the RC3 repair flow until RC4's later multi-file RepairEnvelope phase generalises it.
+P5 generalises repository-owned Planning Repair onto the same AuthoritySet model. A legacy one-file canonical plan is a synthetic one-member `default` RepairEnvelope; structured repositories may select one or more named AuthoritySets explicitly. The RepairEnvelope distinguishes repairable, immutable and generated members, binds allowed growth/helper contracts and protects planning-control surfaces independently from runtime profile authority.
+
+The Planning Repair Architect can mutate only repairable members. Generated members are package-owned deterministic reconciler outputs. Candidate validation rebuilds the entire exact candidate AuthoritySet topology and TaskSource graph, executes declared validators, and stores integrity-bound evidence without replacing live TaskSource state. The independent Planning Verifier then reviews the exact candidate SHA against the same RepairEnvelope and helper receipts. Promotion requires an enriched exact-SHA planning attestation even when a generic fast-forward target reaches planning authority indirectly through a selector. Base refresh preserves work across interruption but invalidates prior evidence and refuses automatic reuse when planning control executables, governance/contracts or selected authority semantics changed.
 
 See [PLANNING_AND_REPAIR.md](PLANNING_AND_REPAIR.md).
 
