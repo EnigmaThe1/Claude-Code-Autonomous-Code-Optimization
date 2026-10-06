@@ -35,21 +35,28 @@ def _trust_dir(
     root: Path,
     *,
     state_dir: Path | None = None,
+    create: bool = True,
 ) -> Path:
     state_root = (
         state_dir.expanduser().resolve()
         if state_dir is not None
         else repo_state_dir(root)
     )
-    return ensure_private_dir(state_root / "git-trust")
+    path = state_root / "git-trust"
+    return ensure_private_dir(path) if create else path
 
 
 def _trust_path(
     root: Path,
     *,
     state_dir: Path | None = None,
+    create: bool = True,
 ) -> Path:
-    return _trust_dir(root, state_dir=state_dir) / "policy.json"
+    return _trust_dir(
+        root,
+        state_dir=state_dir,
+        create=create,
+    ) / "policy.json"
 
 
 def _package_excludes_path(
@@ -191,6 +198,7 @@ def load_git_trust_policy(
         _trust_path(
             root.expanduser().resolve(),
             state_dir=state_dir,
+            create=False,
         ),
         {},
     )
