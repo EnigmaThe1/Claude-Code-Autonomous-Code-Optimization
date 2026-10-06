@@ -321,6 +321,53 @@ def test_p6_apply_crash_with_schema10_finishes_verification(monkeypatch):
         assert (sd / "migrations" / "history" / "apply-crash.json").is_file()
 
 
+
+def test_p6_verifying_migration_record_finishes_idempotently(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        sd = repo_state_dir(root)
+        (sd / "migrations").mkdir(parents=True)
+        state_path = sd / "state.json"
+        json_dump(state_path, {
+            "schema_version": 10,
+            "accepted_tasks": {},
+            "migration_generation": 1,
+            "state_schema_migration": {
+                "migration_id": "verify-crash",
+                "source_schema": 9,
+                "target_schema": 10,
+            },
+            "legacy_adoption": None,
+            "session_adoption": None,
+            "shadow_validation": None,
+        })
+        json_dump(sd / "migrations" / "active.json", {
+            "schema_version": 1,
+            "migration_id": "verify-crash",
+            "source_schema": 9,
+            "target_schema": 10,
+            "before_state_sha256": "0" * 64,
+            "repository_identity": {},
+            "initial_git_head": _head(root),
+            "mutable_paths": [
+                "state.json",
+                "migrations/active.json",
+                "migrations/history/<migration-id>.json",
+            ],
+            "lifecycle_state": "VERIFYING",
+        })
+
+        result = migrate_state_on_disk(sd)
+        assert result["status"] == "COMPLETED"
+        assert result["migration_id"] == "verify-crash"
+        assert not (sd / "migrations" / "active.json").exists()
+        history = sd / "migrations" / "history" / "verify-crash.json"
+        assert history.is_file()
+        record = json.loads(history.read_text())
+        assert record["lifecycle_state"] == "COMPLETED"
+
+
 def test_p6_future_state_schema_refuses_before_activation_semantic_writes(monkeypatch):
     with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
         monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
@@ -588,3 +635,68 @@ def test_p6_schema1_out_of_scope_wip_is_preserved_and_blocks(monkeypatch):
         )
         assert record["lifecycle_state"] == "BLOCKED"
         assert "README.md" in record["dirty_paths"]
+
+
+def test_p6_schema1_repair_worktree_without_branch_blocks_and_preserves(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        plan = root / "PLAN.md"
+        plan.write_text("# plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "add plan")
+        configure_planning_repair(root, canonical_plan="PLAN.md")
+
+        active, worktree, _candidate = _legacy_repair_fixture(root)
+        branch = active["repair_branch"]
+        # Leave the linked worktree in place while deleting only the recorded
+        # package branch ref. Migration must preserve the worktree and block.
+        _run(root, "git", "update-ref", "-d", f"refs/heads/{branch}")
+        before_head = _head(worktree)
+
+        with pytest.raises(MigrationError, match="worktree exists but its repair branch is missing"):
+            migrate_legacy_planning_repair(root)
+
+        assert worktree.is_dir()
+        assert _head(worktree) == before_head
+        migration = load_json(
+            repo_state_dir(root) / "planning-repair" / "migration-active.json",
+            {},
+        )
+        assert migration["lifecycle_state"] == "BLOCKED"
+        assert "repair branch is missing" in migration["blocker"]
+
+
+def test_p6_schema1_repair_missing_branch_and_worktree_blocks_without_recreation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        plan = root / "PLAN.md"
+        plan.write_text("# plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "add plan")
+        configure_planning_repair(root, canonical_plan="PLAN.md")
+
+        active, worktree, _candidate = _legacy_repair_fixture(root)
+        branch = active["repair_branch"]
+        _run(root, "git", "worktree", "remove", "--force", str(worktree))
+        _run(root, "git", "branch", "-D", branch)
+        assert not worktree.exists()
+
+        with pytest.raises(MigrationError, match="both package branch and worktree are missing"):
+            migrate_legacy_planning_repair(root)
+
+        assert not worktree.exists()
+        probe = subprocess.run(
+            ["git", "show-ref", "--verify", f"refs/heads/{branch}"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+        )
+        assert probe.returncode != 0
+        migration = load_json(
+            repo_state_dir(root) / "planning-repair" / "migration-active.json",
+            {},
+        )
+        assert migration["lifecycle_state"] == "BLOCKED"
+        assert "both package branch and worktree are missing" in migration["blocker"]
