@@ -1,6 +1,6 @@
 # RC4 P5 — Multi-file Planning Repair and RepairEnvelope Protocol
 
-Status: **FROZEN FOR IMPLEMENTATION**
+Status: **IMPLEMENTED AND QUALIFIED**
 
 Date: 2026-10-05
 
@@ -18,6 +18,19 @@ P4 closure qualification evidence:
 - critical regression groups: 15/15, 19/19, 25/25, 16/16 and 18/18 passed;
 - branch/version identity, public-baseline audit and package static checks passed;
 - `main` remained unchanged at RC3.
+
+P5 qualified implementation head: `8ada95010f6bdea52655db5432b768b3c48b4c82`
+
+P5 qualification evidence:
+
+- 524/524 tests passed in the full regression suite;
+- 524/524 tests passed again under coverage;
+- aggregate measured coverage: 65%;
+- critical regression groups: 15/15, 19/19, 25/25, 16/16 and 18/18 passed;
+- package static checks and branch/version identity checks passed;
+- public-baseline/reference audit passed;
+- `main` remained unchanged at RC3 `d75f7c48dfe53d1a1759ee7828d9a42f5f744569`;
+- no RC4 tag or `main` promotion was performed by P5.
 
 ## 1. Purpose
 
@@ -773,3 +786,37 @@ P5 is complete only when:
 - all P1–P4 behavior stays green.
 
 Only then may P6 begin migration/session adoption/shadow validation work.
+
+
+## 31. Closure record
+
+RC4-P5 is closed at the protocol/implementation level.
+
+The qualified implementation satisfies the exit criteria above and includes:
+
+- one RepairEnvelope core for legacy one-file and multi-file repository planning authority;
+- worktree-independent `authority_content_sha256` while preserving P1 worktree-specific snapshot identity;
+- exact candidate-ref TaskSource resolution without overwriting current runtime TaskSourceSet state;
+- package-selected AuthoritySet repair envelopes with operator/task/legacy/unambiguous selection rules;
+- Architect direct-write enforcement across repairable/immutable/generated/shared/unselected authority declarations;
+- package-validated repairable deletion requests without granting Architect Bash authority;
+- deterministic bounded reconciler execution and generated-member admission;
+- exact candidate AuthoritySet and TaskSource/graph validation;
+- bounded validator execution with deterministic receipt bundles;
+- exact-SHA independent Planning Verifier binding to RepairEnvelope and candidate evidence;
+- planning attestation enriched with exact product base, authority-content, TaskSource, reconciler and validator evidence;
+- AuthoritySet-aware implicit promotion admission so generic `promote-ff` cannot bypass planning repair;
+- crash-safe advancing-base refresh/rebase semantics that invalidate stale candidate/verifier evidence;
+- hostile multi-file qualification covering generated-only reconciliation, stale control bytes, exact-base attestation, ambiguous AuthoritySet selection and shared-domain precedence;
+- preserved legacy one-file verifier protocol identity and one-command compatibility.
+
+P5 intentionally leaves the following to P6:
+
+- migration/adoption of already in-flight legacy planning-repair state;
+- explicit Claude conversation/session adoption across RC4 harness migrations;
+- read-only shadow validation against an existing repository-defined/bespoke harness;
+- migration compatibility/reporting surfaces.
+
+P5 intentionally leaves RC4 final release promotion, release tagging and `main` advancement to a later release-qualification phase.
+
+Therefore P6 may begin from this closure without changing P5 semantics.
