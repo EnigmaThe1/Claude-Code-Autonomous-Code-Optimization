@@ -1705,6 +1705,52 @@ def _refresh_p5_planning_repair_base(
     candidate = _rev(worktree, branch)
 
     refresh = active.get("refresh") if isinstance(active.get("refresh"), dict) else None
+
+    # Older/incomplete in-progress markers may survive a crash before the
+    # schema-2 fresh-envelope/mode fields were durably written. Reconstruct
+    # from Git truth only when the branch is still at the recorded candidate
+    # (or an in-progress rebase can be aborted back to it). A branch that moved
+    # elsewhere remains fail-closed.
+    if (
+        refresh
+        and refresh.get("in_progress")
+        and refresh.get("schema_version") != 2
+    ):
+        recorded_candidate = str(
+            refresh.get("candidate_before")
+            or active.get("candidate_sha")
+            or ""
+        )
+        if _rebase_in_progress(worktree):
+            _git(worktree, "rebase", "--abort")
+            if recorded_candidate:
+                _git(worktree, "checkout", "-q", branch)
+                _git(
+                    worktree,
+                    "reset",
+                    "--hard",
+                    "-q",
+                    recorded_candidate,
+                )
+            candidate = _rev(worktree, branch)
+        elif recorded_candidate and candidate != recorded_candidate:
+            already_absorbed = _git(
+                worktree,
+                "merge-base",
+                "--is-ancestor",
+                new_base,
+                candidate,
+            )
+            if already_absorbed.returncode != 0:
+                raise ValueError(
+                    "stale P5 refresh marker cannot be reconstructed because "
+                    "the repair branch moved to an unrelated candidate"
+                )
+        active["refresh"] = None
+        active["refresh_failure"] = None
+        json_dump(_active_path(root), active)
+        refresh = None
+
     if refresh and refresh.get("in_progress") and refresh.get("schema_version") == 2:
         recorded_new = str(refresh.get("new_base") or "")
         if recorded_new != new_base:
@@ -1795,9 +1841,22 @@ def _refresh_p5_planning_repair_base(
 
     candidate_before = str(active.get("candidate_sha") or "")
     if candidate_before and candidate_before != candidate:
-        raise ValueError(
-            "active P5 candidate SHA does not match the repair-branch HEAD"
+        # A completed rebase may have moved the package repair branch before
+        # the response/state update was durably recorded. Recognise only the
+        # exact recoverable shape: the current branch already contains the new
+        # product base. The candidate is still treated as unverified and all
+        # candidate evidence is rebuilt after the fresh envelope is persisted.
+        already_absorbed = _git(
+            worktree,
+            "merge-base",
+            "--is-ancestor",
+            new_base,
+            candidate,
         )
+        if already_absorbed.returncode != 0:
+            raise ValueError(
+                "active P5 candidate SHA does not match the repair-branch HEAD"
+            )
 
     if refresh and refresh.get("in_progress"):
         recorded_fresh = refresh.get("fresh_repair_envelope")
