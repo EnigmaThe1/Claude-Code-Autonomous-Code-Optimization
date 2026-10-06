@@ -1138,9 +1138,18 @@ def _verify_p5_planning_repair(
             "P5 Planning Verifier requires the exact current repair-branch HEAD"
         )
     if active.get("validated_candidate_sha") != candidate:
-        raise ValueError(
-            "P5 Planning Verifier requires exact candidate validation before independent verification"
-        )
+        # Preserve the legacy one-command verify workflow while retaining P5's
+        # mandatory gate order. Mechanical AuthoritySet/TaskSource validation
+        # and declared validators run package-side before the independent model.
+        validate_planning_repair_candidate(root)
+        active = load_active_repair(root)
+        if (
+            not isinstance(active, dict)
+            or active.get("validated_candidate_sha") != candidate
+        ):
+            raise ValueError(
+                "P5 Planning Verifier requires exact candidate validation before independent verification"
+            )
 
     envelope = load_repair_envelope(root)
     if (
