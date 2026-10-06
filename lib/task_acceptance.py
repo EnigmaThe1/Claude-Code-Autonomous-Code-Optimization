@@ -3143,6 +3143,9 @@ def _seal_locked(
             "candidate_record_sha256": candidate_record[
                 "candidate_record_sha256"
             ],
+            "task_workspace_sha256": workspace[
+                "task_workspace_sha256"
+            ],
         }
 
     task_record = _task_record(
@@ -3243,6 +3246,9 @@ def _seal_locked(
         "no_op": False,
         "candidate_record_sha256": candidate_record[
             "candidate_record_sha256"
+        ],
+        "task_workspace_sha256": workspace[
+            "task_workspace_sha256"
         ],
     }
 
