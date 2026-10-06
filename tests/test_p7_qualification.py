@@ -353,3 +353,38 @@ def test_p7_overlapping_ownership_is_dependency_serialised(monkeypatch):
         task_set = resolve_task_sources(root, persist=True)
         assert task_set["status"] == "READY"
         assert ready_frontier(root, task_set=task_set) == ["FIRST"]
+
+
+def test_p7_exact_file_and_nested_directory_ownership_are_distinct():
+    exact = _task(
+        "ONEFILE",
+        authority_sets=["default"],
+        owned_paths=["src/one.py"],
+    )
+    nested = _task(
+        "NESTED",
+        authority_sets=["default"],
+        owned_paths=["packages/service/**"],
+    )
+    exact_record = normalise_task_spec(
+        exact,
+        source_id="fixture",
+        source_authority_sets={"default"},
+        known_authority_sets={"default"},
+        protected_paths={"PLAN.md"},
+    )
+    nested_record = normalise_task_spec(
+        nested,
+        source_id="fixture",
+        source_authority_sets={"default"},
+        known_authority_sets={"default"},
+        protected_paths={"PLAN.md"},
+    )
+    assert exact_record["task"]["owned_paths"] == ["src/one.py"]
+    assert selector_matches_path("src/one.py", "src/one.py")
+    assert not selector_matches_path("src/one.py", "src/two.py")
+    assert nested_record["task"]["owned_paths"] == ["packages/service/**"]
+    assert selector_matches_path(
+        "packages/service/**",
+        "packages/service/deep/module/file.py",
+    )
