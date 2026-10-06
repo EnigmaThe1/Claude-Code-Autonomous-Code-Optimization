@@ -3314,6 +3314,10 @@ def _do_start_unlocked(
     *,
     child_control: dict[str, Any] | None = None,
     task_activation: dict[str, Any] | None = None,
+    task_context: dict[str, Any] | None = None,
+    settings_path_override: Path | None = None,
+    adoption_coordinator_root: Path | None = None,
+    initial_resume_selector: str | None = None,
 ) -> int:
     state = load_json(sd / "state.json", {})
     requested_session_settings = getattr(args, "session_settings", None)
@@ -3345,8 +3349,23 @@ def _do_start_unlocked(
             "Operate autonomously across repository tasks. Reconcile current repo state first. "
             "Do not stop merely because one subtask is complete; continue useful independent work toward the overall objective."
         )
+        if isinstance(task_context, dict):
+            initial += (
+                "\n\nCURRENT PACKAGE TASK AUTHORITY (read-only context; package "
+                "state/hooks remain authoritative):\n"
+                + json.dumps(
+                    task_context,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
 
-    resume_session_id: str | None = None
+    resume_session_id: str | None = (
+        str(initial_resume_selector).strip()
+        if initial_resume_selector
+        else None
+    )
+    fork_resume_once = bool(resume_session_id and adoption_coordinator_root)
     while True:
         state = load_json(sd / "state.json", state)
         pending = pending_profile_switch(sd)
@@ -3367,13 +3386,19 @@ def _do_start_unlocked(
             sd, args.model, args.effort, args.permission_mode, args.memory_mode,
             verifier_model=args.verifier_model, researcher_model=args.researcher_model,
             autonomy_profile=args.profile,
+            settings_path=settings_path_override,
         )
         cmd += [
             "--setting-sources",
-            "" if getattr(args, "session_settings", "compatibility") == "hermetic" else "user,project,local",
+            "" if (
+                settings_path_override is not None
+                or getattr(args, "session_settings", "compatibility") == "hermetic"
+            ) else "user,project,local",
         ]
         if resume_session_id:
             cmd += ["--resume", resume_session_id]
+            if fork_resume_once:
+                cmd += ["--fork-session"]
         elif initial:
             cmd.append(initial)
 
@@ -3387,10 +3412,95 @@ def _do_start_unlocked(
                 f"({reuse}; envelope {str(task_activation.get('execution_envelope_sha256'))[:12]})"
             )
         if resume_session_id:
-            print(f"Resuming Claude session: {resume_session_id}")
+            if fork_resume_once:
+                print(
+                    "Adopting Claude session under a fresh RC4-owned fork: "
+                    + resume_session_id
+                )
+            else:
+                print(f"Resuming Claude session: {resume_session_id}")
         print(f"Provider: {provider_detail['provider']}" + (f" @ {provider_detail['base_url']}" if provider_detail.get('base_url') else ""))
 
-        proc = subprocess.Popen(cmd, cwd=str(root), env=env)
+        adoption_event_offset = (
+            runtime_event_offset(sd) if fork_resume_once else None
+        )
+        try:
+            proc = subprocess.Popen(cmd, cwd=str(root), env=env)
+        except OSError as exc:
+            if adoption_coordinator_root is not None and fork_resume_once:
+                try:
+                    block_session_adoption(
+                        adoption_coordinator_root,
+                        f"forked Claude launch failed: {exc}",
+                        state_dir=sd,
+                    )
+                except SessionAdoptionError:
+                    pass
+            raise
+        if adoption_coordinator_root is not None and fork_resume_once:
+            try:
+                mark_session_adoption_launched(
+                    adoption_coordinator_root,
+                    event_offset=int(adoption_event_offset or 0),
+                    pid=int(proc.pid),
+                    state_dir=sd,
+                )
+                deadline = time.monotonic() + 30.0
+                adopted: dict[str, Any] | None = None
+                while time.monotonic() < deadline:
+                    adopted = capture_adopted_session_id(
+                        adoption_coordinator_root,
+                        state_dir=sd,
+                        block_if_missing=False,
+                    )
+                    if adopted.get("lifecycle_state") == "ADOPTED":
+                        break
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                if (
+                    adopted is None
+                    or adopted.get("lifecycle_state") != "ADOPTED"
+                ):
+                    adopted = capture_adopted_session_id(
+                        adoption_coordinator_root,
+                        state_dir=sd,
+                        block_if_missing=True,
+                    )
+                if adopted.get("lifecycle_state") != "ADOPTED":
+                    try:
+                        if proc.poll() is None:
+                            proc.terminate()
+                    except OSError:
+                        pass
+                    print(
+                        str(
+                            adopted.get("blocker")
+                            or "forked session adoption could not be proven"
+                        ),
+                        file=sys.stderr,
+                    )
+                    return 9
+                resume_session_id = str(
+                    adopted["adopted_session_id"]
+                ).strip()
+                fork_resume_once = False
+            except SessionAdoptionError as exc:
+                try:
+                    block_session_adoption(
+                        adoption_coordinator_root,
+                        str(exc),
+                        state_dir=sd,
+                    )
+                except SessionAdoptionError:
+                    pass
+                try:
+                    if proc.poll() is None:
+                        proc.terminate()
+                except OSError:
+                    pass
+                print(f"Session adoption blocked: {exc}", file=sys.stderr)
+                return 9
         if child_control is not None:
             child_control["proc"] = proc
             # Covers the tiny race where SIGUSR1 arrived after Popen returned but
@@ -3450,7 +3560,30 @@ def _do_start_unlocked(
                 state.pop("interactive_child_pid", None)
                 json_dump(sd / "state.json", state)
 
-        return int(return_code or 0)
+        final_code = int(return_code or 0)
+        if adoption_coordinator_root is not None:
+            try:
+                adoption = finish_session_adoption(
+                    adoption_coordinator_root,
+                    return_code=final_code,
+                    state_dir=sd,
+                )
+            except SessionAdoptionError as exc:
+                print(f"Session adoption finalisation blocked: {exc}", file=sys.stderr)
+                return 9
+            if (
+                isinstance(adoption, dict)
+                and adoption.get("lifecycle_state") == "BLOCKED"
+            ):
+                print(
+                    str(
+                        adoption.get("blocker")
+                        or "session adoption remained blocked"
+                    ),
+                    file=sys.stderr,
+                )
+                return 9
+        return final_code
 
 def _systemd_escape_arg(value: str) -> str:
     return _systemd_escape_arg_impl(value)
