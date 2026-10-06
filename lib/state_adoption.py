@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 import subprocess
 from pathlib import Path
@@ -68,7 +69,7 @@ def _is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
 
 
 def _read_document(path: Path) -> tuple[dict[str, Any], str]:
-    path = path.expanduser().resolve()
+    path = Path(os.path.abspath(str(path.expanduser())))
     try:
         st = path.lstat()
     except OSError as exc:
