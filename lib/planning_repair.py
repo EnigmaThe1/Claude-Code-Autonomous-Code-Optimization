@@ -2332,8 +2332,12 @@ def promote_planning_repair(root: Path) -> dict[str, Any]:
     root = root.expanduser().resolve()
     policy = load_planning_repair_policy(root)
     active = load_active_repair(root)
-    if not policy or not active:
-        raise ValueError("no configured active planning repair exists")
+    # P5 contract-driven multi-file planning repair does not require the
+    # legacy one-file planning policy. The active schema-2 RepairEnvelope is
+    # the planning authority; policy is optional and only contributes legacy
+    # remote/product-branch configuration when present.
+    if not active:
+        raise ValueError("no active planning repair exists")
     candidate = str(active.get("candidate_sha") or "")
     verified = str(active.get("verified_sha") or "")
     if not candidate or verified != candidate:
