@@ -34,7 +34,7 @@ from repair_envelope import (
 from session_adoption import prepare_session_adoption
 from settings_policy import make_settings
 from state_store import json_dump
-from task_sources import resolve_task_sources
+from task_sources import resolve_task_sources, task_source_status
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2144,3 +2144,118 @@ def test_p6_planning_architect_session_context_binds_exact_repair_and_session_lo
         assert record["repair_envelope_sha256"] == active[
             "repair_envelope_sha256"
         ]
+
+
+def test_p7_planning_promotion_recovers_stale_task_source_generation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        ledger = root / "plans" / "tasks.json"
+        ledger.write_text(json.dumps({
+            "schema_version": 1,
+            "tasks": [_p5_task("T1")],
+        }) + "\n")
+        _git(root, "add", "plans/tasks.json")
+        _git(root, "commit", "-qm", "task ledger")
+
+        contract = _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    "plans/tasks.json",
+                    role="task_ledger",
+                    repair="repairable",
+                )],
+            ),
+        ])
+        contract["tasks"]["sources"] = [{
+            "id": "ledger",
+            "kind": "json",
+            "authority_sets": ["a"],
+            "paths": ["plans/tasks.json"],
+        }]
+        _p5_write_governance(root, contract)
+
+        live = resolve_task_sources(root, persist=True)
+        assert live["status"] == "READY"
+        assert [row["task"]["id"] for row in live["tasks"]] == ["T1"]
+        old_digest = live["task_source_set_sha256"]
+
+        active = begin_planning_repair(
+            root,
+            reason="add dependent task",
+            authority_sets=["a"],
+        )
+        worktree = Path(active["worktree"])
+        (worktree / "plans" / "tasks.json").write_text(json.dumps({
+            "schema_version": 1,
+            "tasks": [
+                _p5_task("T1"),
+                _p5_task("T2", depends_on=["T1"]),
+            ],
+        }) + "\n")
+        candidate = _p5_candidate_commit(
+            root,
+            worktree,
+            active=active,
+            paths=["plans/tasks.json"],
+        )
+        validation = validate_planning_repair_candidate(root)
+        expected_new_digest = validation["candidate_task_source_set_sha256"]
+        assert expected_new_digest != old_digest
+
+        monkeypatch.setattr(
+            pr,
+            "provider_from_args",
+            lambda _args: (os.environ.copy(), {"provider": "native"}),
+        )
+
+        def fake_verifier(**kwargs):
+            current = load_active_repair(root)
+            envelope_sha = current["repair_envelope_sha256"]
+            return (
+                "PLANNING_REPAIR_VERIFY: "
+                + json.dumps({
+                    "verdict": "VERIFIED",
+                    "candidate_sha": candidate,
+                    "repair_envelope_sha256": envelope_sha,
+                    "summary": "candidate task graph is coherent",
+                    "findings": [],
+                }),
+                {
+                    "repository_unchanged": True,
+                    "git_after": {"head": candidate},
+                    "usage": {},
+                },
+            )
+
+        monkeypatch.setattr(pr, "run_readonly_plan_agent", fake_verifier)
+        args = SimpleNamespace(
+            sha=candidate,
+            model=None,
+            timeout=0,
+            max_turns=20,
+            max_budget_usd=None,
+        )
+        verified = verify_planning_repair(root, args)
+        assert verified["status"] == "verified"
+
+        promoted = promote_planning_repair(root)
+        assert promoted["head"] == candidate
+        assert _git(root, "rev-parse", "HEAD").stdout.strip() == candidate
+        assert load_active_repair(root) == {}
+
+        # Model an interruption immediately after promotion, before the outer
+        # supervisor rebuilds its live TaskSourceSet. The prior persisted set
+        # must not be mistaken for current authority.
+        stale = task_source_status(root)
+        assert stale["status"] == "STALE"
+        assert stale["task_source_set_sha256"] == old_digest
+
+        rebuilt = resolve_task_sources(root, persist=True)
+        assert rebuilt["status"] == "READY"
+        assert rebuilt["product_head"] == candidate
+        assert rebuilt["task_source_set_sha256"] == expected_new_digest
+        assert [row["task"]["id"] for row in rebuilt["tasks"]] == ["T1", "T2"]
+        assert task_source_status(root)["status"] == "READY"
