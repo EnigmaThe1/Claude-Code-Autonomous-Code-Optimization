@@ -272,6 +272,15 @@ def build_parser(version: str) -> argparse.ArgumentParser:
     pr = prsp.add_parser("abort", help="Remove the dedicated repair worktree/branch without touching product work")
     pr.add_argument("--repo")
 
+    q = sp.add_parser("shadow", help="Read-only RC4/legacy governance and task-frontier comparison")
+    ssp = q.add_subparsers(dest="shadow_command", required=True)
+    sq = ssp.add_parser("snapshot", help="Compute the current RC4 ShadowObservation without activating work")
+    sq.add_argument("--repo")
+    sq = ssp.add_parser("compare", help="Compare current RC4 truth with an operator-supplied legacy ShadowObservation JSON file")
+    sq.add_argument("--repo")
+    sq.add_argument("--legacy", required=True)
+    sq.add_argument("--dispositions", help="Optional JSON object mapping mismatch dimensions to reviewed disposition text")
+
     q = sp.add_parser("governance", help="Inspect resolved repository planning authority")
     gsp = q.add_subparsers(dest="governance_command", required=True)
     gq = gsp.add_parser("status", help="Show the exact resolved AuthoritySet snapshot")
