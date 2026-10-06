@@ -525,3 +525,52 @@ def test_p7_tag_workflow_revalidates_remote_branch_heads_immediately_before_tag_
     assert "Release branch moved before tagging" in workflow
     assert workflow.rfind(main_probe) < workflow.rfind(tag_write)
     assert workflow.rfind(release_probe) < workflow.rfind(tag_write)
+
+
+def test_p7_finalizer_request_is_marker_only_exact_and_monotonic():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "finalize-release-candidate.yml"
+    ).read_text(encoding="utf-8")
+    assert "FINALIZE_LINES" in workflow
+    assert "must contain exactly two lines: version and sequence" in workflow
+    assert 'git diff --name-only -z "$GITHUB_SHA^" "$GITHUB_SHA" --' in workflow
+    assert 'REQUEST_PATHS[0]}" != ".release-finalize"' in workflow
+    assert 'git show "$GITHUB_SHA^:.release-finalize"' in workflow
+    assert "PARENT_SEQUENCE" in workflow
+    assert "SEQUENCE <= PARENT_SEQUENCE" in workflow
+    assert "Non-monotonic finalization sequence" in workflow
+
+
+def test_p7_release_qualification_is_bound_to_marker_sequence_and_finalizer_diff():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "release-candidate.yml"
+    ).read_text(encoding="utf-8")
+    assert "QUALIFY_LINES" in workflow
+    assert "FINALIZE_LINES" in workflow
+    assert "must contain exactly version, sequence and source_sha lines" in workflow
+    assert '"sequence=$QUALIFY_SEQUENCE"' in workflow
+    assert 'EXPECTED_SOURCE="$(git rev-parse HEAD^)"' in workflow
+    assert 'git diff --name-only -z HEAD^ HEAD --' in workflow
+    assert "Unexpected finalizer commit path" in workflow
+    assert "only MANIFEST.sha256 and .release-qualify are permitted" in workflow
+    assert "Qualification trigger not committed" in workflow
+
+
+def test_p7_tag_requires_matching_finalization_and_qualification_sequence():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "tag-accepted-release.yml"
+    ).read_text(encoding="utf-8")
+    assert ".release-qualify and .release-finalize are both required" in workflow
+    assert "QUALIFY_SEQUENCE" in workflow
+    assert '"sequence=$QUALIFY_SEQUENCE"' in workflow
+    assert "Release sequence mismatch" in workflow
+    assert '"source_sha=$EXPECTED_SOURCE"' in workflow
