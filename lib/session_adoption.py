@@ -269,9 +269,9 @@ def prepare_session_adoption(
             raise SessionAdoptionError(
                 "planning-architect adoption requires active schema-2 planning repair"
             )
-        if repair.get("status") not in {"ACTIVE", "RECONCILING"}:
+        if repair.get("status") != "ACTIVE":
             raise SessionAdoptionError(
-                "planning-architect adoption requires ACTIVE/RECONCILING repair state"
+                "planning-architect adoption requires ACTIVE repair state"
             )
         expected = Path(str(repair.get("worktree") or "")).expanduser().resolve()
         if working != expected:
