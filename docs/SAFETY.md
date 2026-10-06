@@ -86,6 +86,12 @@ P1 deliberately uses a broad control-surface set for normal product-worker prote
 
 The independent Planning Verifier is bound to the exact candidate SHA and RepairEnvelope. Promotion attestations additionally bind the exact product base, authority-content evidence and helper receipt digests. Generic `promote-ff` cannot bypass the planning gate for an existing or selector-matching planning member. Refresh-base invalidates prior verification and refuses automatic reuse if protected planning-control bytes or contract shape changed. These rules remain active in Unattended.
 
+RC4-P6 migration/adoption is deliberately lower authority than current Git truth. Imported accepted-task state is a claim, not an AcceptedTaskRecord; legacy verifier evidence is provenance, not a current attestation. Re-attestation uses the ordinary P4 exact-SHA gates. Active-task WIP adoption is explicit, requires a current matching base/TaskSpec, copies only admitted owned/evidence paths into the P4 worktree and leaves the primary checkout untouched. Out-of-envelope/protected/stale-base WIP fails closed.
+
+Session adoption does not attach an arbitrary running Claude process. It launches a fresh forked RC4-owned session under current generated settings/hooks and exact P4/P5 working-directory authority, then proves the new session identity from runtime SessionStart evidence. Missing or reused identity blocks adoption. Conversation memory cannot override the current ExecutionEnvelope or RepairEnvelope.
+
+P6 shadow validation treats the old/bespoke harness as **data**, not code. The package does not execute arbitrary legacy harness logic for comparison. RC4 snapshot computation is read-only with respect to repository/product/planning authority; comparison may write only external shadow audit evidence. Missing evidence is distinct from MATCH, and reviewed dispositions never delete the underlying mismatch.
+
 These semantic task controls remain active in **Balanced, Strict, Isolated Full and Unattended**. Runtime profiles may change how an operation executes, but they do not widen the TaskSpec, disable the ExecutionEnvelope, bypass coordinator boundaries or grant authority to package acceptance refs/state.
 
 Authority-changing `git-trust`, promotion-policy, planning-repair and P4 task-lifecycle CLI actions refuse invocation from inside an active Claude worker. Planning-repair candidates and repository-task candidates are independently verified at their exact SHA under their respective versioned attestation contracts before protected promotion.
