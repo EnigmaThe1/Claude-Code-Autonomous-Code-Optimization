@@ -1377,11 +1377,24 @@ def _verify_p5_planning_repair(
     verdict = str(protocol.get("verdict", "")).upper()
     if verdict not in {"VERIFIED", "REJECTED", "BLOCKED"}:
         raise ValueError("P5 Planning Verifier returned an unsupported verdict")
-    if str(protocol.get("candidate_sha", "")).lower() != candidate:
+    protocol_candidate = protocol.get("candidate_sha")
+    protocol_envelope = protocol.get("repair_envelope_sha256")
+    if envelope.get("source_mode") == "legacy":
+        # RC3's one-file verifier protocol pre-dates explicit identity echo.
+        # Preserve that wire compatibility only when the identity field is
+        # omitted. The package already fixed the verifier to this exact
+        # candidate/worktree/envelope; any explicitly supplied wrong identity
+        # still fails closed.
+        if protocol_candidate in (None, ""):
+            protocol_candidate = candidate
+        if protocol_envelope in (None, ""):
+            protocol_envelope = envelope_sha
+
+    if str(protocol_candidate or "").lower() != candidate:
         raise ValueError(
             "P5 Planning Verifier protocol is bound to the wrong candidate SHA"
         )
-    if protocol.get("repair_envelope_sha256") != envelope_sha:
+    if protocol_envelope != envelope_sha:
         raise ValueError(
             "P5 Planning Verifier protocol is bound to the wrong RepairEnvelope"
         )
