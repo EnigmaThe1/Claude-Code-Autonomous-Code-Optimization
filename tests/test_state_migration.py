@@ -651,14 +651,14 @@ def test_p6_schema1_repair_worktree_without_branch_blocks_and_preserves(monkeypa
         branch = active["repair_branch"]
         # Leave the linked worktree in place while deleting only the recorded
         # package branch ref. Migration must preserve the worktree and block.
+        before_plan = (worktree / "PLAN.md").read_bytes()
         _run(root, "git", "update-ref", "-d", f"refs/heads/{branch}")
-        before_head = _head(worktree)
 
         with pytest.raises(MigrationError, match="worktree exists but its repair branch is missing"):
             migrate_legacy_planning_repair(root)
 
         assert worktree.is_dir()
-        assert _head(worktree) == before_head
+        assert (worktree / "PLAN.md").read_bytes() == before_plan
         migration = load_json(
             repo_state_dir(root) / "planning-repair" / "migration-active.json",
             {},
