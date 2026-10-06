@@ -440,6 +440,40 @@ def planning_repair_control_selectors(
     return sorted(selectors)
 
 
+def planning_repair_control_records(
+    root: Path,
+    ref: str = "HEAD",
+) -> list[dict[str, str]]:
+    """Exact immutable control/executable records for P5 Planning Repair.
+
+    P1's broader control_surfaces intentionally includes helper/task-source data
+    inputs so ordinary product workers cannot mutate them. P5 may repair those
+    data inputs when they are selected repairable planning members, so P5 must
+    compare only governance/control/executable/verification surfaces here.
+    """
+    root = root.expanduser().resolve()
+    commit = _rev(root, ref)
+    tree = _tree(root, commit)
+    selectors = planning_repair_control_selectors(root, commit)
+    records: dict[str, dict[str, str]] = {}
+    for selector in selectors:
+        for entry in _resolve_selector(selector, tree, required=False):
+            path = unicodedata.normalize("NFC", entry["path"])
+            records[path] = {
+                "path": path,
+                "git_mode": entry["mode"],
+                "object": entry["object"],
+            }
+    return [records[path] for path in sorted(records)]
+
+
+def planning_repair_control_digest(
+    root: Path,
+    ref: str = "HEAD",
+) -> str:
+    return _digest(planning_repair_control_records(root, ref))
+
+
 def planning_repair_control_paths(
     root: Path,
     ref: str = "HEAD",
