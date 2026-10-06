@@ -1,0 +1,289 @@
+{
+  "schema_version": 1,
+  "target": "1.0.0-rc4",
+  "entry_count": 25,
+  "entries": [
+    {
+      "id": "task-workspace-preparing-before-branch",
+      "transition": "before/after task workspace PREPARING",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_preparing_recovery_before_branch_creation"
+        }
+      ]
+    },
+    {
+      "id": "task-workspace-after-branch",
+      "transition": "after task branch creation",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_preparing_recovery_after_branch_before_worktree"
+        }
+      ]
+    },
+    {
+      "id": "task-workspace-after-worktree",
+      "transition": "after task worktree creation before envelope",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_preparing_recovery_after_worktree_before_envelope"
+        }
+      ]
+    },
+    {
+      "id": "task-workspace-after-envelope",
+      "transition": "after ExecutionEnvelope persistence / active workspace reuse",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_task_workspace_is_external_resumable_and_primary_wip_isolated"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_missing_task_worktree_readds_exact_recorded_branch"
+        }
+      ]
+    },
+    {
+      "id": "candidate-record-before-ref",
+      "transition": "after candidate record before candidate ref",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_candidate_pending_ref_crash_reconciles_exact_candidate"
+        }
+      ]
+    },
+    {
+      "id": "candidate-ref-before-verification",
+      "transition": "after candidate ref before deterministic verification",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_candidate_seal_keeps_task_head_at_base_and_anchors_exact_commit"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p7_deterministic_verification_resumes_from_persisted_verifying"
+        }
+      ]
+    },
+    {
+      "id": "deterministic-verification",
+      "transition": "during deterministic verification",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p7_deterministic_verification_resumes_from_persisted_verifying"
+        }
+      ]
+    },
+    {
+      "id": "task-verifier-attestation",
+      "transition": "after independent task verifier attestation",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_independent_verifier_binds_exact_sha_and_attestation"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_unverified_candidate_cannot_be_accepted"
+        }
+      ]
+    },
+    {
+      "id": "task-promotion",
+      "transition": "during task promotion",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_crash_after_fast_forward_reconciles_acceptance_idempotently"
+        }
+      ]
+    },
+    {
+      "id": "task-promotion-before-accepted-record",
+      "transition": "after task product promotion before AcceptedTaskRecord",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p4_crash_after_fast_forward_reconciles_acceptance_idempotently"
+        }
+      ]
+    },
+    {
+      "id": "accepted-cleanup",
+      "transition": "during accepted-task cleanup",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_execution_envelope.py::test_p7_accepted_cleanup_retries_after_candidate_ref_deleted"
+        }
+      ]
+    },
+    {
+      "id": "planning-preparing-before-branch",
+      "transition": "before planning-repair worktree/branch creation",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p7_p5_preparing_recovery_before_branch_creation"
+        }
+      ]
+    },
+    {
+      "id": "planning-preparing-after-branch",
+      "transition": "after planning-repair branch before worktree",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p7_p5_preparing_recovery_after_branch_before_worktree"
+        }
+      ]
+    },
+    {
+      "id": "planning-architect",
+      "transition": "during multi-file Architect changes",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p7_interrupted_multifile_architect_preserves_partial_work_fail_closed"
+        }
+      ]
+    },
+    {
+      "id": "planning-reconciler",
+      "transition": "during reconciler generation / half-applied generated state",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_reconciler_deterministically_creates_updates_and_deletes_generated_members"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_reconciler_rejects_nondeterministic_output_bytes"
+        }
+      ]
+    },
+    {
+      "id": "planning-candidate",
+      "transition": "after planning candidate commit",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p5_candidate_task_sources_validate_without_overwriting_live_runtime_state"
+        }
+      ]
+    },
+    {
+      "id": "planning-verifier-attestation",
+      "transition": "after planning verifier attestation",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_independent_verifier_attests_exact_candidate_and_promotion_consumes_it"
+        }
+      ]
+    },
+    {
+      "id": "planning-base-refresh",
+      "transition": "during planning base refresh",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_refresh_base_recovers_stale_in_progress_marker_and_retries"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_refresh_base_recognises_candidate_that_already_absorbed_new_product_base"
+        }
+      ]
+    },
+    {
+      "id": "planning-promotion",
+      "transition": "during planning promotion / exact attestation consumption",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_independent_verifier_attests_exact_candidate_and_promotion_consumes_it"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_promotion_broker.py::test_remote_push_lost_response_reconciles_remote_truth"
+        }
+      ]
+    },
+    {
+      "id": "planning-promotion-before-task-rebuild",
+      "transition": "after planning promotion before live TaskSourceSet rebuild",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_planning_repair.py::test_p7_planning_promotion_recovers_stale_task_source_generation"
+        }
+      ]
+    },
+    {
+      "id": "migration-preparing",
+      "transition": "during schema migration PREPARING",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_state_migration.py::test_p6_preparing_migration_record_resumes_idempotently"
+        }
+      ]
+    },
+    {
+      "id": "migration-applying",
+      "transition": "during schema migration APPLYING",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_state_migration.py::test_p6_apply_crash_with_schema10_finishes_verification"
+        }
+      ]
+    },
+    {
+      "id": "migration-verifying",
+      "transition": "during schema migration VERIFYING",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_state_migration.py::test_p6_verifying_migration_record_finishes_idempotently"
+        }
+      ]
+    },
+    {
+      "id": "session-adoption",
+      "transition": "during session adoption/fork evidence capture",
+      "evidence": [
+        {
+          "kind": "pytest",
+          "ref": "tests/test_profile_switch.py::test_interactive_external_session_adoption_forks_and_records_new_session"
+        },
+        {
+          "kind": "pytest",
+          "ref": "tests/test_profile_switch.py::test_session_adoption_blocks_missing_or_reused_session_identity"
+        }
+      ]
+    },
+    {
+      "id": "release-finalisation",
+      "transition": "during release finalisation",
+      "evidence": [
+        {
+          "kind": "workflow",
+          "ref": ".github/workflows/finalize-release-candidate.yml"
+        },
+        {
+          "kind": "workflow",
+          "ref": ".github/workflows/release-candidate.yml"
+        }
+      ]
+    }
+  ]
+}
