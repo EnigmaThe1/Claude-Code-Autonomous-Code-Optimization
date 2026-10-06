@@ -2259,3 +2259,181 @@ def test_p7_planning_promotion_recovers_stale_task_source_generation(monkeypatch
         assert rebuilt["task_source_set_sha256"] == expected_new_digest
         assert [row["task"]["id"] for row in rebuilt["tasks"]] == ["T1", "T2"]
         assert task_source_status(root)["status"] == "READY"
+
+
+def test_p7_p5_preparing_recovery_before_branch_creation(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "main.md").write_text("base\n")
+        _git(root, "add", "plans/main.md")
+        _git(root, "commit", "-qm", "planning input")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    "plans/main.md",
+                    role="source",
+                    repair="repairable",
+                )],
+            ),
+        ]))
+
+        original = pr._recover_p5_repair_worktree
+
+        def crash_before_git(*_args, **_kwargs):
+            raise ValueError("simulated crash before planning branch creation")
+
+        monkeypatch.setattr(pr, "_recover_p5_repair_worktree", crash_before_git)
+        with pytest.raises(ValueError, match="simulated crash"):
+            begin_planning_repair(
+                root,
+                reason="recover PREPARING",
+                authority_sets=["a"],
+            )
+
+        preparing = load_active_repair(root)
+        assert preparing["schema_version"] == 2
+        assert preparing["status"] == "PREPARING"
+        assert not Path(preparing["worktree"]).exists()
+        assert _git(
+            root,
+            "show-ref",
+            "--verify",
+            f"refs/heads/{preparing['repair_branch']}",
+            check=False,
+        ).returncode != 0
+
+        monkeypatch.setattr(pr, "_recover_p5_repair_worktree", original)
+        recovered = begin_planning_repair(root)
+        assert recovered["status"] == "ACTIVE"
+        assert Path(recovered["worktree"]).is_dir()
+        assert _git(
+            root,
+            "show-ref",
+            "--verify",
+            f"refs/heads/{recovered['repair_branch']}",
+        ).returncode == 0
+
+
+def test_p7_p5_preparing_recovery_after_branch_before_worktree(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "main.md").write_text("base\n")
+        _git(root, "add", "plans/main.md")
+        _git(root, "commit", "-qm", "planning input")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [_p5_member(
+                    "plans/main.md",
+                    role="source",
+                    repair="repairable",
+                )],
+            ),
+        ]))
+
+        original = pr._recover_p5_repair_worktree
+
+        def crash_after_branch(coordinator_root, active):
+            _git(
+                coordinator_root,
+                "branch",
+                active["repair_branch"],
+                active["base_sha"],
+            )
+            raise ValueError("simulated crash after planning branch creation")
+
+        monkeypatch.setattr(pr, "_recover_p5_repair_worktree", crash_after_branch)
+        with pytest.raises(ValueError, match="simulated crash"):
+            begin_planning_repair(
+                root,
+                reason="recover branch-only PREPARING",
+                authority_sets=["a"],
+            )
+
+        preparing = load_active_repair(root)
+        assert preparing["status"] == "PREPARING"
+        assert _git(
+            root,
+            "show-ref",
+            "--verify",
+            f"refs/heads/{preparing['repair_branch']}",
+        ).returncode == 0
+        assert not Path(preparing["worktree"]).exists()
+
+        monkeypatch.setattr(pr, "_recover_p5_repair_worktree", original)
+        recovered = begin_planning_repair(root)
+        assert recovered["status"] == "ACTIVE"
+        assert Path(recovered["worktree"]).is_dir()
+        assert _git(
+            Path(recovered["worktree"]),
+            "rev-parse",
+            "HEAD",
+        ).stdout.strip() == recovered["base_sha"]
+
+
+def test_p7_interrupted_multifile_architect_preserves_partial_work_fail_closed(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state_td:
+        root = _repo(Path(td) / "repo")
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state_td)
+        (root / "plans").mkdir()
+        (root / "plans" / "a.md").write_text("a base\n")
+        (root / "plans" / "b.md").write_text("b base\n")
+        _git(root, "add", "plans")
+        _git(root, "commit", "-qm", "multi planning input")
+        _p5_write_governance(root, _p5_contract([
+            _p5_set(
+                "a",
+                [
+                    _p5_member(
+                        "plans/a.md",
+                        role="source",
+                        repair="repairable",
+                    ),
+                    _p5_member(
+                        "plans/b.md",
+                        role="source",
+                        repair="repairable",
+                    ),
+                ],
+            ),
+        ]))
+
+        active = begin_planning_repair(
+            root,
+            reason="multi-file architect interruption",
+            authority_sets=["a"],
+        )
+        worktree = Path(active["worktree"])
+        partial = worktree / "plans" / "a.md"
+        partial.write_text("partially edited before interruption\n")
+
+        with pytest.raises(
+            ValueError,
+            match="requires a clean dedicated worktree",
+        ):
+            run_planning_repair_architect(
+                root,
+                SimpleNamespace(
+                    reason="resume after interrupted architect",
+                    model=None,
+                    max_budget_usd=None,
+                    max_turns=20,
+                    timeout=0,
+                    authority_set=["a"],
+                ),
+            )
+
+        assert partial.read_text() == "partially edited before interruption\n"
+        assert load_active_repair(root)["status"] == "ACTIVE"
+        assert _git(
+            worktree,
+            "diff",
+            "--name-only",
+            "HEAD",
+            "--",
+        ).stdout.splitlines() == ["plans/a.md"]
