@@ -269,6 +269,7 @@ from task_acceptance import (
     verify_task_candidate_deterministic,
     verify_task_candidate_independent,
 )
+from shadow_validation import shadow_action
 from operator_authority import require_top_level_operator
 from environment_policy import apply_resume_environment, capture_resume_environment
 from git_trust import git_trust_action
@@ -3718,6 +3719,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "promotion": return promotion_policy_action(args, find_repo_root=find_repo_root)
     if args.command == "planning-repair": return planning_repair_action(args, find_repo_root=find_repo_root)
     if args.command == "governance": return governance_action(args, find_repo_root=find_repo_root)
+    if args.command == "shadow": return shadow_action(args, find_repo_root=find_repo_root)
     if args.command == "tasks": return _p4_task_cli_action(args)
     if args.command == "promote-ff": return promote_ff_action(args, find_repo_root=find_repo_root)
     if args.command == "cleanup-untracked": return cleanup_untracked_action(args, find_repo_root=find_repo_root)
