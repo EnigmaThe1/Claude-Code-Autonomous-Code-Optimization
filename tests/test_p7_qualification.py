@@ -479,7 +479,10 @@ def test_p7_interruption_traceability_references_live_evidence():
         root / ".github" / "workflows" / "finalize-release-candidate.yml"
     ).read_text(encoding="utf-8")
     assert 'paths:\n      - ".release-finalize"' in finalizer
-    assert "sequence=[1-9][0-9]*" in finalizer
+    assert "^sequence=([1-9][0-9]*)$" in finalizer
+    assert "REQUEST_PATHS" in finalizer
+    assert "PARENT_SEQUENCE" in finalizer
+    assert "Non-monotonic finalization sequence" in finalizer
     assert "git add MANIFEST.sha256 .release-qualify" in finalizer
     assert "Unexpected finalizer mutation" in finalizer
     assert 'grep -Ev \'^(MANIFEST\\.sha256|\\.release-qualify)$\'' in finalizer
