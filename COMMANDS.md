@@ -1,4 +1,4 @@
-# Claude Auto command reference — 1.0.0-rc2
+# Claude Auto command reference — 1.0.0-rc4
 
 ## Installation and health
 
@@ -36,6 +36,8 @@ claude-auto run --resume-config --repo /path/to/repo
 ```bash
 claude-auto start --objective "..."
 claude-auto start --profile strict --objective "..."
+claude-auto start --resume-session SESSION_ID_OR_NAME --repo /path/to/repo
+claude-auto start --resume-session SESSION_ID_OR_NAME --resume-role planning-architect --repo /path/to/repo
 ```
 
 ```text
@@ -185,6 +187,42 @@ claude-auto planning-repair abort --repo /path/to/repo
 The resulting enriched attestation binds the candidate SHA, RepairEnvelope, exact base, authority-content evidence and helper receipt digests. `promote`/generic protected `promote-ff` accepts only the exact attested planning candidate. `refresh-base` invalidates stale evidence and refuses automatic refresh when planning governance/control executables/verification control, selected authority contracts or TaskSource authority changed.
 
 Planning-repair authority-changing commands are top-level-operator/package operations and are not worker-self-service commands. Runtime profiles, including Unattended, do not widen RepairEnvelope authority.
+
+## RC4 migration, adoption and shadow validation
+
+State schemas migrate explicitly and crash-safely before normal activation writes current semantic state. Unknown future schemas fail closed.
+
+```bash
+claude-auto migrate status --repo /path/to/repo
+claude-auto migrate state --repo /path/to/repo
+claude-auto migrate planning-repair --repo /path/to/repo
+
+claude-auto migrate adopt-state --repo /path/to/repo --from legacy-state.json
+claude-auto migrate reattest TASK_ID --repo /path/to/repo
+claude-auto migrate adopt-active --repo /path/to/repo
+claude-auto migrate adopt-wip --repo /path/to/repo
+```
+
+`adopt-state` imports a bounded legacy observation as **claims only**. It does not write P4 AcceptedTaskRecords, trust a legacy verifier, or unlock dependencies. `reattest` maps one eligible accepted-task claim into the ordinary P4 no-op candidate/verification/independent-verifier/acceptance path. `adopt-active` maps a currently valid active-task claim into the normal P4 workspace. `adopt-wip` is explicit: it copies only current owned/evidence WIP byte-for-byte into that workspace and leaves the primary checkout unchanged; stale-base, protected or out-of-envelope WIP is refused.
+
+Existing Claude conversation context can be adopted only by launching a **fresh forked RC4-owned session** with current settings/hooks/authority:
+
+```bash
+claude-auto start --repo /path/to/repo --resume-session SESSION_ID_OR_NAME
+claude-auto start --repo /path/to/repo --resume-session SESSION_ID_OR_NAME --resume-role planning-architect
+```
+
+The product role resumes inside the exact active P4 task worktree when one exists. The planning-architect role requires the exact active P5 repair worktree/RepairEnvelope. Conversation memory never overrides current TaskSpec, ExecutionEnvelope or RepairEnvelope authority.
+
+Shadow validation is read-only with respect to repository/product/planning authority:
+
+```bash
+claude-auto shadow snapshot --repo /path/to/repo
+claude-auto shadow compare --repo /path/to/repo --legacy legacy-observation.json
+claude-auto shadow compare --repo /path/to/repo --legacy legacy-observation.json --dispositions reviewed.json
+```
+
+Shadow comparison independently computes RC4 AuthoritySets, TaskSources, dependency-safe frontier, active/next task, accepted-task evidence, blockers, planning-repair state and verification-through evidence. Mismatches and missing evidence remain explicit; reviewed dispositions annotate but never erase the raw result.
 
 ## Narrow recovery and promotion
 
