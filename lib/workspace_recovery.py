@@ -219,14 +219,28 @@ def _local_wip_signature(root: Path) -> dict[str, Any]:
         except OSError:
             entries.append({"path": rel, "kind": "unreadable"})
     return {
-        "worktree_diff": _git_output_hash(root, "diff", "--no-ext-diff", "--binary"),
-        "index_diff": _git_output_hash(root, "diff", "--no-ext-diff", "--cached", "--binary"),
+        "worktree_diff": _git_output_hash(
+            root, "diff", "--no-ext-diff", "--no-textconv", "--binary"
+        ),
+        "index_diff": _git_output_hash(
+            root, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--binary"
+        ),
         "untracked": entries,
     }
 
 
 def _changed_paths(root: Path, base: str, target: str) -> set[str]:
-    cp = _git(root, "diff", "--name-only", "-z", base, target, "--")
+    cp = _git(
+        root,
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--name-only",
+        "-z",
+        base,
+        target,
+        "--",
+    )
     if cp.returncode != 0:
         raise ValueError("unable to determine fast-forward changed paths")
     return {item for item in cp.stdout.split("\0") if item}
@@ -235,8 +249,16 @@ def _changed_paths(root: Path, base: str, target: str) -> set[str]:
 def _dirty_paths(root: Path) -> set[str]:
     out: set[str] = set()
     for args in (
-        ("diff", "--name-only", "-z", "--"),
-        ("diff", "--cached", "--name-only", "-z", "--"),
+        ("diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "--"),
+        (
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--",
+        ),
         ("ls-files", "--others", "--exclude-standard", "-z"),
     ):
         cp = _git(root, *args)
