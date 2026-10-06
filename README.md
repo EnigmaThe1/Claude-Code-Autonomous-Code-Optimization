@@ -28,7 +28,8 @@ Repository: https://github.com/EnigmaThe1/Claude-Code-Autonomous-Code-Optimizati
 - exact-SHA verifier attestations for protected promotion;
 - optional remote-aware, idempotent promotion with exact expected-base protection;
 - optional repository-owned canonical-plan authority with dedicated repair worktrees and independent verification;
-- deterministic repository-owned TaskSpecs with package-owned active ExecutionEnvelopes, post-batch mutation detection and path-gated staging/promotion.
+- deterministic repository-owned TaskSpecs with package-owned active ExecutionEnvelopes, post-batch mutation detection and path-gated staging/promotion;
+- explicit crash-safe RC4 state migration, legacy progress adoption/re-attestation, forked Claude session adoption and read-only shadow comparison.
 
 The governing principle is: **the user's objective is authoritative; the implementation plan is a repairable route to that objective.**
 
@@ -122,6 +123,42 @@ claude-auto tasks abort --repo . --reason "..."
 Direct edits outside the task envelope are denied. Opaque command effects are checked after each Claude tool batch against actual task-worktree, primary-checkout and relevant Git-ref state. Scratch may be writable but cannot enter a candidate. Protected planning/control state wins over broad task selectors in every execution profile, including Unattended and Isolated Full.
 
 Candidate sealing is package-owned and keeps task-worktree HEAD pinned to the exact product base. Deterministic verification runs in detached exact-SHA worktrees using the existing verification-command authority; TaskSpec verification strings remain acceptance claims, not executable shell. A separate read-only Task Verifier must attest the exact candidate SHA before promotion. Successful acceptance persists a full integrity-checked AcceptedTaskRecord, supports no-op tasks without fake commits, cleans the task workspace and recomputes the next dependency-safe READY frontier. Rejected candidates return to the same task for repair; stale/drifted or unsafe cleanup states preserve evidence rather than silently resetting or rebasing work.
+
+### Migration, session adoption and shadow validation
+
+RC4-P6 preserves engineering progress without treating legacy state or conversation memory as authority.
+
+Known older durable-state schemas migrate through explicit versioned steps before activation writes current state. Unknown future schemas block with zero semantic migration write. In-flight legacy one-file Planning Repair can be normalised into the P5 RepairEnvelope lifecycle while preserving candidate/WIP evidence and invalidating legacy verifier trust.
+
+Legacy harness state can be imported as bounded claims:
+
+```bash
+claude-auto migrate adopt-state --repo . --from legacy-state.json
+claude-auto migrate reattest TASK_ID --repo .
+claude-auto migrate adopt-active --repo .
+claude-auto migrate adopt-wip --repo .
+```
+
+Imported accepted-task claims do not immediately satisfy dependencies. Eligible work must pass the ordinary current P4 deterministic verification, independent Task Verifier and exact acceptance transaction. Active-task WIP adoption copies only current admitted owned/evidence paths into the package task worktree and never rewrites/stashes/resets the primary checkout.
+
+Existing Claude conversations can be brought forward with:
+
+```bash
+claude-auto start --repo . --resume-session SESSION_ID_OR_NAME
+```
+
+Claude Auto uses native fork/resume to create a fresh RC4-owned guarded session. The current repository authority boundary is rebuilt first: product sessions run in the active P4 task worktree when applicable; planning-architect sessions require the active P5 repair worktree. Resumed memory cannot widen current authority.
+
+For field qualification against an existing/bespoke harness:
+
+```bash
+claude-auto shadow snapshot --repo .
+claude-auto shadow compare --repo . --legacy legacy-observation.json
+```
+
+Shadow mode computes RC4 truth independently and compares ordinary JSON observations. It does not execute the legacy harness or mutate repository/product/planning state; raw mismatches and evidence gaps remain auditable even after reviewed dispositions.
+
+See [RC4 P6 migration/session/shadow protocol](docs/RC4_P6_MIGRATION_SESSION_SHADOW_PROTOCOL.md).
 
 ## Operating profiles
 
