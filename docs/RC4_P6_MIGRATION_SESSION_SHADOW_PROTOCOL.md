@@ -1,6 +1,6 @@
 # RC4 P6 — Migration, Session Adoption and Shadow Validation Protocol
 
-Status: **FROZEN FOR IMPLEMENTATION**
+Status: **IMPLEMENTED AND QUALIFIED**
 
 Date: 2026-10-06
 
@@ -11,6 +11,20 @@ P5 qualified implementation: `8ada95010f6bdea52655db5432b768b3c48b4c82`
 P5 formal closure: `ff0f6ba6b914037a816145a1d78cb05cb71091b9`
 
 P6 protocol red-team closure: explicit future-schema zero-write preflight; no silent stale-base WIP rebase; imported acceptance remains claims until P4 re-attestation; external Claude conversation adoption uses current native resume with a fresh forked RC4-owned session; shadow mode is data-only/read-only.
+
+P6 qualified functional baseline: `02b607118148357aea5362a9990e90dc8f19261c`
+
+P6 final qualified implementation/docs/hostile head: `53b741ac3308197dccaeeedfa6d54dd22ea47bdd`
+
+Qualification evidence at the final head:
+
+- 567/567 tests passed;
+- the same 567/567 tests passed again under coverage;
+- aggregate measured coverage: 16,183 statements / 5,482 misses = 66%;
+- critical regression groups: 15/15, 19/19, 25/25, 19/19 and 18/18 passed;
+- public-baseline audit, package static checks and branch/version identity passed;
+- `main` remained at accepted RC3 SHA `d75f7c48dfe53d1a1759ee7828d9a42f5f744569`;
+- no RC4 tag, `main` promotion or release-finalisation request was created by P6.
 
 ## 1. Purpose
 
@@ -824,3 +838,31 @@ P6 is complete only when:
 - all P1-P5 behavior remains green.
 
 Only then may P7 begin adversarial/topology/release qualification.
+
+
+## 37. Closure record
+
+RC4-P6 is formally closed.
+
+The qualified implementation now provides:
+
+- explicit crash-safe durable-state migration to schema 10, including PREPARING/APPLYING/VERIFYING recovery and fail-closed refusal of unknown future schemas;
+- preservation/normalisation of the legacy one-file planning-policy path as the synthetic default AuthoritySet;
+- crash-recoverable migration of in-flight legacy Planning Repair into current P5 RepairEnvelope semantics without transferring legacy verifier/attestation trust;
+- bounded legacy harness-state import as provenance-bearing claims rather than current authority;
+- current-P4 re-attestation of eligible imported accepted-task claims before they can satisfy dependencies;
+- current active-task mapping only when the imported/current TaskSpec and base are compatible;
+- explicit byte/mode/deletion-preserving WIP adoption into the P4 task worktree while leaving the primary checkout unchanged and rejecting protected/out-of-envelope/stale progress;
+- operator-facing migration/adoption surfaces through `claude-auto migrate status|state|planning-repair|adopt-state|reattest|adopt-active|adopt-wip`;
+- side-effect-free migration status for absent adoption state and fail-closed reporting of corrupt adoption records;
+- external Claude conversation adoption through native resume plus a fresh forked RC4-owned session identity under current generated settings/hooks/profile;
+- exact adopted-session identity proof from current SessionStart runtime evidence, with missing/reused identity blocking;
+- current P4 task-worktree / P5 RepairEnvelope working-directory authority taking precedence over remembered conversation state;
+- read-only/data-only RC4 shadow observation and legacy comparison with explicit MATCH/MISMATCH/MISSING evidence classes and durable external audit records;
+- reviewed shadow dispositions that annotate but never erase raw mismatches;
+- final interruption/topology qualification for migration VERIFYING recovery, legacy repair branch/worktree loss and preservation behavior;
+- complete P1-P5 regression continuity.
+
+P6 deliberately does not perform RC4 release promotion/tagging and does not claim that imported legacy evidence, legacy verifier output, or resumed conversation memory can mint current authority.
+
+The next and final RC4 implementation phase is **P7 — adversarial and topology qualification**. P7 may repair defects exposed by qualification, but it is not a feature-expansion phase. It must execute the original RC4 scenario/stress/security/release gates before any `main` promotion or `v1.0.0-rc4` tag.
