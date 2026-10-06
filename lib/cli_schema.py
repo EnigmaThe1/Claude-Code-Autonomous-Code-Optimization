@@ -100,6 +100,8 @@ def build_parser(version: str) -> argparse.ArgumentParser:
     q.add_argument("--permission-mode", default="auto", choices=["default", "acceptEdits", "plan", "auto", "dontAsk"])
     q.add_argument("--memory-mode", default="external", choices=["external", "hybrid"], help="external uses only compact harness checkpoints; hybrid also enables Claude auto memory")
     q.add_argument("--session-settings", choices=["compatibility", "hermetic"], default=None, help="Settings-source policy. Interactive start defaults to compatibility except unattended, which is hermetic. Select explicitly to override.")
+    q.add_argument("--resume-session", help="Adopt an existing Claude Code session by ID or name under a fresh forked RC4-owned session")
+    q.add_argument("--resume-role", choices=["product", "planning-architect"], default="product", help="Authority role for --resume-session; product uses the active P4 task workspace when present, planning-architect requires an active P5 repair worktree")
     add_provider_args(q, include_roles=True)
 
     q = sp.add_parser("run", help="Run autonomous work until complete/blocked/limited")
