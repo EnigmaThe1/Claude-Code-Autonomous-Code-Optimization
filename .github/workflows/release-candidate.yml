@@ -35,9 +35,60 @@ jobs:
             fi
           fi
           test -f .release-qualify || { echo "::error title=Qualification trigger missing::.release-qualify is required for both push and manual qualification."; exit 1; }
-          grep -Fxq "version=$VERSION" .release-qualify || { echo "::error title=Qualification trigger/version mismatch::.release-qualify must contain version=$VERSION."; exit 1; }
+          test -f .release-finalize || { echo "::error title=Finalization marker missing::.release-finalize is required on a qualified release SHA."; exit 1; }
+
+          mapfile -t QUALIFY_LINES < .release-qualify
+          if (( ${#QUALIFY_LINES[@]} != 3 )); then
+            echo "::error title=Invalid qualification trigger::.release-qualify must contain exactly version, sequence and source_sha lines."
+            exit 1
+          fi
+          if [[ "${QUALIFY_LINES[0]}" != "version=$VERSION" ]]; then
+            echo "::error title=Qualification trigger/version mismatch::.release-qualify must start with version=$VERSION."
+            exit 1
+          fi
+          if [[ ! "${QUALIFY_LINES[1]}" =~ ^sequence=([1-9][0-9]*)$ ]]; then
+            echo "::error title=Qualification sequence invalid::.release-qualify requires a positive sequence."
+            exit 1
+          fi
+          QUALIFY_SEQUENCE="${BASH_REMATCH[1]}"
+          if [[ ! "${QUALIFY_LINES[2]}" =~ ^source_sha=([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+            echo "::error title=Qualification source invalid::.release-qualify requires one full lowercase Git object id."
+            exit 1
+          fi
+          QUALIFY_SOURCE="${BASH_REMATCH[1]}"
+
+          mapfile -t FINALIZE_LINES < .release-finalize
+          if (( ${#FINALIZE_LINES[@]} != 2 )) || [[ "${FINALIZE_LINES[0]}" != "version=$VERSION" ]] || [[ "${FINALIZE_LINES[1]}" != "sequence=$QUALIFY_SEQUENCE" ]]; then
+            echo "::error title=Qualification/finalization mismatch::.release-finalize must exactly match the qualified version and sequence."
+            exit 1
+          fi
+
           EXPECTED_SOURCE="$(git rev-parse HEAD^)"
-          grep -Fxq "source_sha=$EXPECTED_SOURCE" .release-qualify || { echo "::error title=Qualification source mismatch::.release-qualify must attest immediate parent $EXPECTED_SOURCE."; exit 1; }
+          if [[ "$QUALIFY_SOURCE" != "$EXPECTED_SOURCE" ]]; then
+            echo "::error title=Qualification source mismatch::.release-qualify must attest immediate parent $EXPECTED_SOURCE."
+            exit 1
+          fi
+
+          mapfile -d '' -t FINALIZER_PATHS < <(git diff --name-only -z HEAD^ HEAD --)
+          if (( ${#FINALIZER_PATHS[@]} == 0 )); then
+            echo "::error title=Empty finalizer commit::Qualified HEAD must contain the finalizer output."
+            exit 1
+          fi
+          QUALIFY_CHANGED=0
+          for rel in "${FINALIZER_PATHS[@]}"; do
+            case "$rel" in
+              MANIFEST.sha256) ;;
+              .release-qualify) QUALIFY_CHANGED=1 ;;
+              *)
+                echo "::error title=Unexpected finalizer commit path::Qualified HEAD changed '$rel'; only MANIFEST.sha256 and .release-qualify are permitted."
+                exit 1
+                ;;
+            esac
+          done
+          if (( QUALIFY_CHANGED != 1 )); then
+            echo "::error title=Qualification trigger not committed::Qualified HEAD must change .release-qualify."
+            exit 1
+          fi
       - name: Install qualification prerequisites
         run: |
           set -euo pipefail
