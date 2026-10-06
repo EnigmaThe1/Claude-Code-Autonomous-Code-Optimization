@@ -597,3 +597,84 @@ def test_interactive_external_session_adoption_forks_and_records_new_session(mon
         assert adoption["adopted_session_id"] == "fresh-forked-session-456"
         assert adoption["selector_display"] == "legacy-session-name"
         assert adoption["return_code"] == 0
+
+
+def test_session_adoption_blocks_missing_or_reused_session_identity(monkeypatch):
+    from session_adoption import (
+        capture_adopted_session_id,
+        load_session_adoption,
+        mark_session_adoption_launched,
+        prepare_session_adoption,
+    )
+    from state_store import json_dump
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "repo"
+        sd = base / "state"
+        root.mkdir()
+        sd.mkdir()
+        _git_repo(root)
+        json_dump(sd / "state.json", {
+            "schema_version": 10,
+            "governance_snapshot_sha256": None,
+            "task_source_sha256": None,
+        })
+        settings = sd / "settings-balanced-external.json"
+        settings.write_text("{}\n")
+
+        prepare_session_adoption(
+            root,
+            "old-name",
+            working_directory=root,
+            settings_path=settings,
+            autonomy_profile="balanced",
+            state_dir=sd,
+        )
+        mark_session_adoption_launched(
+            root,
+            event_offset=0,
+            pid=43001,
+            state_dir=sd,
+        )
+        missing = capture_adopted_session_id(
+            root,
+            state_dir=sd,
+            block_if_missing=True,
+        )
+        assert missing["lifecycle_state"] == "BLOCKED"
+        assert "no exact SessionStart" in missing["blocker"]
+
+        source_uuid = "123e4567-e89b-12d3-a456-426614174000"
+        prepare_session_adoption(
+            root,
+            source_uuid,
+            working_directory=root,
+            settings_path=settings,
+            autonomy_profile="balanced",
+            state_dir=sd,
+        )
+        offset = 0
+        events = sd / "runtime-events.jsonl"
+        events.write_text(
+            json.dumps({
+                "event": "SessionStart",
+                "session_id": source_uuid,
+            }) + "\n"
+        )
+        mark_session_adoption_launched(
+            root,
+            event_offset=offset,
+            pid=43002,
+            state_dir=sd,
+        )
+        reused = capture_adopted_session_id(
+            root,
+            state_dir=sd,
+            block_if_missing=True,
+        )
+        assert reused["lifecycle_state"] == "BLOCKED"
+        assert "reused the source session ID" in reused["blocker"]
+        durable = load_session_adoption(root, state_dir=sd)
+        assert durable is not None
+        assert durable["lifecycle_state"] == "BLOCKED"
