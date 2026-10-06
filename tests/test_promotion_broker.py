@@ -79,18 +79,33 @@ def test_trusted_git_reconstruction_discards_poison_and_rebuilds_only_package_co
             "GIT_SSH_COMMAND": "ssh test",
         })
 
-        assert env["GIT_CONFIG_COUNT"] == "5"
+        count = int(env["GIT_CONFIG_COUNT"])
+        assert count >= 5
         pairs = {
             env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
-            for i in range(int(env["GIT_CONFIG_COUNT"]))
+            for i in range(count)
         }
-        assert set(pairs) == {
+        mandatory = {
             "core.excludesFile",
             "core.hooksPath",
             "core.fsmonitor",
             "fetch.recurseSubmodules",
             "submodule.recurse",
         }
+        assert mandatory <= set(pairs)
+        for key, value in pairs.items():
+            if key in mandatory:
+                continue
+            assert key.startswith("filter."), key
+            assert key.rsplit(".", 1)[-1] in {
+                "process", "clean", "smudge", "required"
+            }
+            if key.endswith(".process"):
+                assert value == ""
+            elif key.endswith((".clean", ".smudge")):
+                assert value == "cat"
+            else:
+                assert value == "false"
         trusted_copy = Path(pairs["core.excludesFile"])
         assert trusted_copy != excludes.resolve()
         assert trusted_copy.read_text() == excludes.read_text()
@@ -419,7 +434,13 @@ def test_default_broker_view_overrides_global_excludes_with_empty_package_file(m
 
         (root / "real-untracked.txt").write_text("real\n")
         env = trusted_git_env(root)
-        assert env["GIT_CONFIG_COUNT"] == "5"
+        assert int(env["GIT_CONFIG_COUNT"]) >= 5
+        pairs = {
+            env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
+            for i in range(int(env["GIT_CONFIG_COUNT"]))
+        }
+        assert pairs["core.excludesFile"] == os.devnull
+        assert pairs["core.hooksPath"] == os.devnull
         assert _visible_untracked(root) == {"real-untracked.txt"}
 
 
