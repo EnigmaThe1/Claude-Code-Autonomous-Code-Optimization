@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 
 from authority_set import build_authority_snapshot
+from task_authority import ready_frontier
 from task_sources import resolve_task_sources
 from task_spec import normalise_task_spec, selector_matches_path
 from workspace_recovery import promote_fast_forward
@@ -305,3 +306,50 @@ def test_p7_multiple_remotes_are_explicitly_scoped(monkeypatch):
         ).stdout.strip()
         assert origin_head == target
         assert mirror_head == base
+
+
+def test_p7_overlapping_ownership_is_dependency_serialised(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        plan = root / "PLAN.md"
+        plan.write_text("plan\n")
+        tasks = [
+            _task(
+                "FIRST",
+                authority_sets=["default"],
+                owned_paths=["shared/**"],
+            ),
+            _task(
+                "SECOND",
+                authority_sets=["default"],
+                owned_paths=["shared/**"],
+                depends_on=["FIRST"],
+            ),
+        ]
+        contract = {
+            "schema_version": 1,
+            "planning_authority": {
+                "sets": [{
+                    "id": "default",
+                    "members": [_member("PLAN.md")],
+                    "validators": [],
+                    "reconcilers": [],
+                }]
+            },
+            "tasks": {
+                "sources": [{
+                    "id": "tasks",
+                    "kind": "static",
+                    "authority_sets": ["default"],
+                    "tasks": tasks,
+                }],
+                "execution_mode": "single-writer",
+                "strict_dependencies": True,
+            },
+            "control_surfaces": [],
+        }
+        _write_governance(root, contract)
+        task_set = resolve_task_sources(root, persist=True)
+        assert task_set["status"] == "READY"
+        assert ready_frontier(root, task_set=task_set) == ["FIRST"]
