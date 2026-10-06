@@ -24,6 +24,8 @@ The system has an always-on low-risk user layer and an explicit autonomous super
 - `promotion_policy.py`: durable exact-SHA promotion-attestation policy.
 - `repair_envelope.py` / `planning_repair.py`: universal one-file/multi-file Planning Repair authority, lifecycle, refresh and promotion.
 - `planning_helpers.py` / `planning_validation.py`: bounded deterministic reconcilers/validators and exact candidate AuthoritySet/TaskSource validation.
+- `state_migration.py` / `migration.py` / `state_adoption.py`: explicit schema migration, legacy Planning Repair migration, claims import, re-attestation and WIP adoption.
+- `session_adoption.py` / `shadow_validation.py`: fresh forked Claude-session adoption and independent read-only RC4/legacy observation comparison.
 - `user_layer.py`: package-owned Claude user-layer installation.
 - `telemetry.py` / `protocols.py`: structured outcomes, redaction and budgets.
 
@@ -77,6 +79,12 @@ P4 separates the **coordinator authority root** from the **task execution root**
 P5 generalises repository-owned Planning Repair onto the same AuthoritySet model. A legacy one-file canonical plan is a synthetic one-member `default` RepairEnvelope; structured repositories may select one or more named AuthoritySets explicitly. The RepairEnvelope distinguishes repairable, immutable and generated members, binds allowed growth/helper contracts and protects planning-control surfaces independently from runtime profile authority.
 
 The Planning Repair Architect can mutate only repairable members. Generated members are package-owned deterministic reconciler outputs. Candidate validation rebuilds the entire exact candidate AuthoritySet topology and TaskSource graph, executes declared validators, and stores integrity-bound evidence without replacing live TaskSource state. The independent Planning Verifier then reviews the exact candidate SHA against the same RepairEnvelope and helper receipts. Promotion requires an enriched exact-SHA planning attestation even when a generic fast-forward target reaches planning authority indirectly through a selector. Base refresh preserves work across interruption but invalidates prior evidence and refuses automatic reuse when planning control executables, governance/contracts or selected authority semantics changed.
+
+P6 adds a migration/adoption layer **below current authority** rather than trusting older state. Durable schemas migrate through explicit crash-safe transactions. Legacy Planning Repair is mapped onto P5 RepairEnvelope semantics. Legacy accepted/active task state is imported as claims; only current P4 gates can turn eligible claims into accepted work, and explicit WIP adoption copies admitted bytes/modes into the task worktree without modifying the primary checkout.
+
+External Claude conversation adoption never attaches an old process in place. Claude Auto rebuilds the current product-task or Planning-Repair boundary, launches native resume with fork semantics, records the new SessionStart identity and treats resumed conversation memory as lower authority than current Git/governance/task state.
+
+Shadow validation is data-only: RC4 independently computes AuthoritySet, TaskSource/frontier, active/next task, acceptance, blocker, planning-repair and verification-through observations, then compares them with an operator-supplied bounded JSON observation. Snapshot is repository/package-state read-only; compare may persist only external shadow audit evidence.
 
 See [PLANNING_AND_REPAIR.md](PLANNING_AND_REPAIR.md).
 
