@@ -1718,6 +1718,9 @@ def test_p4_candidate_seal_keeps_task_head_at_base_and_anchors_exact_commit(monk
 
         workspace = load_active_task_workspace(primary)
         assert workspace is not None
+        assert result["task_workspace_sha256"] == workspace[
+            "task_workspace_sha256"
+        ]
         assert workspace["lifecycle_state"] == "CANDIDATE"
         assert workspace["candidate_sha"] == candidate
         assert workspace["candidate_ref_pending"] is False
@@ -1764,6 +1767,9 @@ def test_p4_candidate_scratch_only_is_verified_noop_shape_without_fake_commit(mo
 
         workspace = load_active_task_workspace(primary)
         assert workspace is not None
+        assert result["task_workspace_sha256"] == workspace[
+            "task_workspace_sha256"
+        ]
         assert workspace["lifecycle_state"] == "CANDIDATE"
         assert workspace["no_op_candidate"] is True
         assert workspace["candidate_ref"] is None
