@@ -22,8 +22,17 @@ from pathlib import Path
 
 import pytest
 
-from migration import MigrationError, normalise_legacy_planning_policy
-from planning_repair import configure_planning_repair
+from migration import (
+    MigrationError,
+    migrate_legacy_planning_repair,
+    normalise_legacy_planning_policy,
+)
+from planning_repair import (
+    begin_planning_repair,
+    configure_planning_repair,
+    load_active_repair,
+)
+from repair_envelope import load_repair_envelope
 from repo_identity import SupervisorLease, repo_state_dir
 from repo_runtime import activate
 from state_migration import (
@@ -65,6 +74,67 @@ def _status(root: Path) -> str:
 
 def _state_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+
+
+def _legacy_repair_fixture(
+    root: Path,
+    *,
+    candidate: bool = False,
+    verified: bool = False,
+) -> tuple[dict, Path, str | None]:
+    sd = repo_state_dir(root)
+    repair_dir = sd / "planning-repair"
+    repair_dir.mkdir(parents=True, exist_ok=True)
+    branch = "claude-auto/planning-repair/legacy-migration-test"
+    worktree = repair_dir / "worktree"
+    base = _head(root)
+    _run(
+        root,
+        "git",
+        "worktree",
+        "add",
+        "-b",
+        branch,
+        str(worktree),
+        base,
+    )
+    candidate_sha: str | None = None
+    if candidate:
+        plan = worktree / "PLAN.md"
+        plan.write_text(plan.read_text() + "\nMigrated repair candidate.\n")
+        _run(worktree, "git", "add", "PLAN.md")
+        _run(worktree, "git", "commit", "-qm", "legacy planning candidate")
+        candidate_sha = _head(worktree)
+
+    active = {
+        "schema_version": 1,
+        "status": "ACTIVE",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "reason": "legacy planning repair",
+        "base_sha": base,
+        "product_branch": _run(
+            root, "git", "branch", "--show-current"
+        ).stdout.strip(),
+        "repair_branch": branch,
+        "worktree": str(worktree),
+        "canonical_plan": "PLAN.md",
+        "candidate_sha": candidate_sha,
+        "verified_sha": candidate_sha if verified else None,
+        "refresh": None,
+    }
+    if verified:
+        active.update({
+            "verifier_summary": "legacy verifier said this was valid",
+            "verifier_findings": [],
+            "verifier_attestation": {
+                "target_sha": candidate_sha,
+                "legacy": True,
+            },
+        })
+    json_dump(repair_dir / "active.json", active)
+    return active, worktree, candidate_sha
 
 
 def test_p6_new_repository_activate_creates_schema10(monkeypatch):
@@ -356,3 +426,165 @@ def test_p6_corrupt_legacy_policy_blocks_without_mutating_policy(monkeypatch):
 
         assert policy_path.read_bytes() == before
         assert not (sd / "planning-repair" / "policy-migration.json").exists()
+
+
+def test_p6_clean_schema1_repair_migrates_to_p5_envelope(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("# plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        configure_planning_repair(root, canonical_plan="PLAN.md")
+        legacy, worktree, _candidate = _legacy_repair_fixture(root)
+
+        result = migrate_legacy_planning_repair(root)
+        assert result["status"] == "COMPLETED"
+        assert result["candidate_sha"] is None
+        active = load_active_repair(root)
+        assert active["schema_version"] == 2
+        assert active["status"] == "ACTIVE"
+        assert active["base_sha"] == legacy["base_sha"]
+        assert active["candidate_sha"] is None
+        assert active["verified_sha"] is None
+        assert active["selected_authority_sets"] == ["default"]
+        assert active["repair_envelope_sha256"] == result[
+            "repair_envelope_sha256"
+        ]
+        envelope = load_repair_envelope(root)
+        assert envelope is not None
+        assert envelope["base_sha"] == legacy["base_sha"]
+        assert envelope["product_branch"] == legacy["product_branch"]
+        assert envelope["repairable_paths"] == ["PLAN.md"]
+        assert _head(worktree) == legacy["base_sha"]
+
+        # P5 can reopen the migrated state without another migration.
+        reopened = begin_planning_repair(root, reason="resume migrated repair")
+        assert reopened["schema_version"] == 2
+        assert reopened["repair_envelope_sha256"] == active[
+            "repair_envelope_sha256"
+        ]
+        assert migrate_legacy_planning_repair(root)["status"] == "CURRENT"
+
+
+def test_p6_legacy_verified_candidate_loses_trusted_verifier_status(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("# plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        configure_planning_repair(root, canonical_plan="PLAN.md")
+        legacy, worktree, candidate = _legacy_repair_fixture(
+            root,
+            candidate=True,
+            verified=True,
+        )
+        assert candidate is not None
+
+        result = migrate_legacy_planning_repair(root)
+        assert result["status"] == "COMPLETED"
+        assert result["candidate_sha"] == candidate
+        assert result["legacy_verified_sha_claim"] == candidate
+
+        active = load_active_repair(root)
+        assert active["schema_version"] == 2
+        assert active["status"] == "CANDIDATE"
+        assert active["candidate_sha"] == candidate
+        assert active["verified_sha"] is None
+        assert active.get("verifier_attestation") is None
+        assert active.get("validated_candidate_sha") is None
+        provenance = active["migration_provenance"]
+        assert provenance["legacy_verified_sha_claim"] == candidate
+        assert provenance["legacy_verifier_summary"] == (
+            "legacy verifier said this was valid"
+        )
+        assert provenance["legacy_verifier_attestation_sha256"]
+        assert _head(worktree) == candidate
+
+        # Restart/recovery accepts the exact durable candidate but does not
+        # restore legacy verification trust.
+        reopened = begin_planning_repair(root, reason="resume candidate")
+        assert reopened["candidate_sha"] == candidate
+        assert reopened["verified_sha"] is None
+
+
+def test_p6_schema1_repair_recovers_missing_worktree_from_surviving_branch(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("# plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        configure_planning_repair(root, canonical_plan="PLAN.md")
+        legacy, worktree, _candidate = _legacy_repair_fixture(root)
+        _run(root, "git", "worktree", "remove", "--force", str(worktree))
+        assert not worktree.exists()
+
+        result = migrate_legacy_planning_repair(root)
+        assert result["status"] == "COMPLETED"
+        assert worktree.is_dir()
+        assert _head(worktree) == legacy["base_sha"]
+        assert load_active_repair(root)["schema_version"] == 2
+
+
+def test_p6_schema1_uncommitted_plan_wip_is_preserved_and_blocks(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("# plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        configure_planning_repair(root, canonical_plan="PLAN.md")
+        _legacy, worktree, _candidate = _legacy_repair_fixture(root)
+        plan = worktree / "PLAN.md"
+        plan.write_text(plan.read_text() + "\nUncommitted legacy progress.\n")
+        before = plan.read_bytes()
+
+        with pytest.raises(MigrationError, match="uncommitted"):
+            migrate_legacy_planning_repair(root)
+
+        assert plan.read_bytes() == before
+        active = load_active_repair(root)
+        assert active["schema_version"] == 1
+        record = load_json(
+            repo_state_dir(root)
+            / "planning-repair"
+            / "migration-active.json",
+            {},
+        )
+        assert record["lifecycle_state"] == "BLOCKED"
+        assert record["dirty_paths"] == ["PLAN.md"]
+        assert not (
+            repo_state_dir(root)
+            / "planning-repair"
+            / "repair-envelope.json"
+        ).exists()
+
+
+def test_p6_schema1_out_of_scope_wip_is_preserved_and_blocks(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as home:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", home)
+        root = _repo(Path(td) / "repo")
+        (root / "PLAN.md").write_text("# plan\n")
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "plan")
+        configure_planning_repair(root, canonical_plan="PLAN.md")
+        _legacy, worktree, _candidate = _legacy_repair_fixture(root)
+        app = worktree / "README.md"
+        app.write_text("unexpected product WIP\n")
+        before = app.read_bytes()
+
+        with pytest.raises(MigrationError, match="out-of-scope"):
+            migrate_legacy_planning_repair(root)
+
+        assert app.read_bytes() == before
+        assert load_active_repair(root)["schema_version"] == 1
+        record = load_json(
+            repo_state_dir(root)
+            / "planning-repair"
+            / "migration-active.json",
+            {},
+        )
+        assert record["lifecycle_state"] == "BLOCKED"
+        assert "README.md" in record["dirty_paths"]
