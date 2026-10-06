@@ -2363,15 +2363,25 @@ def _capture_live_task_source_generation(
         raise ValueError(
             "durable TaskSourceSet binding is malformed before planning promotion"
         )
+    current_head = _rev(root, "HEAD")
+    if current_head != base_sha:
+        raise ValueError(
+            "planning promotion base drifted before stale TaskSource capture: "
+            f"expected={base_sha}, HEAD={current_head}"
+        )
     try:
+        # The durable set was originally resolved at HEAD and P1 deliberately
+        # binds branch identity into AuthoritySet.snapshot_sha256. Re-resolving
+        # the literal base SHA would set branch=None and therefore create a
+        # different, valid-but-not-identical TaskSourceSet generation.
         resolved = resolve_task_sources(
             root,
             persist=False,
-            ref=base_sha,
+            ref="HEAD",
         )
     except TaskSourceError as exc:
         raise ValueError(
-            f"unable to reconstruct pre-promotion TaskSourceSet at {base_sha}: {exc}"
+            f"unable to reconstruct pre-promotion HEAD TaskSourceSet at {base_sha}: {exc}"
         ) from exc
     if resolved.get("status") != "READY":
         raise ValueError(
@@ -2381,8 +2391,8 @@ def _capture_live_task_source_generation(
     rebuilt = resolved.get("task_source_set_sha256")
     if rebuilt != bound:
         raise ValueError(
-            "durable TaskSourceSet binding does not match the exact planning "
-            f"repair base generation: state={bound}, base={rebuilt}"
+            "durable TaskSourceSet binding does not match the exact pre-promotion "
+            f"HEAD generation: state={bound}, HEAD={rebuilt}"
         )
     return {
         "state_root": str(state_root),
