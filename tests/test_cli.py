@@ -1612,6 +1612,204 @@ def test_transactional_install_preserves_runtime_state():
         assert "Transactional upgrade verification" in cp.stdout
 
 
+def test_p7_rc3_identity_upgrade_preserves_durable_state():
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as install:
+        bindir = Path(home) / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        dest = Path(install) / "pack"
+        env = os.environ.copy()
+        env.update({
+            "HOME": home,
+            "CLAUDE_AUTONOMY_HOME": str(dest),
+            "CLAUDE_AUTONOMY_BIN": str(bindir),
+        })
+        first = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), "--no-plugins"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert first.returncode == 0, first.stderr
+
+        marker_path = dest / ".claude-autonomy-install.json"
+        marker = json.loads(marker_path.read_text())
+        install_uuid = marker["install_uuid"]
+
+        # Model an identified accepted RC3 installation while keeping the test
+        # runnable from the extracted RC4 archive (which intentionally has no
+        # Git history). Installer replacement semantics depend on the install
+        # marker/state layout, not on executing old RC3 code.
+        (dest / "VERSION").write_text("1.0.0-rc3\n")
+        marker["version"] = "1.0.0-rc3"
+        marker_path.write_text(json.dumps(marker, indent=2) + "\n")
+        (dest / "README.md").write_text("synthetic rc3 package payload\n")
+
+        repo_state = dest / "repos" / "fixture"
+        (repo_state / "git-trust").mkdir(parents=True)
+        (repo_state / "planning-repair").mkdir()
+        state_bytes = b'{"schema_version":5,"objective":"preserve me"}\n'
+        trust_bytes = b'{"schema_version":2,"source_sha256":"abc"}\n'
+        plan_bytes = b'{"schema_version":1,"canonical_plan":"PLAN.md"}\n'
+        (repo_state / "state.json").write_bytes(state_bytes)
+        (repo_state / "git-trust" / "policy.json").write_bytes(trust_bytes)
+        (repo_state / "planning-repair" / "policy.json").write_bytes(plan_bytes)
+        registry = dest / "model-registry.json"
+        registry.write_bytes(b'{"keep":"registry"}\n')
+
+        assert (
+            subprocess.run(
+                [str(bindir / "claude-auto"), "--version"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            == "claude-auto 1.0.0-rc3"
+        )
+
+        upgraded = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), "--no-plugins"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert upgraded.returncode == 0, upgraded.stderr
+        assert (dest / "VERSION").read_text().strip() == "1.0.0-rc4"
+        new_marker = json.loads(marker_path.read_text())
+        assert new_marker["version"] == "1.0.0-rc4"
+        assert new_marker["install_uuid"] == install_uuid
+        assert (repo_state / "state.json").read_bytes() == state_bytes
+        assert (repo_state / "git-trust" / "policy.json").read_bytes() == trust_bytes
+        assert (repo_state / "planning-repair" / "policy.json").read_bytes() == plan_bytes
+        assert registry.read_bytes() == b'{"keep":"registry"}\n'
+        assert (dest / "README.md").read_text() != "synthetic rc3 package payload\n"
+
+
+def test_p7_post_swap_upgrade_failure_restores_previous_exact_package_and_state():
+    with (
+        tempfile.TemporaryDirectory() as home,
+        tempfile.TemporaryDirectory() as install,
+        tempfile.TemporaryDirectory() as badsrc,
+    ):
+        bindir = Path(home) / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        dest = Path(install) / "pack"
+        env = os.environ.copy()
+        env.update({
+            "HOME": home,
+            "CLAUDE_AUTONOMY_HOME": str(dest),
+            "CLAUDE_AUTONOMY_BIN": str(bindir),
+        })
+        first = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), "--no-plugins"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert first.returncode == 0, first.stderr
+
+        state = dest / "repos" / "keep"
+        state.mkdir(parents=True)
+        sentinel = state / "state.json"
+        sentinel.write_bytes(b"known-good-state\n")
+        before_version = (dest / "VERSION").read_bytes()
+        before_readme = (dest / "README.md").read_bytes()
+        before_user_layer = (dest / "lib" / "user_layer.py").read_bytes()
+        before_marker = (dest / ".claude-autonomy-install.json").read_bytes()
+
+        candidate = Path(badsrc) / "candidate"
+        shutil.copytree(
+            ROOT,
+            candidate,
+            ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"),
+        )
+        (candidate / "lib" / "user_layer.py").write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "raise SystemExit(9 if 'install' in sys.argv[1:] else 0)\n"
+        )
+        rebuild = subprocess.run(
+            [sys.executable, str(candidate / "scripts" / "build_manifest.py"), "--write"],
+            cwd=candidate,
+            text=True,
+            capture_output=True,
+        )
+        assert rebuild.returncode == 0, rebuild.stderr
+
+        failed = subprocess.run(
+            ["bash", str(candidate / "install.sh"), "--no-plugins"],
+            cwd=candidate,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert failed.returncode != 0
+        assert "restoring the previous known-good installation" in failed.stderr
+        assert (dest / "VERSION").read_bytes() == before_version
+        assert (dest / "README.md").read_bytes() == before_readme
+        assert (dest / "lib" / "user_layer.py").read_bytes() == before_user_layer
+        assert (dest / ".claude-autonomy-install.json").read_bytes() == before_marker
+        assert sentinel.read_bytes() == b"known-good-state\n"
+        launcher = bindir / "claude-auto"
+        assert launcher.is_symlink()
+        assert Path(os.readlink(launcher)) == dest / "bin" / "claude-auto"
+        version = subprocess.run(
+            [str(launcher), "--version"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        assert version == "claude-auto 1.0.0-rc4"
+
+
+def test_p7_keep_state_uninstall_removes_package_but_preserves_durable_state():
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as install:
+        bindir = Path(home) / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        dest = Path(install) / "pack"
+        env = os.environ.copy()
+        env.update({
+            "HOME": home,
+            "CLAUDE_AUTONOMY_HOME": str(dest),
+            "CLAUDE_AUTONOMY_BIN": str(bindir),
+        })
+        installed = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), "--no-plugins"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert installed.returncode == 0, installed.stderr
+
+        state = dest / "repos" / "fixture" / "state.json"
+        state.parent.mkdir(parents=True)
+        state.write_bytes(b"durable-state\n")
+        marker = dest / ".claude-autonomy-install.json"
+        assert marker.is_file()
+
+        removed = subprocess.run(
+            ["bash", str(dest / "uninstall.sh"), "--keep-state"],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert removed.returncode == 0, removed.stderr
+        assert state.read_bytes() == b"durable-state\n"
+        assert marker.is_file()
+        assert not (bindir / "claude-auto").exists()
+        for name in (
+            "bin", "docs", "hooks", "lib", "scripts", "templates", "tests",
+            "LICENSE", "NOTICE", "MANIFEST.sha256", "VERSION",
+            "install.sh", "uninstall.sh",
+        ):
+            assert not (dest / name).exists(), name
+
+
 def test_transactional_install_rejects_bad_candidate_without_touching_live_install():
     with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as install, tempfile.TemporaryDirectory() as badsrc:
         bindir=Path(home)/".local"/"bin"; bindir.mkdir(parents=True)
