@@ -486,3 +486,18 @@ def test_p7_interruption_traceability_references_live_evidence():
     assert "push --force-with-lease=" in finalizer
     assert "gh workflow run ci.yml" in finalizer
     assert "gh workflow run release-candidate.yml" in finalizer
+
+
+def test_p7_tag_workflow_requires_exact_successful_main_ci_for_manual_and_automatic_paths():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "tag-accepted-release.yml"
+    ).read_text(encoding="utf-8")
+    assert 'actions/workflows/ci.yml/runs' in workflow
+    assert '-f branch="main" -f status=success' in workflow
+    assert 'run.get("head_sha") == sha' in workflow
+    assert 'run.get("conclusion") == "success"' in workflow
+    assert "No successful main CI found for exact SHA" in workflow
+    assert "main_ci_run=" in workflow
