@@ -3658,14 +3658,18 @@ def _p6_migration_cli_action(args: argparse.Namespace) -> int:
             state = load_json(sd / "state.json", {})
             if not isinstance(state, dict):
                 state = {}
-            try:
-                adoption = load_current_adoption(root)
-            except StateAdoptionError:
-                adoption = None
-            try:
-                session = load_session_adoption(root, state_dir=sd)
-            except SessionAdoptionError:
-                session = None
+            adoption_path = sd / "adoption" / "current.json"
+            adoption = (
+                load_current_adoption(root)
+                if adoption_path.is_file()
+                else None
+            )
+            session_path = sd / "session-adoption" / "active.json"
+            session = (
+                load_session_adoption(root, state_dir=sd)
+                if session_path.is_file()
+                else None
+            )
             result = {
                 "status": "READY",
                 "repository": str(root),
