@@ -24,7 +24,10 @@ PURGE="${1:-}"
 python3 - "$DEST" "$MARKER" "$HOME" "${XDG_DATA_HOME:-$HOME/.local/share}" "$PURGE" <<'PY'
 import json, os, stat, sys
 dest, marker, home, xdg, purge = sys.argv[1:6]
-dest = os.path.realpath(os.path.expanduser(dest))
+raw_dest = os.path.abspath(os.path.expanduser(dest))
+if os.path.islink(raw_dest):
+    raise SystemExit(f"Refusing symlink uninstall destination: {raw_dest}")
+dest = os.path.realpath(raw_dest)
 marker = os.path.abspath(os.path.expanduser(marker))
 home = os.path.realpath(os.path.expanduser(home))
 xdg = os.path.realpath(os.path.expanduser(xdg))
