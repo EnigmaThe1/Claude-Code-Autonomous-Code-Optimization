@@ -597,3 +597,22 @@ def test_authority_content_digest_changes_with_member_blob(monkeypatch):
         assert after is not None
 
         assert authority_content_sha256(after) != before_digest
+
+
+def test_p7_lfs_pointer_authority_member_fails_closed(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as state:
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", state)
+        root = _repo(Path(td) / "repo")
+        pointer = (
+            "version https://git-lfs.github.com/spec/v1\n"
+            "oid sha256:" + ("a" * 64) + "\n"
+            "size 123456\n"
+        )
+        (root / "PLAN.md").write_text(pointer)
+        _run(root, "git", "add", "PLAN.md")
+        _run(root, "git", "commit", "-qm", "lfs pointer authority")
+        _write_contract(root, _contract([
+            _set("default", [_member("PLAN.md")])
+        ]))
+        with pytest.raises(AuthoritySetError, match="Git LFS pointer"):
+            build_authority_snapshot(root)
