@@ -419,3 +419,52 @@ def test_p7_scenario_traceability_has_all_64_live_pytest_references():
             assert path.is_file(), ref
             source = path.read_text(encoding="utf-8")
             assert f"def {function}(" in source, ref
+
+
+def test_p7_interruption_traceability_references_live_evidence():
+    root = Path(__file__).resolve().parents[1]
+    traceability = json.loads(
+        (
+            root
+            / "docs"
+            / "RC4_P7_INTERRUPTION_TRACEABILITY.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert traceability["schema_version"] == 1
+    assert traceability["target"] == "1.0.0-rc4"
+    entries = traceability["entries"]
+    assert traceability["entry_count"] == len(entries)
+    assert len(entries) >= 25
+    assert len({row["id"] for row in entries}) == len(entries)
+
+    for row in entries:
+        evidence = row.get("evidence")
+        assert isinstance(evidence, list) and evidence, row
+        for item in evidence:
+            kind = item.get("kind")
+            ref = item.get("ref")
+            assert kind in {"pytest", "workflow"}, item
+            assert isinstance(ref, str) and ref, item
+            if kind == "pytest":
+                assert "::" in ref, item
+                rel, function = ref.split("::", 1)
+                path = root / rel
+                assert path.is_file(), ref
+                assert f"def {function}(" in path.read_text(
+                    encoding="utf-8"
+                ), ref
+            else:
+                path = root / ref
+                assert path.is_file(), ref
+
+    finalizer = (
+        root / ".github" / "workflows" / "finalize-release-candidate.yml"
+    ).read_text(encoding="utf-8")
+    assert 'paths:\n      - ".release-finalize"' in finalizer
+    assert "sequence=[1-9][0-9]*" in finalizer
+    assert "git add MANIFEST.sha256 .release-qualify" in finalizer
+    assert "Unexpected finalizer mutation" in finalizer
+    assert 'grep -Ev \'^(MANIFEST\\.sha256|\\.release-qualify)$\'' in finalizer
+    assert "push --force-with-lease=" in finalizer
+    assert "gh workflow run ci.yml" in finalizer
+    assert "gh workflow run release-candidate.yml" in finalizer
