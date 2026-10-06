@@ -505,6 +505,54 @@ def _clear_p5_candidate_evidence(active: dict[str, Any]) -> None:
         active.pop(key, None)
 
 
+def planning_repair_session_context(
+    root: Path,
+) -> tuple[Path, Path, dict[str, Any]]:
+    """Return the exact active P5 Architect worktree/settings boundary."""
+    root = root.expanduser().resolve()
+    active = load_active_repair(root)
+    if not active or active.get("schema_version") != 2:
+        raise ValueError(
+            "planning-architect session adoption requires active schema-2 repair"
+        )
+    if active.get("status") == "PREPARING":
+        active = _recover_p5_repair_worktree(root, active)
+    if active.get("status") != "ACTIVE":
+        raise ValueError(
+            "planning-architect session adoption requires ACTIVE repair state; "
+            f"found {active.get('status')!r}"
+        )
+    envelope = load_repair_envelope(root)
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("repair_envelope_sha256")
+        != active.get("repair_envelope_sha256")
+    ):
+        raise ValueError(
+            "active P5 repair is not bound to its exact RepairEnvelope"
+        )
+    worktree = Path(str(active.get("worktree") or "")).expanduser().resolve()
+    if not worktree.is_dir():
+        active = _recover_p5_repair_worktree(root, active)
+        worktree = Path(str(active["worktree"])).expanduser().resolve()
+
+    canonical_raw = active.get("canonical_plan")
+    plan_rel = (
+        str(canonical_raw)
+        if isinstance(canonical_raw, str) and canonical_raw
+        else None
+    )
+    plan = (worktree / plan_rel).resolve() if plan_rel else None
+    envelope_path = _repair_dir(root) / "repair-envelope.json"
+    settings = _architect_settings(
+        root,
+        worktree,
+        plan=plan,
+        envelope_path=envelope_path,
+    )
+    return worktree, settings, active
+
+
 def run_planning_repair_architect(root: Path, args: Any) -> dict[str, Any]:
     root = root.expanduser().resolve()
     active = load_active_repair(root) or begin_planning_repair(
