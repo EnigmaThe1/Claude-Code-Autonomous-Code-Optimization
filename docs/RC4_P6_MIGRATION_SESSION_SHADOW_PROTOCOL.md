@@ -87,6 +87,8 @@ state.schema_version > CURRENT_STATE_SCHEMA
 
 Known older schemas run explicit migration steps before normal activation writes current fields.
 
+The schema preflight happens **before** activation persists a new governance snapshot, generated settings, profile output or other current-version semantic state. Read-only repository profiling/governance inspection may be used to decide a migration, but an unknown future state schema must cause a zero-semantic-write refusal.
+
 ## 4. Migration transaction
 
 State migration runs while the package owns the existing repository SupervisorLease.
@@ -327,7 +329,9 @@ It does **not** directly write:
 
 The importer first validates:
 
-- document schema/size/UTF-8;
+- input is one top-level-operator-selected regular file, not a symlink/device;
+- document size is bounded (P6 v1 target: <= 2 MiB);
+- document schema/UTF-8;
 - current repository identity;
 - current Git HEAD/product SHA relationship;
 - current AuthoritySet/TaskSourceSet;
@@ -371,7 +375,9 @@ P6 resolves the current TaskSpec and checks:
 
 If current primary checkout is clean for the relevant task, P6 may begin/reuse the normal P4 task workspace for that task.
 
-If uncommitted primary WIP intersects the imported task's owned/evidence/scratch authority, P6 stops before normal P4 begin and requires explicit WIP adoption/checkpointing.
+If uncommitted primary WIP intersects the imported task's owned/evidence authority, P6 stops before normal P4 begin and requires explicit WIP adoption/checkpointing.
+
+Declared runtime scratch/cache is not treated as durable implementation progress merely because it exists in the primary checkout.
 
 It never silently discards or ignores that WIP.
 
@@ -383,16 +389,19 @@ The operation:
 
 1. requires a current resolved TaskSpec;
 2. captures exact primary WIP baseline;
-3. proves every task-related dirty/untracked path is inside current TaskSpec authority and outside protected/control state;
-4. begins a clean P4 task worktree at the exact committed base;
-5. copies only exact admitted task-owned/evidence/scratch content into the task worktree;
-6. verifies byte/mode identity;
-7. leaves the primary checkout unchanged;
-8. records an adoption receipt binding source primary WIP digest to the P4 task workspace.
+3. requires the imported/current active-task base to equal the primary committed HEAD used for adoption; stale-base WIP is preserved but not automatically rebased;
+4. proves every promotable task-related dirty/untracked path is inside current TaskSpec owned/evidence authority and outside protected/control state;
+5. begins a clean P4 task worktree at the exact committed base;
+6. copies only exact admitted owned/evidence implementation content into the task worktree;
+7. verifies byte/mode identity;
+8. leaves the primary checkout unchanged;
+9. records an adoption receipt binding source primary WIP digest to the P4 task workspace.
+
+Ignored build/cache files and runtime scratch are not scanned or copied by default. If an operator explicitly asks to preserve declared scratch, P6 may copy it as non-promotable workspace scratch under the existing envelope, but scratch can never become accepted product history.
 
 Unexpected/out-of-envelope WIP blocks automatic adoption.
 
-P6 does not stash/reset/delete primary WIP.
+P6 does not stash/reset/delete primary WIP and does not silently rebase stale legacy WIP.
 
 ## 16. Imported blockers and reservations
 
@@ -428,6 +437,8 @@ As of the P6 design pass, current Claude Code supports:
 - background-session attach behavior when resuming a session that is already running.
 
 P6 must not accidentally attach to an already-running legacy/background process whose original guard/settings boundary is unknown.
+
+P6 feature-detects the required native resume/fork flags. If the installed Claude Code cannot provide a fresh forked resume, adoption blocks rather than falling back to in-place attach.
 
 ## 19. External-session adoption uses a fresh RC4-owned process
 
@@ -592,6 +603,8 @@ P6 baseline shadow comparison accepts a normalised JSON observation supplied by 
 
 This avoids executing arbitrary legacy harness code merely to compare it.
 
+The legacy observation input is bounded (P6 v1 target: <= 2 MiB), must be a regular operator-selected file and is parsed as data only.
+
 An optional future adapter may be supported only through an existing bounded read-only helper/adapter boundary with explicitly supplied inputs.
 
 P6 must not shell out to an arbitrary bespoke harness command with unrestricted host access by default.
@@ -706,6 +719,7 @@ P6 must test at least:
 - re-attested imported accepted task becomes P4 acceptance;
 - imported active task maps to current TaskSpec;
 - imported active task with stale base blocks;
+- stale-base primary WIP is preserved but never silently rebased into a P4 workspace;
 - imported task WIP requires explicit adoption;
 - admitted primary WIP copied to P4 task worktree byte/mode exactly;
 - primary checkout unchanged by WIP adoption;
@@ -726,6 +740,7 @@ P6 must test at least:
 - no active task/repair resumes in coordinator root;
 - state/governance mismatch blocks before Claude launch;
 - already-running legacy/background session is not attached in-place;
+- missing upstream fork-resume capability blocks instead of attaching/reusing unsafe process state;
 - RC4 internal profile switch exact-session continuity still works.
 
 ### Shadow mode
