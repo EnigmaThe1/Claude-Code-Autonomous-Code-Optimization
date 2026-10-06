@@ -62,9 +62,10 @@ if purge == "--purge-state":
     shutil.rmtree(dest)
 else:
     names = [
-        "bin", "lib", "templates", "docs", "tests", "hooks",
-        ".gitignore", "README.md", "QUICKSTART.md", "COMMANDS.md", "SOURCES.md", "CHANGELOG.md",
-        "MANIFEST.sha256", "VERSION", "install.sh", "uninstall.sh",
+        "bin", "docs", "hooks", "lib", "scripts", "templates", "tests",
+        ".gitignore", "CHANGELOG.md", "COMMANDS.md", "LICENSE", "NOTICE",
+        "QUICKSTART.md", "README.md", "SOURCES.md", "MANIFEST.sha256",
+        "VERSION", "install.sh", "uninstall.sh",
     ]
     for name in names:
         path = os.path.join(dest, name)
