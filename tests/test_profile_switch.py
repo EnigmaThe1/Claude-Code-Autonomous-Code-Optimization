@@ -571,7 +571,20 @@ def test_interactive_external_session_adoption_forks_and_records_new_session(mon
                 self.returncode = 0
                 return 0
 
-        monkeypatch.setattr(ca.subprocess, "Popen", FakeProc)
+        real_subprocess = ca.subprocess
+
+        class SubprocessProxy:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            @staticmethod
+            def Popen(*popen_args, **popen_kwargs):
+                return FakeProc(*popen_args, **popen_kwargs)
+
+        monkeypatch.setattr(ca, "subprocess", SubprocessProxy(real_subprocess))
         rc = ca._do_start_unlocked(
             args,
             root,
