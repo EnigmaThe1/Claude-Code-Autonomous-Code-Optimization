@@ -3104,6 +3104,9 @@ def _interactive_start_context(
     """Resolve the exact current interactive worker boundary under SupervisorLease."""
     state = load_json(sd / "state.json", {})
     requested_session_settings = getattr(args, "session_settings", None)
+    args._session_settings_was_explicit = (
+        requested_session_settings is not None
+    )
     args.profile = resolve_autonomy_profile(
         getattr(args, "profile", None),
         state.get("autonomy_profile"),
@@ -3322,7 +3325,13 @@ def _do_start_unlocked(
 ) -> int:
     state = load_json(sd / "state.json", {})
     requested_session_settings = getattr(args, "session_settings", None)
-    session_settings_explicit = requested_session_settings is not None
+    session_settings_explicit = bool(
+        getattr(
+            args,
+            "_session_settings_was_explicit",
+            requested_session_settings is not None,
+        )
+    )
     args.profile = resolve_autonomy_profile(args.profile, state.get("autonomy_profile"))
     args.session_settings = resolve_session_settings(
         requested_session_settings,
