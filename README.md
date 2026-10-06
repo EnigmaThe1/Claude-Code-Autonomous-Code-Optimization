@@ -49,18 +49,52 @@ During implementation:
 
 Completion is accepted only after the whole plan and implementation survive deterministic verification plus independent review gates.
 
-### Repository-owned canonical plans
+### Repository-owned planning authority
 
-Projects that keep their authoritative implementation plan inside Git can opt into stronger plan authority:
+Repositories may keep planning authority inside Git as either a legacy single canonical file or a structured multi-file governance contract.
+
+Legacy one-file setup remains supported:
 
 ```bash
 claude-auto planning-repair configure --repo . --plan IMPLEMENTATION_PLAN.md
 claude-auto run --repo . --plan IMPLEMENTATION_PLAN.md
 ```
 
-Once configured, that exact tracked plan is the single planning authority. Normal Balanced/Strict workers cannot edit it directly. If implementation evidence exposes a material plan defect, the supervisor automatically uses a dedicated planning worktree, a one-plan Planning Repair Architect, an independent exact-SHA Planning Verifier, protected fast-forward promotion, and then rebuilds/revalidates the executable external plan from the promoted canonical file.
+RC4-P5 treats that legacy file as a synthetic one-member `default` AuthoritySet. Repositories that need multiple planning ledgers/domains can instead declare named AuthoritySets in `.claude-auto/governance.json`. Each selected set may contain:
 
-If the repair requires a genuine unresolved product/semantic decision, automation stops rather than changing the objective.
+- **repairable** source members the Planning Repair Architect may edit directly;
+- **immutable** requirements/contracts that may be read but not changed;
+- **generated** projections that only declared package-run reconcilers may update;
+- bounded deterministic validators and reconcilers;
+- TaskSources whose exact candidate graph is rebuilt before verification.
+
+When more than one AuthoritySet could be repaired, selection is explicit:
+
+```bash
+claude-auto planning-repair begin --repo . --authority-set domain-a --reason "..."
+claude-auto planning-repair architect --repo . --authority-set domain-a --reason "..."
+```
+
+A durable RepairEnvelope binds the exact product base, selected AuthoritySets, member mutability, growth selectors, helper contracts, TaskSource contract and protected control surfaces. The Architect cannot widen that envelope. Generated members are reconciled package-side, validators run against exact candidate inputs, candidate AuthoritySets and TaskSources are rebuilt from the candidate SHA, and a separate read-only Planning Verifier must attest that same SHA and RepairEnvelope before promotion.
+
+The normal P5 lifecycle is:
+
+```text
+material planning defect
+  -> dedicated repair worktree + RepairEnvelope
+  -> Planning Repair Architect
+  -> deterministic reconciliation (when declared)
+  -> exact candidate AuthoritySet/TaskSource validation
+  -> declared deterministic validators
+  -> independent exact-SHA Planning Verifier
+  -> enriched planning attestation
+  -> protected fast-forward promotion
+  -> re-resolve planning/task authority
+```
+
+A generic `promote-ff` cannot bypass this gate when a target changes an existing or selector-matching AuthoritySet planning member. Base refresh is crash-recoverable but refuses automatic reuse if governance, executable helper/verification control bytes, selected authority shape or TaskSource contract changed.
+
+If repair requires a genuinely unresolved product/semantic decision, automation stops instead of redefining the objective.
 
 See [Planning and repair](docs/PLANNING_AND_REPAIR.md).
 
