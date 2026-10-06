@@ -17,7 +17,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -29,6 +31,31 @@ from state_store import json_dump, load_json
 
 
 _MAX_EXCLUDES_BYTES = 2 * 1024 * 1024
+
+# Process-scoped Git variables that can redirect repository truth or execute
+# diff helpers. Authentication/transport variables such as GIT_SSH_COMMAND are
+# intentionally not included.
+_TRUTH_REDIRECT_ENV = {
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_DIFF_OPTS",
+    "GIT_CONFIG",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
+}
+_FILTER_CONFIG_RE = re.compile(
+    r"^filter\.(.+)\.(clean|smudge|process|required)$",
+    re.IGNORECASE,
+)
 
 
 def _trust_dir(
@@ -205,6 +232,71 @@ def load_git_trust_policy(
     return obj if isinstance(obj, dict) else {}
 
 
+def _truth_base_env(
+    source: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    env = sanitised_subprocess_env(source)
+    for key in _TRUTH_REDIRECT_ENV:
+        env.pop(key, None)
+    # Repository replace refs can rewrite ancestry/object identity without
+    # changing the underlying refs. Package truth always uses real objects.
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
+
+
+def _configured_filter_drivers(root: Path) -> list[str]:
+    """Return configured Git filter driver names without executing filters."""
+    cp = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "config",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\..*\.(clean|smudge|process|required)$",
+        ],
+        text=False,
+        capture_output=True,
+        env=_truth_base_env(),
+    )
+    if cp.returncode == 1:
+        return []
+    if cp.returncode != 0:
+        detail = bytes(cp.stderr or cp.stdout or b"").decode(
+            "utf-8", errors="replace"
+        )
+        raise ValueError(
+            "unable to enumerate repository Git filter configuration: "
+            + detail[:1000]
+        )
+    drivers: set[str] = set()
+    for raw in bytes(cp.stdout).split(b"\0"):
+        if not raw:
+            continue
+        try:
+            key = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                "Git filter configuration contains a non-UTF-8 key"
+            ) from exc
+        match = _FILTER_CONFIG_RE.fullmatch(key)
+        if match is None:
+            continue
+        driver = match.group(1)
+        if (
+            not driver
+            or len(driver) > 128
+            or any(ord(ch) < 33 or ord(ch) == 127 for ch in driver)
+        ):
+            raise ValueError(
+                "Git filter configuration contains an unsafe driver name"
+            )
+        drivers.add(driver)
+    return sorted(drivers)
+
+
 def trusted_git_config(
     root: Path,
     *,
@@ -225,13 +317,25 @@ def trusted_git_config(
         # Deterministic empty excludes without creating repository state merely
         # because a broker read/status/smoke operation was invoked.
         path = Path(os.devnull)
-    return [
+    config = [
         ("core.excludesFile", str(path)),
         ("core.hooksPath", os.devnull),
         ("core.fsmonitor", "false"),
         ("fetch.recurseSubmodules", "false"),
         ("submodule.recurse", "false"),
     ]
+    # Clean/smudge/process filters are repository/user-configured executable
+    # code. Trusted Git operations neutralise every configured driver to an
+    # identity transform, so status/diff/merge truth cannot execute or depend
+    # on those commands. An empty process value makes Git use clean/smudge.
+    for driver in _configured_filter_drivers(root):
+        config.extend([
+            (f"filter.{driver}.process", ""),
+            (f"filter.{driver}.clean", "cat"),
+            (f"filter.{driver}.smudge", "cat"),
+            (f"filter.{driver}.required", "false"),
+        ])
+    return config
 
 
 def trusted_git_env(
@@ -241,7 +345,7 @@ def trusted_git_env(
     state_dir: Path | None = None,
 ) -> dict[str, str]:
     """Strip all inherited inline Git config, then reconstruct trusted package config."""
-    env = sanitised_subprocess_env(source)
+    env = _truth_base_env(source)
     config = trusted_git_config(root, state_dir=state_dir)
     env["GIT_CONFIG_COUNT"] = str(len(config))
     for index, (key, value) in enumerate(config):
