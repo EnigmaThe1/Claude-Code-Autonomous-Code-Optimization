@@ -74,7 +74,7 @@ if purge == "--purge-state":
     shutil.rmtree(dest)
 else:
     names = [
-        "bin", "docs", "hooks", "lib", "scripts", "templates", "tests",
+        ".github/workflows", "bin", "docs", "hooks", "lib", "scripts", "templates", "tests",
         ".gitignore", "CHANGELOG.md", "COMMANDS.md", "LICENSE", "NOTICE",
         "QUICKSTART.md", "README.md", "SOURCES.md", "MANIFEST.sha256",
         "VERSION", "install.sh", "uninstall.sh",
