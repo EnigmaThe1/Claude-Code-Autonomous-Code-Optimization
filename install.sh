@@ -148,7 +148,7 @@ fi
 python3 - "$SELF_DIR" "$STAGE" <<'PY'
 import os, shutil, sys
 src, stage = map(os.path.realpath, sys.argv[1:3])
-package_dirs = {"bin", "docs", "hooks", "lib", "scripts", "templates", "tests"}
+package_dirs = {".github/workflows", "bin", "docs", "hooks", "lib", "scripts", "templates", "tests"}
 package_files = {".gitignore", "CHANGELOG.md", "COMMANDS.md", "LICENSE", "MANIFEST.sha256", "NOTICE", "QUICKSTART.md", "README.md", "SOURCES.md", "VERSION", "install.sh", "uninstall.sh"}
 ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".pytest_cache")
 for name in package_dirs:
@@ -201,7 +201,7 @@ chmod 700 "$SMOKE_STATE"
 from pathlib import Path
 import sys
 
-package_dirs = ("bin", "docs", "hooks", "lib", "scripts", "templates", "tests")
+package_dirs = (".github/workflows", "bin", "docs", "hooks", "lib", "scripts", "templates", "tests")
 package_files = {
     ".gitignore", "CHANGELOG.md", "COMMANDS.md", "LICENSE", "NOTICE", "QUICKSTART.md", "README.md",
     "SOURCES.md", "VERSION", "install.sh", "uninstall.sh",
