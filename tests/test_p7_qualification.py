@@ -421,6 +421,23 @@ def test_p7_scenario_traceability_has_all_64_live_pytest_references():
             assert f"def {function}(" in source, ref
 
 
+def test_p7_release_manifest_covers_workflow_evidence():
+    root = Path(__file__).resolve().parents[1]
+    manifest = (root / "MANIFEST.sha256").read_text(encoding="utf-8")
+    listed = {
+        line.split(None, 1)[1].strip()
+        for line in manifest.splitlines()
+        if line.strip() and len(line.split(None, 1)) == 2
+    }
+    required = {
+        ".github/workflows/ci.yml",
+        ".github/workflows/finalize-release-candidate.yml",
+        ".github/workflows/release-candidate.yml",
+        ".github/workflows/tag-accepted-release.yml",
+    }
+    assert required <= listed
+
+
 def test_p7_ci_treats_release_pull_request_head_as_development_release():
     workflow = (
         Path(__file__).resolve().parents[1]
