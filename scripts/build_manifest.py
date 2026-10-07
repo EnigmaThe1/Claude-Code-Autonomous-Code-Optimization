@@ -20,7 +20,7 @@ import hashlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PACKAGE_DIRS = ("bin", "docs", "hooks", "lib", "scripts", "templates", "tests")
+PACKAGE_DIRS = (".github/workflows", "bin", "docs", "hooks", "lib", "scripts", "templates", "tests")
 PACKAGE_FILES = (
     ".gitignore",
     "CHANGELOG.md",
