@@ -118,9 +118,9 @@ from settings_policy import (
     validate_repository_execution_policy,
     resolve_autonomy_profile,
 )
-from planning_completeness import (
+from planning_completeness import validate_plan_completeness
+from planning_complexity import (
     validate_plan_against_scope,
-    validate_plan_completeness,
     validate_scope_baseline,
 )
 from planning_support import (

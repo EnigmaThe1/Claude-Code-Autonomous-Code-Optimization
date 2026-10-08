@@ -9,7 +9,7 @@ The system has an always-on low-risk user layer and an explicit autonomous super
 ## Main modules
 
 - `claude_auto.py`: orchestration and autonomous run loop.
-- `planning_support.py` / `planning_completeness.py` / `control_plane.py`: independent scope analysis, complexity-aware plan generation, deterministic completeness/traceability validation, simulation and review control.
+- `planning_support.py` / `planning_complexity.py` / `planning_completeness.py` / `control_plane.py`: independent scope analysis, complexity-aware plan generation, deterministic completeness/traceability validation, simulation and review control.
 - `governance_contract.py` / `authority_set.py`: exact-Git repository authority and control-surface snapshots.
 - `task_spec.py` / `task_sources.py`: deterministic repository-owned TaskSpec normalisation, graph validation and bounded adapter resolution.
 - `task_authority.py` / `execution_envelope.py`: dependency-safe task activation, exact WIP-bound ExecutionEnvelopes, staged/promotion admission and violation recovery.

@@ -18,16 +18,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-_COMPLEXITY_DIMENSIONS = (
-    "scope_breadth",
-    "component_coupling",
-    "integration_surface",
-    "data_state",
-    "security_authority",
-    "runtime_deployment",
-    "failure_recovery",
-    "uncertainty_research",
+from planning_complexity import (
+    ALLOWED_REQUIREMENT_SOURCES,
+    complexity_rank,
+    complexity_score,
+    nonempty_strings,
 )
+
 _COMPLEX_REQUIRED_SECTIONS = {
     "requirements",
     "architecture",
@@ -35,235 +32,9 @@ _COMPLEX_REQUIRED_SECTIONS = {
     "verification",
     "operations",
 }
-_ALLOWED_REQUIREMENT_SOURCES = {
-    "objective",
-    "operator",
-    "repository",
-    "derived",
-    "external",
-}
 _MIN_COMPLEX_TASKS = 8
 _MIN_COMPLEX_ARCHITECTURE_DECISIONS = 3
 _MIN_COMPLEX_VERIFICATION_LEVELS = 3
-
-
-def _nonempty_strings(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [
-        item.strip()
-        for item in value
-        if isinstance(item, str) and item.strip()
-    ]
-
-
-def complexity_score(plan: dict[str, Any]) -> tuple[int, str, list[str]]:
-    """Return deterministic RC5 complexity score, minimum level and errors."""
-    errors: list[str] = []
-    evidence = plan.get("complexity_evidence")
-    if not isinstance(evidence, dict):
-        return 0, "simple", ["complexity_evidence must be an object"]
-    dimensions = evidence.get("dimensions")
-    if not isinstance(dimensions, dict):
-        return 0, "simple", [
-            "complexity_evidence.dimensions must be an object"
-        ]
-
-    values: list[int] = []
-    for name in _COMPLEXITY_DIMENSIONS:
-        value = dimensions.get(name)
-        if (
-            not isinstance(value, int)
-            or isinstance(value, bool)
-            or not 0 <= value <= 3
-        ):
-            errors.append(
-                f"complexity_evidence.dimensions.{name} must be an integer "
-                "from 0 to 3"
-            )
-            continue
-        values.append(value)
-    rationale = _nonempty_strings(evidence.get("rationale"))
-    if not rationale:
-        errors.append(
-            "complexity_evidence.rationale must contain at least one "
-            "explanation"
-        )
-
-    score = sum(values)
-    critical = sum(1 for value in values if value == 3)
-    if score >= 14 or critical >= 3:
-        minimum = "complex"
-    elif score >= 6:
-        minimum = "standard"
-    else:
-        minimum = "simple"
-    return score, minimum, errors
-
-
-def _level_rank(level: str) -> int:
-    return {"simple": 0, "standard": 1, "complex": 2}.get(level, -1)
-
-
-def validate_scope_baseline(scope: dict[str, Any]) -> list[str]:
-    """Validate the independent pre-planning scope/complexity baseline."""
-    errors: list[str] = []
-    verdict = str(scope.get("verdict") or "").upper()
-    if verdict not in {"READY", "BLOCKED"}:
-        errors.append("scope verdict must be READY or BLOCKED")
-    declared = str(scope.get("complexity") or "").lower()
-    score, minimum, score_errors = complexity_score(scope)
-    errors.extend(score_errors)
-    if declared not in {"simple", "standard", "complex"}:
-        errors.append("scope complexity must be simple, standard or complex")
-    elif _level_rank(declared) < _level_rank(minimum):
-        errors.append(
-            f"scope complexity {declared} understates deterministic minimum "
-            f"{minimum} (score={score})"
-        )
-
-    rows = scope.get("requirements")
-    if not isinstance(rows, list) or not rows:
-        errors.append("scope requirements must be a non-empty list")
-        return errors
-
-    seen: set[str] = set()
-    allowed_kinds = {"explicit", "necessary-derived", "constraint"}
-    for index, row in enumerate(rows):
-        label = f"scope.requirements[{index}]"
-        if not isinstance(row, dict):
-            errors.append(f"{label} must be an object")
-            continue
-        sid = str(row.get("id") or "").strip()
-        if not sid:
-            errors.append(f"{label}.id must be a non-empty string")
-        elif sid in seen:
-            errors.append(f"duplicate scope requirement id: {sid}")
-        else:
-            seen.add(sid)
-        if (
-            not isinstance(row.get("statement"), str)
-            or not row["statement"].strip()
-        ):
-            errors.append(f"{label}.statement must be a non-empty string")
-        kind = str(row.get("kind") or "").strip().lower()
-        if kind not in allowed_kinds:
-            errors.append(
-                f"{label}.kind must be explicit, necessary-derived or constraint"
-            )
-        source = str(row.get("source") or "").strip().lower()
-        if source not in _ALLOWED_REQUIREMENT_SOURCES:
-            errors.append(
-                f"{label}.source must be one of "
-                + ", ".join(sorted(_ALLOWED_REQUIREMENT_SOURCES))
-            )
-
-    concerns = _nonempty_strings(scope.get("mandatory_concerns"))
-    if not concerns:
-        errors.append("scope mandatory_concerns must be a non-empty list")
-    return errors
-
-
-def validate_plan_against_scope(
-    plan: dict[str, Any],
-    scope: dict[str, Any],
-) -> list[str]:
-    """Require the plan to cover the independently derived scope baseline."""
-    errors: list[str] = []
-    plan_level = str(plan.get("complexity") or "").lower()
-    scope_level = str(scope.get("complexity") or "").lower()
-    if _level_rank(plan_level) < _level_rank(scope_level):
-        errors.append(
-            f"plan complexity {plan_level or 'missing'} is below independent "
-            f"scope baseline {scope_level or 'missing'}"
-        )
-
-    scope_rows = (
-        scope.get("requirements")
-        if isinstance(scope.get("requirements"), list)
-        else []
-    )
-    required_scope_ids = {
-        str(row.get("id")).strip()
-        for row in scope_rows
-        if isinstance(row, dict)
-        and isinstance(row.get("id"), str)
-        and str(row.get("id")).strip()
-    }
-    covered: set[str] = set()
-    plan_rows = (
-        plan.get("requirements")
-        if isinstance(plan.get("requirements"), list)
-        else []
-    )
-    for index, row in enumerate(plan_rows):
-        if not isinstance(row, dict):
-            continue
-        scope_ids = set(_nonempty_strings(row.get("scope_ids")))
-        unknown = sorted(scope_ids - required_scope_ids)
-        if unknown:
-            errors.append(
-                f"requirements[{index}] maps unknown scope ids: "
-                + ", ".join(unknown)
-            )
-        covered.update(scope_ids & required_scope_ids)
-
-    missing = sorted(required_scope_ids - covered)
-    if missing:
-        errors.append(
-            "independent scope requirements are missing from the plan: "
-            + ", ".join(missing[:40])
-        )
-
-    task_ids = {
-        str(row.get("id")).strip()
-        for row in plan.get("tasks", [])
-        if isinstance(row, dict)
-        and isinstance(row.get("id"), str)
-        and str(row.get("id")).strip()
-    }
-    concerns = _nonempty_strings(scope.get("mandatory_concerns"))
-    concern_rows = (
-        plan.get("concern_coverage")
-        if isinstance(plan.get("concern_coverage"), list)
-        else []
-    )
-    covered_concerns: set[str] = set()
-    for index, row in enumerate(concern_rows):
-        label = f"concern_coverage[{index}]"
-        if not isinstance(row, dict):
-            errors.append(f"{label} must be an object")
-            continue
-        concern = str(row.get("concern") or "").strip()
-        if concern not in concerns:
-            errors.append(
-                f"{label}.concern must match an independent mandatory concern"
-            )
-            continue
-        covered_concerns.add(concern)
-        mapped_tasks = _nonempty_strings(row.get("task_ids"))
-        if not mapped_tasks:
-            errors.append(f"{label}.task_ids must be a non-empty list")
-        unknown = sorted(set(mapped_tasks) - task_ids)
-        if unknown:
-            errors.append(
-                f"{label} references unknown task ids: "
-                + ", ".join(unknown)
-            )
-        if not _nonempty_strings(row.get("verification")):
-            errors.append(f"{label}.verification must be a non-empty list")
-
-    missing_concerns = [
-        concern for concern in concerns
-        if concern not in covered_concerns
-    ]
-    if missing_concerns:
-        errors.append(
-            "independent mandatory concerns are missing plan coverage: "
-            + "; ".join(missing_concerns[:20])
-        )
-    return errors
-
 
 def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
     """Fail closed when a plan has no auditable requirement-to-evidence chain."""
@@ -273,7 +44,7 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
     errors.extend(score_errors)
     if declared not in {"simple", "standard", "complex"}:
         errors.append("complexity must be simple, standard or complex")
-    elif _level_rank(declared) < _level_rank(minimum):
+    elif complexity_rank(declared) < complexity_rank(minimum):
         errors.append(
             f"declared complexity {declared} understates deterministic minimum "
             f"{minimum} (score={score})"
@@ -304,13 +75,13 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
         ):
             errors.append(f"{label}.statement must be a non-empty string")
         source = str(row.get("source") or "").strip().lower()
-        if source not in _ALLOWED_REQUIREMENT_SOURCES:
+        if source not in ALLOWED_REQUIREMENT_SOURCES:
             errors.append(
                 f"{label}.source must be one of "
-                + ", ".join(sorted(_ALLOWED_REQUIREMENT_SOURCES))
+                + ", ".join(sorted(ALLOWED_REQUIREMENT_SOURCES))
             )
 
-    criteria = _nonempty_strings(plan.get("acceptance_criteria"))
+    criteria = nonempty_strings(plan.get("acceptance_criteria"))
     criteria_set = set(criteria)
     if not criteria:
         errors.append("acceptance_criteria must be a non-empty list")
@@ -330,7 +101,7 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
         if not isinstance(task, dict):
             continue
         tid = str(task.get("id") or "").strip()
-        mapped = set(_nonempty_strings(task.get("requirement_ids")))
+        mapped = set(nonempty_strings(task.get("requirement_ids")))
         if not mapped:
             errors.append(
                 f"tasks[{index}].requirement_ids must be a non-empty list"
@@ -343,7 +114,7 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
             )
         if tid:
             task_req_map[tid] = mapped
-        scope = _nonempty_strings(task.get("implementation_scope"))
+        scope = nonempty_strings(task.get("implementation_scope"))
         if not scope:
             errors.append(
                 f"tasks[{index}].implementation_scope must be a non-empty list"
@@ -373,7 +144,7 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
             or not row["decision"].strip()
         ):
             errors.append(f"{label}.decision must be a non-empty string")
-        mapped = set(_nonempty_strings(row.get("requirement_ids")))
+        mapped = set(nonempty_strings(row.get("requirement_ids")))
         unknown = sorted(mapped - requirement_seen)
         if unknown:
             errors.append(
@@ -402,7 +173,7 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
             continue
         trace_by_requirement.setdefault(rid, []).append(row)
 
-        mapped_tasks = _nonempty_strings(row.get("task_ids"))
+        mapped_tasks = nonempty_strings(row.get("task_ids"))
         if not mapped_tasks:
             errors.append(f"{label}.task_ids must be a non-empty list")
         for tid in mapped_tasks:
@@ -416,7 +187,7 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
                     "declare the requirement"
                 )
 
-        mapped_arch = _nonempty_strings(row.get("architecture_ids"))
+        mapped_arch = nonempty_strings(row.get("architecture_ids"))
         for aid in mapped_arch:
             if aid not in architecture_ids:
                 errors.append(
@@ -425,7 +196,7 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
             else:
                 traced_architecture.add(aid)
 
-        mapped_acceptance = _nonempty_strings(
+        mapped_acceptance = nonempty_strings(
             row.get("acceptance_criteria")
         )
         if not mapped_acceptance:
@@ -441,9 +212,9 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
             else:
                 traced_acceptance.add(criterion)
 
-        if not _nonempty_strings(row.get("verification")):
+        if not nonempty_strings(row.get("verification")):
             errors.append(f"{label}.verification must be a non-empty list")
-        if not _nonempty_strings(row.get("acceptance_evidence")):
+        if not nonempty_strings(row.get("acceptance_evidence")):
             errors.append(
                 f"{label}.acceptance_evidence must be a non-empty list"
             )
@@ -498,7 +269,7 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
             verification_levels.add(level)
         if not isinstance(row.get("scope"), str) or not row["scope"].strip():
             errors.append(f"{label}.scope must be a non-empty string")
-        mapped = set(_nonempty_strings(row.get("requirement_ids")))
+        mapped = set(nonempty_strings(row.get("requirement_ids")))
         unknown = sorted(mapped - requirement_seen)
         if unknown:
             errors.append(

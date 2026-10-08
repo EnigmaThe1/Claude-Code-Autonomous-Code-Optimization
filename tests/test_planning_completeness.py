@@ -5,10 +5,12 @@
 from pathlib import Path
 
 from planning_completeness import (
-    complexity_score,
     persist_plan_sections,
-    validate_plan_against_scope,
     validate_plan_completeness,
+)
+from planning_complexity import (
+    complexity_score,
+    validate_plan_against_scope,
     validate_scope_baseline,
 )
 
