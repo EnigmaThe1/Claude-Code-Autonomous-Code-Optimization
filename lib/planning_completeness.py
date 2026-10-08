@@ -286,6 +286,10 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
         if not isinstance(row.get("scope"), str) or not row["scope"].strip():
             errors.append(f"{label}.scope must be a non-empty string")
         mapped = set(nonempty_strings(row.get("requirement_ids")))
+        if not mapped:
+            errors.append(
+                f"{label}.requirement_ids must be a non-empty list"
+            )
         unknown = sorted(mapped - requirement_seen)
         if unknown:
             errors.append(
@@ -293,32 +297,125 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
                 + ", ".join(unknown)
             )
 
-    if declared == "complex":
-        if len(tasks) < _MIN_COMPLEX_TASKS:
-            errors.append(
-                f"complex plans require at least {_MIN_COMPLEX_TASKS} concrete "
-                f"implementation tasks; found {len(tasks)}"
-            )
-        if len(architecture_ids) < _MIN_COMPLEX_ARCHITECTURE_DECISIONS:
-            errors.append(
-                "complex plans require at least "
-                f"{_MIN_COMPLEX_ARCHITECTURE_DECISIONS} architecture decisions"
-            )
-        orphan_architecture = sorted(
-            architecture_ids - traced_architecture
+    orphan_architecture = sorted(
+        architecture_ids - traced_architecture
+    )
+    if orphan_architecture:
+        errors.append(
+            "architecture decisions are not reachable from requirement traces: "
+            + ", ".join(orphan_architecture[:40])
         )
-        if orphan_architecture:
+
+    dimensions = (
+        plan.get("complexity_evidence", {}).get("dimensions", {})
+        if isinstance(plan.get("complexity_evidence"), dict)
+        else {}
+    )
+    required_dimensions = {
+        name
+        for name in COMPLEXITY_DIMENSIONS
+        if isinstance(dimensions.get(name), int)
+        and not isinstance(dimensions.get(name), bool)
+        and dimensions.get(name) >= 2
+    }
+    coverage = plan.get("complexity_coverage")
+    if coverage is None:
+        coverage = []
+    if not isinstance(coverage, list):
+        errors.append("complexity_coverage must be a list")
+        coverage = []
+
+    coverage_by_dimension: dict[str, dict[str, Any]] = {}
+    for index, row in enumerate(coverage):
+        label = f"complexity_coverage[{index}]"
+        if not isinstance(row, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        dimension = str(row.get("dimension") or "").strip()
+        if dimension not in COMPLEXITY_DIMENSIONS:
             errors.append(
-                "complex architecture decisions are not reachable from "
-                "requirement traces: "
-                + ", ".join(orphan_architecture[:40])
+                f"{label}.dimension must name a known complexity dimension"
             )
-        if len(verification_levels) < _MIN_COMPLEX_VERIFICATION_LEVELS:
+            continue
+        if dimension in coverage_by_dimension:
             errors.append(
-                "complex plans require at least "
-                f"{_MIN_COMPLEX_VERIFICATION_LEVELS} distinct verification "
-                "levels"
+                f"duplicate complexity coverage dimension: {dimension}"
             )
+            continue
+        coverage_by_dimension[dimension] = row
+
+        mapped_requirements = set(
+            nonempty_strings(row.get("requirement_ids"))
+        )
+        if not mapped_requirements:
+            errors.append(
+                f"{label}.requirement_ids must be a non-empty list"
+            )
+        unknown_requirements = sorted(
+            mapped_requirements - requirement_seen
+        )
+        if unknown_requirements:
+            errors.append(
+                f"{label} references unknown requirement ids: "
+                + ", ".join(unknown_requirements)
+            )
+
+        mapped_tasks = set(nonempty_strings(row.get("task_ids")))
+        if not mapped_tasks:
+            errors.append(f"{label}.task_ids must be a non-empty list")
+        unknown_tasks = sorted(mapped_tasks - task_ids)
+        if unknown_tasks:
+            errors.append(
+                f"{label} references unknown task ids: "
+                + ", ".join(unknown_tasks)
+            )
+
+        mapped_architecture = set(
+            nonempty_strings(row.get("architecture_ids"))
+        )
+        unknown_architecture = sorted(
+            mapped_architecture - architecture_ids
+        )
+        if unknown_architecture:
+            errors.append(
+                f"{label} references unknown architecture ids: "
+                + ", ".join(unknown_architecture)
+            )
+        if (
+            dimension in required_dimensions
+            and dimension in _ARCHITECTURE_RELEVANT_DIMENSIONS
+            and not mapped_architecture
+        ):
+            errors.append(
+                f"{label}.architecture_ids must cover high-impact "
+                f"{dimension}"
+            )
+
+        if not nonempty_strings(row.get("verification")):
+            errors.append(
+                f"{label}.verification must be a non-empty list"
+            )
+
+    missing_dimension_coverage = sorted(
+        required_dimensions - set(coverage_by_dimension)
+    )
+    if missing_dimension_coverage:
+        errors.append(
+            "high-impact complexity dimensions are missing plan coverage: "
+            + ", ".join(missing_dimension_coverage)
+        )
+
+    for dimension, allowed_levels in _DIMENSION_VERIFICATION_LEVELS.items():
+        if (
+            dimension in required_dimensions
+            and not (verification_levels & allowed_levels)
+        ):
+            errors.append(
+                f"high-impact {dimension} requires verification level "
+                + " or ".join(sorted(allowed_levels))
+            )
+
+    if declared == "complex":
         sections = plan.get("plan_sections")
         if not isinstance(sections, list):
             errors.append("complex plans require plan_sections")
