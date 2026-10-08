@@ -38,7 +38,7 @@ The planner records eight domain-neutral dimensions from 0 through 3:
 - failure/recovery complexity;
 - uncertainty/research dependency.
 
-Before planning, an independent hard read-only scope analyst extracts explicit and technically necessary requirements plus a conservative complexity baseline. The planner must map every baseline requirement and may classify upward conservatively but may not classify below that baseline or its own deterministic score. The independent Plan Verifier separately challenges attempts to understate complexity or omit scope.
+Before planning, an independent hard read-only scope analyst extracts explicit and technically necessary requirements plus a conservative task-relevant complexity baseline. Unrelated repository size does not by itself make a small objective complex. Malformed or deterministically inconsistent scope output is fed back through a bounded autonomous repair loop; only a valid scope result that identifies a genuine external/product dependency may block immediately. The planner must map every baseline requirement and may classify upward conservatively but may not classify below that baseline or its own deterministic score. The independent Plan Verifier separately challenges attempts to understate complexity or omit scope.
 
 ## Mandatory requirement traceability
 
@@ -55,7 +55,7 @@ The numerical minima are safety floors, not targets. Independent review may requ
 
 ## Multi-file plan bundles
 
-Complex plans may be represented as one JSON authority record plus multiple durable Markdown sections. RC5 persists emitted `plan_sections` into a versioned private plan bundle. This keeps the executable graph machine-checkable while allowing architecture and implementation detail to scale without forcing one monolithic document.
+Complex plans may be represented as one JSON authority record plus multiple durable Markdown sections. RC5 persists emitted `plan_sections` into a versioned private plan bundle. Artifact references are state-root-relative so durable plan identity is not coupled to one machine-specific absolute path. This keeps the executable graph machine-checkable while allowing architecture and implementation detail to scale without forcing one monolithic document.
 
 ## No coding on the fly
 
