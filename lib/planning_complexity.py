@@ -169,6 +169,31 @@ def validate_plan_against_scope(
             f"scope baseline {scope_level or 'missing'}"
         )
 
+    plan_dimensions = (
+        plan.get("complexity_evidence", {}).get("dimensions", {})
+        if isinstance(plan.get("complexity_evidence"), dict)
+        else {}
+    )
+    scope_dimensions = (
+        scope.get("complexity_evidence", {}).get("dimensions", {})
+        if isinstance(scope.get("complexity_evidence"), dict)
+        else {}
+    )
+    for dimension in COMPLEXITY_DIMENSIONS:
+        plan_score = plan_dimensions.get(dimension)
+        scope_score = scope_dimensions.get(dimension)
+        if (
+            isinstance(plan_score, int)
+            and not isinstance(plan_score, bool)
+            and isinstance(scope_score, int)
+            and not isinstance(scope_score, bool)
+            and plan_score < scope_score
+        ):
+            errors.append(
+                f"plan complexity dimension {dimension}={plan_score} is "
+                f"below independent scope baseline {scope_score}"
+            )
+
     scope_rows = (
         scope.get("requirements")
         if isinstance(scope.get("requirements"), list)
