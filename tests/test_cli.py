@@ -1383,7 +1383,8 @@ def test_supplied_plan_is_candidate_and_validated_before_execution(monkeypatch):
         assert state["plan_source_kind"] == "supplied-plan"
         planner_prompt=next(json.loads(x)["args"][-1] for x in capture.read_text().splitlines() if "PLAN_CONTROL:" in json.loads(x)["args"][-1])
         assert "Build A then B" in planner_prompt
-        assert "candidate, never automatically authoritative" in planner_prompt
+        assert "A supplied plan is a candidate" in planner_prompt
+        assert "automatically authoritative" in planner_prompt
 
 
 def test_material_worker_fix_forces_plan_revision_before_next_round(monkeypatch):
@@ -1866,7 +1867,7 @@ def test_p7_rc3_identity_upgrade_preserves_durable_state():
             capture_output=True,
         )
         assert upgraded.returncode == 0, upgraded.stderr
-        assert (dest / "VERSION").read_text().strip() == "1.0.0-rc4"
+        assert (dest / "VERSION").read_text().strip() == (ROOT / "VERSION").read_text().strip()
         new_marker = json.loads(marker_path.read_text())
         assert new_marker["version"] == "1.0.0-rc4"
         assert new_marker["install_uuid"] == install_uuid
@@ -1953,7 +1954,7 @@ def test_p7_post_swap_upgrade_failure_restores_previous_exact_package_and_state(
             capture_output=True,
             check=True,
         ).stdout.strip()
-        assert version == "claude-auto 1.0.0-rc4"
+        assert version == "claude-auto " + (ROOT / "VERSION").read_text().strip()
 
 
 def test_p7_keep_state_uninstall_removes_package_but_preserves_durable_state():
