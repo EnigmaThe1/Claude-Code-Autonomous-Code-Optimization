@@ -44,14 +44,9 @@ Before planning, an independent hard read-only scope analyst extracts explicit a
 
 Every executable plan carries explicit requirements and one canonical traceability row per requirement. The row must bind the requirement to concrete task IDs, deterministic verification expectations and acceptance evidence. Tasks must declare their requirement IDs and implementation scope.
 
-For complex objectives, RC5 additionally requires:
+RC5 does not use arbitrary task-count quotas. Instead, every complexity dimension scored 2 or 3 must have explicit evidence mapping that dimension to requirements, concrete tasks, verification and, where the dimension is architecture-relevant, architecture decisions. High integration, security, runtime/deployment and failure/recovery scores also trigger dimension-appropriate verification-level requirements.
 
-- at least eight concrete implementation tasks;
-- at least three architecture decisions;
-- at least three distinct verification levels;
-- substantive requirements, architecture, implementation, verification and operations sections.
-
-The numerical minima are safety floors, not targets. Independent review may require more decomposition whenever catch-all tasks or shallow sections would hide material work.
+Complex objectives additionally require substantive requirements, architecture, implementation, verification and operations sections. Independent review may require more decomposition whenever catch-all tasks or shallow sections would hide material work, but the harness must not manufacture filler tasks merely to satisfy a number.
 
 ## Multi-file plan bundles
 
