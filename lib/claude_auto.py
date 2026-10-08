@@ -575,85 +575,148 @@ def ensure_plan_validated(
         int(getattr(args, "max_plan_revisions", 5) or 5),
     )
     timeout = args.cycle_timeout if getattr(args, "cycle_timeout", 0) else None
-
-    scope_text, scope_meta = run_readonly_plan_agent(
-        root=root,
-        sd=sd,
-        prompt=_scope_prompt(
-            objective=objective,
-            prof=prof,
-            source_kind=source_kind,
-            source_ref=source_ref,
-            candidate_text=candidate_for_prompt,
-        ),
-        env=env,
-        provider_detail=provider_detail,
-        model=getattr(args, "verifier_model", None) or args.model,
-        timeout=timeout,
-        max_budget_usd=effective_invocation_budget(args, state),
-    )
-    limit_reason = _account_control_meta(args, state, sd, scope_meta)
-    if limit_reason:
-        state.update({"status": "LIMIT_REACHED", "blocker": limit_reason})
-        json_dump(sd / "state.json", state)
-        return None, 4
-    raw_scope = parse_json_protocol(scope_text, "PLAN_SCOPE")
-    if not raw_scope:
-        state.update({
-            "plan_status": "BLOCKED",
-            "status": "BLOCKED",
-            "blocker": (
-                "Independent scope/complexity protocol was missing or invalid."
-            ),
-        })
-        json_dump(sd / "state.json", state)
-        return None, 6
-    scope_baseline = {
-        "verdict": str(raw_scope.get("verdict", "BLOCKED")).upper(),
-        "complexity": str(raw_scope.get("complexity", "")).lower(),
-        "complexity_evidence": (
-            raw_scope.get("complexity_evidence")
-            if isinstance(raw_scope.get("complexity_evidence"), dict)
-            else {}
-        ),
-        "requirements": (
-            raw_scope.get("requirements")
-            if isinstance(raw_scope.get("requirements"), list)
-            else []
-        ),
-        "mandatory_concerns": (
-            raw_scope.get("mandatory_concerns")
-            if isinstance(raw_scope.get("mandatory_concerns"), list)
-            else []
-        ),
-        "research_questions": (
-            raw_scope.get("research_questions")
-            if isinstance(raw_scope.get("research_questions"), list)
-            else []
-        ),
-        "summary": str(raw_scope.get("summary", ""))[:2000],
-        "blockers": (
-            raw_scope.get("blockers")
-            if isinstance(raw_scope.get("blockers"), list)
-            else []
-        ),
-    }
-    scope_errors = validate_scope_baseline(scope_baseline)
-    if scope_baseline["verdict"] == "BLOCKED" or scope_errors:
-        blocker = (
-            scope_baseline.get("summary")
-            or "; ".join(scope_errors)
-            or "Independent scope analysis blocked."
-        )
-        state.update({
-            "plan_status": "BLOCKED",
-            "status": "BLOCKED",
-            "blocker": blocker[:4000],
-            "plan_scope_errors": scope_errors or None,
-        })
-        json_dump(sd / "state.json", state)
-        return None, 3
     pdir = plan_state_dir(sd)
+
+    scope_baseline: dict[str, Any] = {}
+    scope_errors: list[str] = []
+    scope_meta: dict[str, Any] = {}
+    current_scope: dict[str, Any] | None = None
+    scope_validation_errors: list[str] = []
+
+    for scope_attempt in range(1, max_revisions + 1):
+        scope_text, scope_meta = run_readonly_plan_agent(
+            root=root,
+            sd=sd,
+            prompt=_scope_prompt(
+                objective=objective,
+                prof=prof,
+                source_kind=source_kind,
+                source_ref=source_ref,
+                candidate_text=candidate_for_prompt,
+                current_scope=current_scope,
+                validation_errors=scope_validation_errors,
+            ),
+            env=env,
+            provider_detail=provider_detail,
+            model=getattr(args, "verifier_model", None) or args.model,
+            timeout=timeout,
+            max_budget_usd=effective_invocation_budget(args, state),
+        )
+        limit_reason = _account_control_meta(args, state, sd, scope_meta)
+        if limit_reason:
+            state.update({
+                "status": "LIMIT_REACHED",
+                "blocker": limit_reason,
+            })
+            json_dump(sd / "state.json", state)
+            return None, 4
+
+        raw_scope = parse_json_protocol(scope_text, "PLAN_SCOPE")
+        if not raw_scope:
+            scope_errors = [
+                "Independent scope/complexity protocol was missing or invalid."
+            ]
+            json_dump(
+                pdir / f"scope-attempt-{scope_attempt:04d}.json",
+                {
+                    "attempt": scope_attempt,
+                    "scope": current_scope,
+                    "validation_errors": scope_errors,
+                    "meta": scope_meta,
+                },
+            )
+            scope_validation_errors = scope_errors
+            if scope_attempt < max_revisions:
+                continue
+            state.update({
+                "plan_status": "VALIDATION_FAILED",
+                "status": "BLOCKED",
+                "blocker": scope_errors[0],
+                "plan_scope_errors": scope_errors,
+            })
+            json_dump(sd / "state.json", state)
+            return None, 6
+
+        scope_baseline = {
+            "verdict": str(raw_scope.get("verdict", "")).upper(),
+            "complexity": str(raw_scope.get("complexity", "")).lower(),
+            "complexity_evidence": (
+                raw_scope.get("complexity_evidence")
+                if isinstance(raw_scope.get("complexity_evidence"), dict)
+                else {}
+            ),
+            "requirements": (
+                raw_scope.get("requirements")
+                if isinstance(raw_scope.get("requirements"), list)
+                else []
+            ),
+            "mandatory_concerns": (
+                raw_scope.get("mandatory_concerns")
+                if isinstance(raw_scope.get("mandatory_concerns"), list)
+                else []
+            ),
+            "research_questions": (
+                raw_scope.get("research_questions")
+                if isinstance(raw_scope.get("research_questions"), list)
+                else []
+            ),
+            "summary": str(raw_scope.get("summary", ""))[:2000],
+            "blockers": (
+                raw_scope.get("blockers")
+                if isinstance(raw_scope.get("blockers"), list)
+                else []
+            ),
+        }
+        scope_errors = validate_scope_baseline(scope_baseline)
+        json_dump(
+            pdir / f"scope-attempt-{scope_attempt:04d}.json",
+            {
+                "attempt": scope_attempt,
+                "scope": scope_baseline,
+                "validation_errors": scope_errors,
+                "meta": scope_meta,
+            },
+        )
+
+        if scope_errors:
+            current_scope = scope_baseline
+            scope_validation_errors = scope_errors
+            if scope_attempt < max_revisions:
+                continue
+            state.update({
+                "plan_status": "VALIDATION_FAILED",
+                "status": "BLOCKED",
+                "blocker": (
+                    "Independent scope validation did not converge: "
+                    + "; ".join(scope_errors)[:3800]
+                ),
+                "plan_scope_errors": scope_errors,
+            })
+            json_dump(sd / "state.json", state)
+            return None, 6
+
+        if scope_baseline["verdict"] == "BLOCKED":
+            blocker = (
+                scope_baseline.get("summary")
+                or "; ".join(
+                    str(item)
+                    for item in scope_baseline.get("blockers", [])
+                )
+                or "Independent scope analysis found a genuine external blocker."
+            )
+            state.update({
+                "plan_status": "BLOCKED",
+                "status": "BLOCKED",
+                "blocker": blocker[:4000],
+                "plan_scope_errors": None,
+            })
+            json_dump(sd / "state.json", state)
+            return None, 3
+
+        break
+    else:
+        raise AssertionError("bounded scope-analysis loop did not terminate")
+
     scope_semantic = json.dumps(
         scope_baseline,
         sort_keys=True,
@@ -669,6 +732,7 @@ def ensure_plan_validated(
         },
     )
     state["plan_scope_sha256"] = scope_sha256
+    state["plan_scope_attempts"] = scope_attempt
     json_dump(sd / "state.json", state)
 
     for attempt in range(1, max_revisions + 1):
