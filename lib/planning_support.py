@@ -573,11 +573,23 @@ def _scope_prompt(
     source_kind: str,
     source_ref: str | None,
     candidate_text: str | None,
+    current_scope: dict[str, Any] | None = None,
+    validation_errors: list[str] | None = None,
 ) -> str:
     candidate = _bounded_prompt_text(
         candidate_text or "",
         160_000,
         label="supplied objective/plan source",
+    )
+    previous = _bounded_prompt_text(
+        json.dumps(current_scope or {}, separators=(",", ":")),
+        80_000,
+        label="previous scope baseline",
+    )
+    errors = _bounded_prompt_text(
+        json.dumps(validation_errors or [], separators=(",", ":")),
+        40_000,
+        label="deterministic scope validation errors",
     )
     return textwrap.dedent(f"""
     You are the independent HARD READ-ONLY scope and complexity analyst.
@@ -600,6 +612,16 @@ def _scope_prompt(
 
     SUPPLIED SOURCE:
     {candidate or 'none'}
+
+    PREVIOUS SCOPE BASELINE WHEN REVISING:
+    {previous or 'none'}
+
+    DETERMINISTIC VALIDATION ERRORS TO REPAIR:
+    {errors or 'none'}
+
+    If validation errors are present, repair the whole scope baseline while
+    preserving valid operator requirements. Do not paper over an error by
+    deleting requirements or lowering complexity.
 
     Assess eight universal complexity dimensions from 0..3:
     scope_breadth, component_coupling, integration_surface, data_state,
