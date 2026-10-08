@@ -118,6 +118,7 @@ from settings_policy import (
     validate_repository_execution_policy,
     resolve_autonomy_profile,
 )
+from planning_completeness import validate_plan_completeness
 from planning_support import (
     _assessment_prompt,
     _bounded_prompt_text,
@@ -463,7 +464,11 @@ def _run_plan_assessment(
         ),
         env=env, provider_detail=provider_detail, model=model, timeout=timeout, max_budget_usd=max_budget_usd,
     )
-    prefix = "PLAN_SIMULATION" if kind == "simulation" else "PLAN_REDTEAM"
+    prefix = (
+        "PLAN_SIMULATION"
+        if kind == "simulation"
+        else ("PLAN_REDTEAM" if kind == "redteam" else "PLAN_VERIFIER")
+    )
     obj = parse_json_protocol(text, prefix)
     if not obj:
         return {"verdict": "BLOCKED", "scope": "REQUIREMENT", "summary": f"{prefix} protocol was missing or invalid.", "findings": []}, meta
@@ -587,17 +592,52 @@ def ensure_plan_validated(
             return None, 6
         candidate = _normalise_plan_control(raw_plan, objective)
         plan_errors = validate_plan_graph(candidate)
+        plan_errors.extend(validate_plan_completeness(candidate))
         if source_text:
-            plan_errors.extend(validate_source_plan_coverage(source_text, candidate))
-        if candidate["verdict"] == "BLOCKED" or plan_errors:
-            blocker = candidate.get("summary") or "; ".join(str(x) for x in candidate.get("blockers", [])) or "Plan could not be made implementation-ready."
-            if plan_errors:
-                blocker = "Deterministic plan-graph validation failed: " + "; ".join(plan_errors)[:4000]
+            plan_errors.extend(
+                validate_source_plan_coverage(source_text, candidate)
+            )
+        if candidate["verdict"] == "BLOCKED":
+            blocker = (
+                candidate.get("summary")
+                or "; ".join(
+                    str(x) for x in candidate.get("blockers", [])
+                )
+                or "Plan could not be made implementation-ready."
+            )
             state.update({
                 "plan_status": "BLOCKED",
                 "status": "BLOCKED",
                 "blocker": blocker,
-                "plan_validation_errors": plan_errors or None,
+            })
+            json_dump(sd / "state.json", state)
+            return None, 3
+        if plan_errors:
+            if attempt < max_revisions:
+                review_findings = [{
+                    "verdict": "REVISE",
+                    "scope": "PLAN",
+                    "summary": (
+                        "Deterministic RC5 planning-completeness gate failed."
+                    ),
+                    "findings": plan_errors,
+                }]
+                revision_reason = (
+                    "Deterministic planning completeness/traceability "
+                    "validation found gaps; revise the whole plan before any "
+                    "implementation authority."
+                )
+                current_plan = candidate
+                continue
+            blocker = (
+                "Deterministic RC5 planning completeness validation failed: "
+                + "; ".join(plan_errors)[:4000]
+            )
+            state.update({
+                "plan_status": "BLOCKED",
+                "status": "BLOCKED",
+                "blocker": blocker,
+                "plan_validation_errors": plan_errors,
             })
             json_dump(sd / "state.json", state)
             return None, 3
@@ -621,19 +661,54 @@ def ensure_plan_validated(
             json_dump(sd / "state.json", state)
             return None, 4
         redteam, red_meta = _run_plan_assessment(
-            kind="redteam", stage="preflight", root=root, sd=sd, objective=objective, plan=candidate,
-            state=state, env=env, provider_detail=provider_detail, model=args.model, timeout=timeout,
+            kind="redteam", stage="preflight", root=root, sd=sd,
+            objective=objective, plan=candidate, state=state, env=env,
+            provider_detail=provider_detail, model=args.model,
+            timeout=timeout,
             max_budget_usd=effective_invocation_budget(args, state),
         )
         limit_reason = _account_control_meta(args, state, sd, red_meta)
         if limit_reason:
-            state.update({"status": "LIMIT_REACHED", "blocker": limit_reason})
+            state.update({
+                "status": "LIMIT_REACHED",
+                "blocker": limit_reason,
+            })
             json_dump(sd / "state.json", state)
             return None, 4
-        json_dump(pdir / f"simulation-v{version:04d}.json", {"assessment": simulation, "meta": sim_meta})
-        json_dump(pdir / f"redteam-v{version:04d}.json", {"assessment": redteam, "meta": red_meta})
+        verifier, verifier_meta = _run_plan_assessment(
+            kind="verifier", stage="preflight", root=root, sd=sd,
+            objective=objective, plan=candidate, state=state, env=env,
+            provider_detail=provider_detail, model=args.model,
+            timeout=timeout,
+            max_budget_usd=effective_invocation_budget(args, state),
+        )
+        limit_reason = _account_control_meta(
+            args, state, sd, verifier_meta
+        )
+        if limit_reason:
+            state.update({
+                "status": "LIMIT_REACHED",
+                "blocker": limit_reason,
+            })
+            json_dump(sd / "state.json", state)
+            return None, 4
+        json_dump(
+            pdir / f"simulation-v{version:04d}.json",
+            {"assessment": simulation, "meta": sim_meta},
+        )
+        json_dump(
+            pdir / f"redteam-v{version:04d}.json",
+            {"assessment": redteam, "meta": red_meta},
+        )
+        json_dump(
+            pdir / f"verifier-v{version:04d}.json",
+            {"assessment": verifier, "meta": verifier_meta},
+        )
 
-        if simulation["verdict"] == "PASS" and redteam["verdict"] == "PASS":
+        if all(
+            item["verdict"] == "PASS"
+            for item in (simulation, redteam, verifier)
+        ):
             gate_after = git_snapshot(root)
             if not _repo_snapshot_unchanged(gate_before, gate_after):
                 state.update({"plan_status": "BLOCKED", "status": "BLOCKED", "blocker": "Read-only plan-validation gate changed repository state."})
@@ -645,6 +720,7 @@ def ensure_plan_validated(
                 "plan_validation_summary": {
                     "simulation": simulation.get("summary"),
                     "redteam": redteam.get("summary"),
+                    "verifier": verifier.get("summary"),
                 },
                 "plan_validation_context_hash": validation_context_hash,
                 "plan_validation_git_head": gate_after.get("head"),
@@ -654,19 +730,33 @@ def ensure_plan_validated(
             json_dump(sd / "state.json", state)
             return candidate, 0
 
-        blocked = next((x for x in (simulation, redteam) if x["verdict"] == "BLOCKED"), None)
+        blocked = next(
+            (
+                x
+                for x in (simulation, redteam, verifier)
+                if x["verdict"] == "BLOCKED"
+            ),
+            None,
+        )
         if blocked:
             state.update({"plan_status": "BLOCKED", "status": "BLOCKED", "blocker": blocked.get("summary") or "Plan validation blocked."})
             json_dump(sd / "state.json", state)
             return None, 3
 
-        review_findings = [simulation, redteam]
-        revision_reason = "Independent simulation/red-team found material issues; revise the whole plan and revalidate."
+        review_findings = [simulation, redteam, verifier]
+        revision_reason = (
+            "Independent simulation/red-team/Plan Verifier found material "
+            "issues; revise the whole plan and revalidate."
+        )
         current_plan = candidate
 
     state.update({
         "plan_status": "VALIDATION_FAILED", "status": "BLOCKED",
-        "blocker": f"Plan did not pass simulation/red-team after {max_revisions} revision attempts.",
+        "blocker": (
+            "Plan did not pass deterministic completeness plus "
+            "simulation/red-team/Plan Verifier after "
+            f"{max_revisions} revision attempts."
+        ),
     })
     json_dump(sd / "state.json", state)
     return None, 6

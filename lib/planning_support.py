@@ -25,6 +25,7 @@ from process_runner import run
 from repo_runtime import compact_profile, git_snapshot, plan_state_dir
 from runtime_paths import ensure_private_dir, utcnow
 from state_store import json_dump, sha256_text
+from planning_completeness import persist_plan_sections
 
 
 def build_readonly_evidence(root: Path, sd: Path) -> Path:
@@ -79,7 +80,10 @@ def build_readonly_evidence(root: Path, sd: Path) -> Path:
     return path
 
 
-def _normalise_plan_control(obj: dict[str, Any], objective: str) -> dict[str, Any]:
+def _normalise_plan_control(
+    obj: dict[str, Any],
+    objective: str,
+) -> dict[str, Any]:
     verdict = str(obj.get("verdict", "BLOCKED")).upper()
     if verdict not in {"READY", "BLOCKED"}:
         verdict = "BLOCKED"
@@ -90,10 +94,52 @@ def _normalise_plan_control(obj: dict[str, Any], objective: str) -> dict[str, An
     if not isinstance(plan_md, str):
         plan_md = ""
     tasks = obj.get("tasks") if isinstance(obj.get("tasks"), list) else []
-    criteria = obj.get("acceptance_criteria") if isinstance(obj.get("acceptance_criteria"), list) else []
-    assumptions = obj.get("assumptions") if isinstance(obj.get("assumptions"), list) else []
+    criteria = (
+        obj.get("acceptance_criteria")
+        if isinstance(obj.get("acceptance_criteria"), list)
+        else []
+    )
+    assumptions = (
+        obj.get("assumptions")
+        if isinstance(obj.get("assumptions"), list)
+        else []
+    )
     risks = obj.get("risks") if isinstance(obj.get("risks"), list) else []
-    blockers = obj.get("blockers") if isinstance(obj.get("blockers"), list) else []
+    blockers = (
+        obj.get("blockers")
+        if isinstance(obj.get("blockers"), list)
+        else []
+    )
+    complexity_evidence = (
+        obj.get("complexity_evidence")
+        if isinstance(obj.get("complexity_evidence"), dict)
+        else {}
+    )
+    requirements = (
+        obj.get("requirements")
+        if isinstance(obj.get("requirements"), list)
+        else []
+    )
+    architecture = (
+        obj.get("architecture")
+        if isinstance(obj.get("architecture"), list)
+        else []
+    )
+    traceability = (
+        obj.get("traceability")
+        if isinstance(obj.get("traceability"), list)
+        else []
+    )
+    verification_strategy = (
+        obj.get("verification_strategy")
+        if isinstance(obj.get("verification_strategy"), list)
+        else []
+    )
+    plan_sections = (
+        obj.get("plan_sections")
+        if isinstance(obj.get("plan_sections"), list)
+        else []
+    )
     return {
         "verdict": verdict,
         "complexity": complexity,
@@ -104,11 +150,14 @@ def _normalise_plan_control(obj: dict[str, Any], objective: str) -> dict[str, An
         "assumptions": assumptions,
         "risks": risks,
         "blockers": blockers,
+        "complexity_evidence": complexity_evidence,
+        "requirements": requirements,
+        "architecture": architecture,
+        "traceability": traceability,
+        "verification_strategy": verification_strategy,
+        "plan_sections": plan_sections,
         "summary": str(obj.get("summary", ""))[:2000],
     }
-
-
-
 
 def extract_source_plan_task_ids(source_text: str) -> list[str]:
     """Extract explicit task IDs from structured JSON or YAML-like plan sources.
@@ -423,7 +472,7 @@ def _persist_plan_version(
     version = int(state.get("plan_version", 0) or 0) + 1
     enriched = dict(plan)
     enriched.update({
-        "schema_version": 1,
+        "schema_version": 2,
         "version": version,
         "created_at": utcnow(),
         "source_kind": source_kind,
@@ -431,10 +480,20 @@ def _persist_plan_version(
         "source_hash": source_hash,
         "revision_reason": reason,
     })
-    canonical = json.dumps(enriched, sort_keys=True, separators=(",", ":"))
+    section_artifacts = persist_plan_sections(pdir, version, enriched)
+    enriched["section_artifacts"] = section_artifacts
+    canonical = json.dumps(
+        enriched,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     enriched["plan_hash"] = sha256_text(canonical)
     json_dump(pdir / f"plan-v{version:04d}.json", enriched)
-    md = enriched.get("plan_markdown") or "# Implementation plan\n\nNo narrative plan was emitted. See the JSON task graph.\n"
+    md = (
+        enriched.get("plan_markdown")
+        or "# Implementation plan\n\n"
+        "No narrative plan was emitted. See the JSON task graph.\n"
+    )
     md_path = pdir / f"plan-v{version:04d}.md"
     md_path.write_text(md.rstrip() + "\n")
     try:
@@ -456,14 +515,14 @@ def _persist_plan_version(
         "plan_source_hash": source_hash,
         "plan_status": "CANDIDATE",
     })
-    # A newly-versioned candidate must earn validation in the current repository
-    # context; never carry a previous generation's validation token forward.
+    # A newly-versioned candidate must earn validation in the current
+    # repository context; never carry a previous generation's validation token
+    # forward.
     state.pop("plan_validation_context_hash", None)
     state.pop("plan_validation_git_head", None)
     state.pop("plan_validation_git_snapshot_hash", None)
     json_dump(sd / "state.json", state)
     return enriched
-
 
 def _bounded_prompt_text(text: str, limit: int, *, pointer: str | None = None, label: str = "content") -> str:
     if len(text) <= limit:
@@ -513,17 +572,32 @@ def _planner_prompt(
     review_findings: list[dict[str, Any]] | None,
     state_dir: Path | None = None,
 ) -> str:
-    candidate = _bounded_prompt_text(candidate_text or "", 180_000, label="candidate plan/source")
+    candidate = _bounded_prompt_text(
+        candidate_text or "",
+        180_000,
+        label="candidate plan/source",
+    )
     current = _bounded_prompt_text(
         json.dumps(current_plan or {}, separators=(",", ":")),
         180_000,
-        pointer=str(state_dir / "plans" / "current-plan.json") if state_dir is not None and current_plan else None,
+        pointer=(
+            str(state_dir / "plans" / "current-plan.json")
+            if state_dir is not None and current_plan
+            else None
+        ),
         label="current durable plan",
     )
-    findings_raw = json.dumps(review_findings or [], separators=(",", ":"))
+    findings_raw = json.dumps(
+        review_findings or [],
+        separators=(",", ":"),
+    )
     findings_pointer: str | None = None
     if state_dir is not None and review_findings:
-        findings_path = state_dir / "plans" / f"review-findings-{sha256_text(findings_raw)[:16]}.json"
+        findings_path = (
+            state_dir
+            / "plans"
+            / f"review-findings-{sha256_text(findings_raw)[:16]}.json"
+        )
         if not findings_path.exists():
             findings_path.write_text(findings_raw)
             try:
@@ -538,9 +612,15 @@ def _planner_prompt(
         label="review findings",
     )
     return textwrap.dedent(f"""
-    You are the HARD READ-ONLY implementation-plan controller. Do not modify the repository.
-    Reconcile the user's objective with current repository reality and repository-local instructions before accepting any plan.
-    A supplied plan is a candidate, never automatically authoritative. If there is no supplied plan, create the smallest complete plan that can drive implementation safely.
+    You are the HARD READ-ONLY implementation-plan controller. Do not modify
+    the repository. Reconcile the user's objective with current repository
+    reality and repository-local instructions before accepting any plan.
+
+    This is PLAN-FIRST control. A supplied plan is a candidate, never
+    automatically authoritative. If there is no supplied plan, analyse the
+    objective and repository, perform targeted read-only research when a
+    version-sensitive external fact materially affects the design, and create
+    a complete implementation plan BEFORE any product coding.
 
     ORIGINAL OBJECTIVE:
     {objective}
@@ -560,25 +640,53 @@ def _planner_prompt(
     REVISION TRIGGER:
     {revision_reason or 'initial plan validation'}
 
-    SIMULATION/RED-TEAM FINDINGS TO RECONCILE:
+    DETERMINISTIC/SIMULATION/RED-TEAM/VERIFIER FINDINGS TO RECONCILE:
     {findings or 'none'}
 
-    Validate requirements, acceptance criteria, architecture, dependencies, task ordering, migration/state transitions,
-    backwards compatibility, verification, rollback/recovery, security boundaries, operational observability and failure recovery.
-    Every emitted task must have a unique stable ID, a non-empty title and verification list, a valid risk, and dependencies that
-    reference only emitted task IDs without cycles. Preserve the supplied plan's substantive requirements and ordering; do not
-    silently drop source-plan work merely to make the graph smaller. If the supplied plan contains explicit task/step IDs, preserve
-    those IDs exactly in the emitted task graph; they are a deterministic coverage ledger and may not be renamed or collapsed away.
-    If version-sensitive external knowledge is materially required to make the plan sound, use targeted read-only web research rather than guessing;
-    do not browse broadly when repository evidence is sufficient.
-    Resolve ordinary technical ambiguity from repository evidence and reversible engineering judgement. Only block for a genuinely
-    consequential unresolved product/business requirement, unavailable external fact/credential, or mutually incompatible requirement.
+    Planning depth must scale with demonstrated complexity. Never reduce a
+    complex objective to generic catch-all tasks and never assume material
+    architecture can safely be discovered during coding.
+
+    Classify complexity from eight universal dimensions, each scored 0..3:
+    scope_breadth, component_coupling, integration_surface, data_state,
+    security_authority, runtime_deployment, failure_recovery and
+    uncertainty_research. Explain the score in rationale. Do not game the
+    score downward: deterministic validation and an independent Plan Verifier
+    challenge the classification.
+
+    Decompose the objective into explicit stable requirements. Every task must
+    have a unique stable ID, non-empty title, dependency list, verification
+    list, valid risk, non-empty requirement_ids and non-empty
+    implementation_scope. Emit exactly one canonical traceability row per
+    requirement binding requirement -> task(s) -> verification -> acceptance
+    evidence. Preserve substantive supplied requirements and ordering; do not
+    silently drop source-plan work to make the graph smaller. If a supplied
+    plan contains explicit task/step IDs, preserve those IDs exactly.
+
+    Validate architecture, dependencies, task ordering, interfaces,
+    migration/state transitions, backwards compatibility, verification,
+    rollback/recovery, security boundaries, deployment/runtime behaviour,
+    operational observability and failure recovery when applicable.
+
+    For complex plans, provide substantive multi-section detail for
+    requirements, architecture, implementation, verification and operations.
+    At least eight concrete tasks, three architecture decisions and three
+    verification levels are deterministic safety floors, not targets. Use
+    more decomposition whenever the objective requires it. Simple and
+    standard plans should remain proportionate but still trace every
+    requirement.
+
+    Resolve ordinary technical ambiguity from repository evidence and
+    reversible engineering judgement. Only block for a genuinely
+    consequential unresolved product/business requirement, unavailable
+    external fact/credential, or mutually incompatible requirement.
 
     Return exactly one single-line JSON protocol record and nothing after it:
-    PLAN_CONTROL: {{"verdict":"READY|BLOCKED","complexity":"simple|standard|complex","summary":"...","plan_markdown":"...","acceptance_criteria":["..."],"tasks":[{{"id":"T001","title":"...","depends_on":[],"verification":["..."],"risk":"low|medium|high"}}],"assumptions":["..."],"risks":["..."],"blockers":["..."]}}
-    Use READY only when the emitted plan is coherent enough to undergo independent simulation/red-team validation.
+    PLAN_CONTROL: {{"verdict":"READY|BLOCKED","complexity":"simple|standard|complex","complexity_evidence":{{"dimensions":{{"scope_breadth":0,"component_coupling":0,"integration_surface":0,"data_state":0,"security_authority":0,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0}},"rationale":["..."]}},"summary":"...","plan_markdown":"...","requirements":[{{"id":"R001","statement":"...","source":"objective|operator|repository|derived|external"}}],"acceptance_criteria":["..."],"architecture":[{{"id":"A001","title":"...","decision":"...","requirement_ids":["R001"]}}],"tasks":[{{"id":"T001","title":"...","depends_on":[],"verification":["..."],"risk":"low|medium|high","requirement_ids":["R001"],"implementation_scope":["..."]}}],"traceability":[{{"requirement_id":"R001","architecture_ids":["A001"],"task_ids":["T001"],"verification":["..."],"acceptance_evidence":["..."]}}],"verification_strategy":[{{"level":"unit|integration|system|regression|security|operational","scope":"...","requirement_ids":["R001"]}}],"plan_sections":[{{"id":"requirements|architecture|implementation|verification|operations","title":"...","content":"..."}}],"assumptions":["..."],"risks":["..."],"blockers":["..."]}}
+    Use READY only when the emitted plan is detailed enough to undergo
+    deterministic completeness validation plus independent simulation,
+    red-team and Plan Verifier gates.
     """).strip()
-
 
 def _assessment_prompt(
     *,
@@ -591,21 +699,47 @@ def _assessment_prompt(
     evidence_path: Path | None = None,
     plan_pointer: Path | None = None,
 ) -> str:
-    assert kind in {"simulation", "redteam"}
-    role = (
-        "Simulate execution of the plan as a read-only tabletop exercise. Walk state/dependency transitions, partial failures, retries, rollback and likely integration outcomes."
-        if kind == "simulation" else
-        "Red-team the plan/system as an independent pre-mortem. Assume it failed and search aggressively for concrete reasons: bad assumptions, races, partial failure, stale state, malformed input, dependency loss, resource pressure, security boundary mistakes, backward incompatibility, rollback failure, observability gaps and false-completion criteria."
-    )
+    assert kind in {"simulation", "redteam", "verifier"}
+    if kind == "simulation":
+        role = (
+            "Simulate execution of the plan as a read-only tabletop exercise. "
+            "Walk state/dependency transitions, partial failures, retries, "
+            "rollback and likely integration outcomes."
+        )
+        prefix = "PLAN_SIMULATION"
+    elif kind == "redteam":
+        role = (
+            "Red-team the plan/system as an independent pre-mortem. Assume it "
+            "failed and search aggressively for concrete reasons: bad "
+            "assumptions, races, partial failure, stale state, malformed input, "
+            "dependency loss, resource pressure, security boundary mistakes, "
+            "backward incompatibility, rollback failure, observability gaps "
+            "and false-completion criteria."
+        )
+        prefix = "PLAN_REDTEAM"
+    else:
+        role = (
+            "Act as the independent Plan Verifier. Check that complexity is not "
+            "understated; every requirement is represented; planning depth is "
+            "proportional; tasks are concrete rather than catch-all "
+            "placeholders; architecture, interfaces, data/state, security, "
+            "runtime, failure/recovery and operations are covered when "
+            "applicable; and requirement-to-task-to-verification-to-acceptance "
+            "traceability can prove completion before coding starts."
+        )
+        prefix = "PLAN_VERIFIER"
+
     return textwrap.dedent(f"""
-    You are an independent HARD READ-ONLY {kind} reviewer. Do not modify the repository.
+    You are an independent HARD READ-ONLY {kind} reviewer. Do not modify the
+    repository.
     {role}
 
     REVIEW STAGE: {stage}
     ORIGINAL OBJECTIVE:
     {objective}
 
-    DURABLE PLAN (bounded inline representation plus indexed full-source coverage when large):
+    DURABLE PLAN (bounded inline representation plus indexed full-source
+    coverage when large):
     {_bounded_prompt_text(json.dumps(plan, separators=(',', ':')), 220_000, pointer=str(plan_pointer) if plan_pointer else None, label="durable plan")}
 
     CURRENT IMPLEMENTATION CHECKPOINT:
@@ -615,15 +749,19 @@ def _assessment_prompt(
     {str(evidence_path) if evidence_path else 'not required for this stage'}
     {('Read this external file when exact current diff/status/history evidence is needed.' if evidence_path else '')}
 
-    For preflight, phase-boundary or remediation review, judge whether the plan remains safe/coherent before more material implementation.
-    For final review, inspect current repository reality and determine whether there is a material plan flaw or implementation/system defect
-    that prevents satisfying the original objective. Do not fail for stylistic preference or hypothetical risks with no plausible impact.
+    For preflight, phase-boundary or remediation review, judge whether the plan
+    remains safe, complete and coherent before more material implementation.
+    For final review, inspect current repository reality and determine whether
+    a material plan flaw or implementation/system defect prevents satisfying
+    the original objective. Do not fail for stylistic preference or
+    hypothetical risks with no plausible impact.
 
     Return exactly one single-line JSON protocol record and nothing after it:
-    {('PLAN_SIMULATION' if kind == 'simulation' else 'PLAN_REDTEAM')}: {{"verdict":"PASS|REVISE|BLOCKED","scope":"PLAN|IMPLEMENTATION|REQUIREMENT","summary":"...","findings":["..."],"scenarios":["..."]}}
-    PASS means no material unresolved issue was found. REVISE means concrete work is needed. BLOCKED is reserved for a genuine external/human dependency.
+    {prefix}: {{"verdict":"PASS|REVISE|BLOCKED","scope":"PLAN|IMPLEMENTATION|REQUIREMENT","summary":"...","findings":["..."],"scenarios":["..."]}}
+    PASS means no material unresolved issue was found. REVISE means concrete
+    work is needed. BLOCKED is reserved for a genuine external/human
+    dependency.
     """).strip()
-
 
 def _hash_file_streaming(path: Path) -> dict[str, Any]:
     """Hash a control-context file completely without loading it wholesale."""

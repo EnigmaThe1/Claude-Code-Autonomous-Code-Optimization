@@ -16,9 +16,11 @@ The plan is a controlled route to the requested result, not permission to change
 
 ## Before implementation
 
-A supplied plan is reconciled against the objective, current repository, repository instructions, dependencies, verification and relevant technical constraints. If only an objective is supplied, Claude Auto derives the smallest complete plan needed to implement it.
+A supplied plan is reconciled against the objective, current repository, repository instructions, dependencies, verification and relevant technical constraints. If only an objective is supplied, Claude Auto analyses repository reality, performs targeted read-only research when version-sensitive external facts materially affect the design, classifies complexity and derives a complete implementation plan before coding.
 
-The candidate is independently simulated and red-teamed. Material findings require a new plan version and another validation pass.
+RC5 requires an explicit requirement-to-task-to-verification-to-acceptance chain for every plan. Complex objectives must additionally provide proportionate architecture, implementation, verification and operations detail; generic catch-all tasks cannot satisfy the deterministic completeness gate. Complex structured sections are persisted as a versioned multi-file plan bundle alongside the executable JSON graph.
+
+The candidate is deterministically checked for completeness and then independently simulated, red-teamed and checked by a hard read-only Plan Verifier. Material findings require a new plan version and another complete validation pass. Product mutation authority is unavailable until all preflight gates pass.
 
 ## During implementation
 

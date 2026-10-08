@@ -118,7 +118,15 @@ def build_parser(version: str) -> argparse.ArgumentParser:
     q.add_argument("--resume-config", action="store_true", help="Resume using the last sanitised durable run configuration for this repository (used by the optional systemd service)")
     q.add_argument("--model-qualification", choices=["auto", "required", "off"], default="auto", help="Explicit model-route preflight: auto qualifies unseen routes (default), required refuses until prequalified, off is an explicit expert override")
     q.add_argument("--max-cycles", type=int, default=0, help="Maximum native /goal repair rounds; 0 (default) continues until COMPLETE/BLOCKED/circuit-breaker")
-    q.add_argument("--max-plan-revisions", type=int, default=3, help="Maximum plan revise + simulate + red-team attempts before failing closed")
+    q.add_argument(
+        "--max-plan-revisions",
+        type=int,
+        default=5,
+        help=(
+            "Maximum plan revise + completeness + simulate + red-team + "
+            "verifier attempts before failing closed"
+        ),
+    )
     q.add_argument("--max-stagnant-cycles", type=int, default=3, help="Stop after this many identical repository/plan/evidence repair rounds; 0 disables")
     q.add_argument("--max-turns", type=int, default=60, help="Hard Claude worker-turn cap per invocation")
     q.add_argument("--max-budget-usd", type=float, default=None, help="Hard Claude Code spend cap per invocation (print mode)")

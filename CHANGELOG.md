@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.0-rc5
+
+- Add universal complexity-aware plan-first control for objective-only software work.
+- Add deterministic complexity evidence and fail-closed under-classification checks.
+- Require auditable requirement -> task -> verification -> acceptance traceability for executable plans.
+- Require proportionate architecture, task, verification and operational detail for complex objectives.
+- Persist structured complex planning sections as versioned multi-file plan bundles.
+- Add an independent hard read-only Plan Verifier after simulation and red-team review.
+- Feed deterministic completeness findings back through bounded plan revision before coding authority.
+- Raise the default bounded planning revision allowance from three to five attempts.
+
 ## 1.0.0-rc3
 
 Third public release candidate.

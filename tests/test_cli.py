@@ -643,7 +643,7 @@ if os.environ.get("FAIL_NATIVE")=="1" and not os.environ.get("ANTHROPIC_BASE_URL
     print("native down", file=sys.stderr)
     raise SystemExit(9)
 if "PLAN_CONTROL:" in prompt:
-    result='PLAN_CONTROL: {"verdict":"READY","complexity":"standard","summary":"validated","plan_markdown":"# Validated plan\\n\\n1. Implement the objective.\\n2. Verify acceptance criteria.","acceptance_criteria":["Objective behaviour is implemented and verified"],"tasks":[{"id":"T001","title":"Implement objective","depends_on":[],"verification":["Run relevant tests"],"risk":"medium"}],"assumptions":[],"risks":[],"blockers":[]}'
+    result='PLAN_CONTROL: '+json.dumps({"verdict":"READY","complexity":"standard","complexity_evidence":{"dimensions":{"scope_breadth":2,"component_coupling":1,"integration_surface":1,"data_state":1,"security_authority":1,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0},"rationale":["test fixture"]},"summary":"validated","plan_markdown":"# Validated plan\\n\\n1. Implement the objective.\\n2. Verify acceptance criteria.","requirements":[{"id":"R001","statement":"Objective behaviour","source":"objective"}],"acceptance_criteria":["Objective behaviour is implemented and verified"],"architecture":[],"tasks":[{"id":"T001","title":"Implement objective","depends_on":[],"verification":["Run relevant tests"],"risk":"medium","requirement_ids":["R001"],"implementation_scope":["objective implementation"]}],"traceability":[{"requirement_id":"R001","architecture_ids":[],"task_ids":["T001"],"verification":["Run relevant tests"],"acceptance_evidence":["verification pass"]}],"verification_strategy":[{"level":"regression","scope":"objective and prior behaviour","requirement_ids":["R001"]}],"plan_sections":[],"assumptions":[],"risks":[],"blockers":[]})
 elif "PLAN_SIMULATION:" in prompt:
     is_final="REVIEW STAGE: final" in prompt
     verdict=os.environ.get("FAKE_FINAL_SIMULATION_VERDICT" if is_final else "FAKE_SIMULATION_VERDICT","PASS")
@@ -654,6 +654,10 @@ elif "PLAN_REDTEAM:" in prompt:
     verdict=os.environ.get("FAKE_FINAL_REDTEAM_VERDICT" if is_final else "FAKE_REDTEAM_VERDICT","PASS")
     scope=os.environ.get("FAKE_FINAL_REDTEAM_SCOPE" if is_final else "FAKE_REDTEAM_SCOPE","PLAN")
     result='PLAN_REDTEAM: '+json.dumps({"verdict":verdict,"scope":scope,"summary":"red team checked","findings":[] if verdict=="PASS" else ["material red-team finding"],"scenarios":["dependency outage","stale state"]})
+elif "PLAN_VERIFIER:" in prompt:
+    verdict=os.environ.get("FAKE_PLAN_VERIFIER_VERDICT","PASS")
+    scope=os.environ.get("FAKE_PLAN_VERIFIER_SCOPE","PLAN")
+    result='PLAN_VERIFIER: '+json.dumps({"verdict":verdict,"scope":scope,"summary":"plan verifier checked","findings":[] if verdict=="PASS" else ["material plan-completeness finding"],"scenarios":["requirement coverage","task granularity","acceptance traceability"]})
 elif "independent, HARD READ-ONLY challenger" in prompt:
     result="CHALLENGER_VERDICT: PASS\\nCHALLENGER_SUMMARY: verified"
 elif "MODEL_QUALIFICATION:" in prompt:

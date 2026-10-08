@@ -1,6 +1,6 @@
 # Claude Code Autonomous Code Optimization
 
-**Version 1.0.0-rc3**
+**Version 1.0.0-rc5**
 
 Claude Code Autonomous Code Optimization is a user-level control and optimisation layer for Claude Code. It is designed for long-running software-engineering work where Claude should keep implementing, testing, diagnosing and repairing until the requested objective is complete or a genuine external blocker is reached.
 
@@ -12,7 +12,9 @@ Repository: https://github.com/EnigmaThe1/Claude-Code-Autonomous-Code-Optimizati
 
 - durable autonomous execution across multiple Claude turns and process restarts;
 - objective-driven implementation with a validated, versioned implementation plan;
-- plan simulation and red-team review before coding and at material repair boundaries;
+- complexity-aware plan-first execution: vague objectives become durable implementation plans before product mutation;
+- deterministic requirement-to-task-to-verification-to-acceptance traceability and proportional planning-depth gates;
+- independent plan simulation, red-team and Plan Verifier review before coding and at material repair boundaries;
 - automatic diagnosis and repair of implementation failures;
 - controlled plan repair when repository reality proves the current plan wrong or incomplete;
 - deterministic test/build/lint/type-check verification;
@@ -37,7 +39,7 @@ The governing principle is: **the user's objective is authoritative; the impleme
 
 Claude Auto is intentionally neither locked to a defective plan nor free to invent a different product.
 
-Before implementation begins, a supplied plan is reconciled with the objective, repository state and current instructions. If only an objective is supplied, Claude Auto generates the smallest complete plan needed to satisfy it. The candidate is independently simulated and red-teamed before mutation begins.
+Before implementation begins, a supplied plan is reconciled with the objective, repository state and current instructions. If only an objective is supplied, Claude Auto performs repository analysis and targeted research where materially needed, classifies complexity, decomposes explicit requirements and generates a complete implementation plan before mutation begins. Planning depth scales with complexity: complex objectives must carry concrete architecture, task, verification, operations and traceability detail rather than generic catch-all tasks. The candidate must pass deterministic completeness validation plus independent simulation, red-team and Plan Verifier gates before implementation authority is granted.
 
 During implementation:
 
@@ -304,7 +306,7 @@ See [Model routing](docs/MODEL_ROUTING.md).
 
 `main` represents the latest accepted and qualified public state. Each candidate is developed on `release/<version>`, qualified there, then merged or fast-forwarded into `main`. Accepted release branches remain fixed as recovery/comparison references and version tags are immutable.
 
-The first public baseline is **1.0.0-rc1**. **1.0.0-rc2** adds trusted Git reconstruction, protected/idempotent promotion and repository-owned planning repair. **1.0.0-rc3** adds explicit Apache-2.0 licensing, release-workflow hardening and deterministic release finalisation.
+The first public baseline is **1.0.0-rc1**. **1.0.0-rc2** adds trusted Git reconstruction, protected/idempotent promotion and repository-owned planning repair. **1.0.0-rc3** adds explicit Apache-2.0 licensing, release-workflow hardening and deterministic release finalisation. **1.0.0-rc4** adds universal repository governance, TaskSpecs, ExecutionEnvelopes, multi-file planning repair, migration/session adoption and adversarial qualification. **1.0.0-rc5** adds universal complexity-aware plan-first completeness, requirement traceability, multi-section plan bundles and an independent Plan Verifier before coding.
 
 ## License
 
