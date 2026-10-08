@@ -47,6 +47,14 @@ _DIMENSION_VERIFICATION_LEVELS = {
     "runtime_deployment": {"system", "operational"},
     "failure_recovery": {"system", "operational"},
 }
+_ALLOWED_VERIFICATION_LEVELS = {
+    "unit",
+    "integration",
+    "system",
+    "regression",
+    "security",
+    "operational",
+}
 
 def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
     """Fail closed when a plan has no auditable requirement-to-evidence chain."""
@@ -139,6 +147,7 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
         errors.append("architecture must be a list")
         architecture = []
     architecture_ids: set[str] = set()
+    architecture_req_map: dict[str, set[str]] = {}
     for index, row in enumerate(architecture):
         label = f"architecture[{index}]"
         if not isinstance(row, dict):
@@ -167,6 +176,8 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
                 f"architecture {aid or index} maps unknown requirement ids: "
                 + ", ".join(unknown)
             )
+        if aid:
+            architecture_req_map[aid] = mapped
 
     traceability = plan.get("traceability")
     if not isinstance(traceability, list) or not traceability:
@@ -281,6 +292,11 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
         level = str(row.get("level") or "").strip().lower()
         if not level:
             errors.append(f"{label}.level must be a non-empty string")
+        elif level not in _ALLOWED_VERIFICATION_LEVELS:
+            errors.append(
+                f"{label}.level must be one of "
+                + ", ".join(sorted(_ALLOWED_VERIFICATION_LEVELS))
+            )
         else:
             verification_levels.add(level)
         if not isinstance(row.get("scope"), str) or not row["scope"].strip():
@@ -369,6 +385,12 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
                 f"{label} references unknown task ids: "
                 + ", ".join(unknown_tasks)
             )
+        for task_id in sorted(mapped_tasks & task_ids):
+            if not (task_req_map.get(task_id, set()) & mapped_requirements):
+                errors.append(
+                    f"{label} task {task_id} does not declare any mapped "
+                    "complexity requirement"
+                )
 
         mapped_architecture = set(
             nonempty_strings(row.get("architecture_ids"))
@@ -381,6 +403,17 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
                 f"{label} references unknown architecture ids: "
                 + ", ".join(unknown_architecture)
             )
+        for architecture_id in sorted(
+            mapped_architecture & architecture_ids
+        ):
+            if not (
+                architecture_req_map.get(architecture_id, set())
+                & mapped_requirements
+            ):
+                errors.append(
+                    f"{label} architecture {architecture_id} does not "
+                    "declare any mapped complexity requirement"
+                )
         if (
             dimension in required_dimensions
             and dimension in _ARCHITECTURE_RELEVANT_DIMENSIONS
