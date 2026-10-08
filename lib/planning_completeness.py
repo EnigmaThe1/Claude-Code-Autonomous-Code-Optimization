@@ -157,6 +157,10 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
         ):
             errors.append(f"{label}.decision must be a non-empty string")
         mapped = set(nonempty_strings(row.get("requirement_ids")))
+        if not mapped:
+            errors.append(
+                f"{label}.requirement_ids must be a non-empty list"
+            )
         unknown = sorted(mapped - requirement_seen)
         if unknown:
             errors.append(
