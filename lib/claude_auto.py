@@ -678,7 +678,8 @@ def ensure_plan_validated(
         verifier, verifier_meta = _run_plan_assessment(
             kind="verifier", stage="preflight", root=root, sd=sd,
             objective=objective, plan=candidate, state=state, env=env,
-            provider_detail=provider_detail, model=args.model,
+            provider_detail=provider_detail,
+            model=args.verifier_model or args.model,
             timeout=timeout,
             max_budget_usd=effective_invocation_budget(args, state),
         )

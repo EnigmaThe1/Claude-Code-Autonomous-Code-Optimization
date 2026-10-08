@@ -150,6 +150,9 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
                 + ", ".join(sorted(_ALLOWED_REQUIREMENT_SOURCES))
             )
 
+    criteria = _nonempty_strings(plan.get("acceptance_criteria"))
+    criteria_set = set(criteria)
+
     tasks = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
     task_ids = {
         str(task.get("id")).strip()
@@ -220,6 +223,8 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
         traceability = []
     trace_by_requirement: dict[str, list[dict[str, Any]]] = {}
     traced_tasks: set[str] = set()
+    traced_architecture: set[str] = set()
+    traced_acceptance: set[str] = set()
     for index, row in enumerate(traceability):
         label = f"traceability[{index}]"
         if not isinstance(row, dict):
@@ -253,6 +258,25 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
                 errors.append(
                     f"{label} references unknown architecture id {aid}"
                 )
+            else:
+                traced_architecture.add(aid)
+
+        mapped_acceptance = _nonempty_strings(
+            row.get("acceptance_criteria")
+        )
+        if not mapped_acceptance:
+            errors.append(
+                f"{label}.acceptance_criteria must be a non-empty list"
+            )
+        for criterion in mapped_acceptance:
+            if criterion not in criteria_set:
+                errors.append(
+                    f"{label} references acceptance criterion not present "
+                    "in the plan"
+                )
+            else:
+                traced_acceptance.add(criterion)
+
         if not _nonempty_strings(row.get("verification")):
             errors.append(f"{label}.verification must be a non-empty list")
         if not _nonempty_strings(row.get("acceptance_evidence")):
@@ -277,6 +301,17 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
         errors.append(
             "tasks are not reachable from any requirement trace: "
             + ", ".join(untraced_tasks[:40])
+        )
+
+    untraced_acceptance = [
+        criterion
+        for criterion in criteria
+        if criterion not in traced_acceptance
+    ]
+    if untraced_acceptance:
+        errors.append(
+            "acceptance criteria are not reachable from requirement traces: "
+            + "; ".join(untraced_acceptance[:20])
         )
 
     verification_strategy = plan.get("verification_strategy")
@@ -317,6 +352,15 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
             errors.append(
                 "complex plans require at least "
                 f"{_MIN_COMPLEX_ARCHITECTURE_DECISIONS} architecture decisions"
+            )
+        orphan_architecture = sorted(
+            architecture_ids - traced_architecture
+        )
+        if orphan_architecture:
+            errors.append(
+                "complex architecture decisions are not reachable from "
+                "requirement traces: "
+                + ", ".join(orphan_architecture[:40])
             )
         if len(verification_levels) < _MIN_COMPLEX_VERIFICATION_LEVELS:
             errors.append(

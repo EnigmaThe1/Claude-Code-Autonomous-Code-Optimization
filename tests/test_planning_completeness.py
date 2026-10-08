@@ -58,6 +58,9 @@ def _base_plan(complexity="simple", dims=None):
                 "architecture_ids": [],
                 "task_ids": ["T001"],
                 "verification": ["focused and regression checks"],
+                "acceptance_criteria": [
+                    "Required behaviour is independently verified"
+                ],
                 "acceptance_evidence": ["successful verification receipt"],
             }
         ],
@@ -182,6 +185,7 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
             "architecture_ids": [f"A{i:03d}"] if i <= 3 else [],
             "task_ids": [f"T{i:03d}"],
             "verification": [f"Verify requirement {i}"],
+            "acceptance_criteria": [f"Accept R{i:03d}"],
             "acceptance_evidence": [f"Evidence for requirement {i}"],
         }
         for i in range(1, 9)
