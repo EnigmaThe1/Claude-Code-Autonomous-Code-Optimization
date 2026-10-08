@@ -265,7 +265,8 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
     assert validate_plan_completeness(plan) == []
     paths = persist_plan_sections(tmp_path, 1, plan)
     assert len(paths) == 5
-    assert all(Path(path).is_file() for path in paths)
+    assert all(not Path(path).is_absolute() for path in paths)
+    assert all((tmp_path / path).is_file() for path in paths)
 
 
 def test_independent_scope_baseline_must_be_covered():
@@ -365,3 +366,20 @@ def test_independent_mandatory_concern_requires_task_and_verification():
         "mandatory concerns are missing plan coverage" in item
         for item in errors
     )
+
+
+def test_section_artifact_paths_are_state_location_independent(tmp_path: Path):
+    plan = _base_plan()
+    plan["plan_sections"] = [{
+        "id": "requirements",
+        "title": "Requirements",
+        "content": (
+            "Substantive requirements detail that remains identical across "
+            "different external state roots and therefore must not leak an "
+            "absolute machine-specific path into durable plan semantics."
+        ),
+    }]
+    first = persist_plan_sections(tmp_path / "one", 7, plan)
+    second = persist_plan_sections(tmp_path / "two", 7, plan)
+    assert first == second
+    assert first == ["plan-v0007-sections/01-requirements.md"]
