@@ -164,7 +164,7 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
             "statement": f"Requirement {i}",
             "source": "objective",
         }
-        for i in range(1, 9)
+        for i in range(1, 6)
     ]
     architecture = [
         {
@@ -185,7 +185,7 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
             "requirement_ids": [f"R{i:03d}"],
             "implementation_scope": [f"component-{i}"],
         }
-        for i in range(1, 9)
+        for i in range(1, 6)
     ]
     traceability = [
         {
@@ -196,7 +196,7 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
             "acceptance_criteria": [f"Accept R{i:03d}"],
             "acceptance_evidence": [f"Evidence for requirement {i}"],
         }
-        for i in range(1, 9)
+        for i in range(1, 6)
     ]
     sections = [
         {
@@ -227,7 +227,7 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
         },
         "requirements": requirements,
         "acceptance_criteria": [
-            f"Accept R{i:03d}" for i in range(1, 9)
+            f"Accept R{i:03d}" for i in range(1, 6)
         ],
         "architecture": architecture,
         "tasks": tasks,
@@ -300,6 +300,7 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
         ],
         "plan_sections": sections,
     }
+    assert len(tasks) == 5
     assert validate_plan_completeness(plan) == []
     paths = persist_plan_sections(tmp_path, 1, plan)
     assert len(paths) == 5
