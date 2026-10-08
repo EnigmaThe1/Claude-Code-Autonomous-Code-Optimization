@@ -643,7 +643,10 @@ if os.environ.get("FAIL_NATIVE")=="1" and not os.environ.get("ANTHROPIC_BASE_URL
     print("native down", file=sys.stderr)
     raise SystemExit(9)
 if "PLAN_SCOPE:" in prompt:
-    result='PLAN_SCOPE: '+json.dumps({"verdict":"READY","complexity":"standard","complexity_evidence":{"dimensions":{"scope_breadth":2,"component_coupling":1,"integration_surface":1,"data_state":1,"security_authority":1,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0},"rationale":["independent test baseline"]},"requirements":[{"id":"S001","statement":"Objective behaviour","kind":"explicit","source":"objective"}],"mandatory_concerns":["regression safety"],"research_questions":[],"summary":"scope checked","blockers":[]})
+    if os.environ.get("FAKE_SCOPE_REPAIR_ONCE")=="1" and "understates deterministic minimum" not in prompt:
+        result='PLAN_SCOPE: '+json.dumps({"verdict":"READY","complexity":"simple","complexity_evidence":{"dimensions":{"scope_breadth":3,"component_coupling":3,"integration_surface":3,"data_state":2,"security_authority":1,"runtime_deployment":1,"failure_recovery":1,"uncertainty_research":1},"rationale":["intentionally understated fixture"]},"requirements":[{"id":"S001","statement":"Objective behaviour","kind":"explicit","source":"objective"}],"mandatory_concerns":["regression safety"],"research_questions":[],"summary":"scope needs deterministic repair","blockers":[]})
+    else:
+        result='PLAN_SCOPE: '+json.dumps({"verdict":"READY","complexity":"standard","complexity_evidence":{"dimensions":{"scope_breadth":2,"component_coupling":1,"integration_surface":1,"data_state":1,"security_authority":1,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0},"rationale":["independent test baseline"]},"requirements":[{"id":"S001","statement":"Objective behaviour","kind":"explicit","source":"objective"}],"mandatory_concerns":["regression safety"],"research_questions":[],"summary":"scope checked","blockers":[]})
 elif "PLAN_CONTROL:" in prompt:
     result='PLAN_CONTROL: '+json.dumps({"verdict":"READY","complexity":"standard","complexity_evidence":{"dimensions":{"scope_breadth":2,"component_coupling":1,"integration_surface":1,"data_state":1,"security_authority":1,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0},"rationale":["test fixture"]},"summary":"validated","plan_markdown":"# Validated plan\\n\\n1. Implement the objective.\\n2. Verify acceptance criteria.","requirements":[{"id":"R001","statement":"Objective behaviour","source":"objective","scope_ids":["S001"]}],"acceptance_criteria":["Objective behaviour is implemented and verified"],"architecture":[],"tasks":[{"id":"T001","title":"Implement objective","depends_on":[],"verification":["Run relevant tests"],"risk":"medium","requirement_ids":["R001"],"implementation_scope":["objective implementation"]}],"traceability":[{"requirement_id":"R001","architecture_ids":[],"task_ids":["T001"],"verification":["Run relevant tests"],"acceptance_criteria":["Objective behaviour is implemented and verified"],"acceptance_evidence":["verification pass"]}],"verification_strategy":[{"level":"regression","scope":"objective and prior behaviour","requirement_ids":["R001"]}],"concern_coverage":[{"concern":"regression safety","task_ids":["T001"],"verification":["Run relevant tests"]}],"plan_sections":[],"assumptions":[],"risks":[],"blockers":[]})
 elif "PLAN_SIMULATION:" in prompt:
@@ -1432,6 +1435,27 @@ def test_final_adversarial_review_can_reject_false_completion(monkeypatch):
         state=json.loads((ca.repo_state_dir(r)/"state.json").read_text())
         assert state["status"] == "LIMIT_REACHED"
         assert state.get("plan_revalidation_findings")
+
+
+def test_scope_gate_repairs_deterministic_underclassification_before_planning(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as dh, tempfile.TemporaryDirectory() as bd:
+        r=Path(td); git_init(r); (r/"README.md").write_text("x\n")
+        capture=Path(dh)/"capture.jsonl"; make_fake_claude(Path(bd))
+        monkeypatch.setenv("PATH", bd+os.pathsep+os.environ.get("PATH", ""))
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", dh)
+        monkeypatch.setenv("FAKE_CLAUDE_CAPTURE", str(capture))
+        monkeypatch.setenv("FAKE_SCOPE_REPAIR_ONCE", "1")
+        assert ca.main(["run","--model-qualification","off","--repo",str(r),"--objective","test","--max-plan-revisions","2","--max-cycles","1","--max-turns","5"]) == 0
+        sd=ca.repo_state_dir(r)
+        state=json.loads((sd/"state.json").read_text())
+        assert state["plan_scope_attempts"] == 2
+        assert state["plan_status"] == "VALIDATED"
+        assert (sd/"plans"/"scope-attempt-0001.json").exists()
+        assert (sd/"plans"/"scope-attempt-0002.json").exists()
+        prompts=[json.loads(x)["args"][-1] for x in capture.read_text().splitlines() if x.strip()]
+        scope_prompts=[p for p in prompts if "PLAN_SCOPE:" in p]
+        assert len(scope_prompts) == 2
+        assert "understates deterministic minimum" in scope_prompts[1]
 
 
 def test_plan_gate_fails_closed_after_bounded_redteam_revision_loop(monkeypatch):
