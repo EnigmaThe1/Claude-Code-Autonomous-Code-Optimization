@@ -1359,6 +1359,10 @@ def test_goal_only_creates_validated_external_plan_before_worker(monkeypatch):
         assert state["plan_status"] == "VALIDATED"
         assert state["plan_version"] == 1
         assert (sd/"plans"/"current-plan.json").exists()
+        current_plan=json.loads((sd/"plans"/"current-plan.json").read_text())
+        scope_record=json.loads((sd/"plans"/"scope-baseline.json").read_text())
+        assert current_plan["scope_baseline_sha256"] == scope_record["scope_sha256"]
+        assert current_plan["scope_baseline"]["requirements"][0]["id"] == "S001"
         assert not (r/"IMPLEMENTATION_PLAN.md").exists()
         prompts=[json.loads(x)["args"][-1] for x in capture.read_text().splitlines() if x.strip()]
         scope=next(i for i,p in enumerate(prompts) if "PLAN_SCOPE:" in p)

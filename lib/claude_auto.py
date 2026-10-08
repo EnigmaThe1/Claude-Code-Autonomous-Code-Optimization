@@ -654,10 +654,22 @@ def ensure_plan_validated(
         json_dump(sd / "state.json", state)
         return None, 3
     pdir = plan_state_dir(sd)
+    scope_semantic = json.dumps(
+        scope_baseline,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    scope_sha256 = sha256_text(scope_semantic)
     json_dump(
         pdir / "scope-baseline.json",
-        {"scope": scope_baseline, "meta": scope_meta},
+        {
+            "scope": scope_baseline,
+            "scope_sha256": scope_sha256,
+            "meta": scope_meta,
+        },
     )
+    state["plan_scope_sha256"] = scope_sha256
+    json_dump(sd / "state.json", state)
 
     for attempt in range(1, max_revisions + 1):
         planner_text, planner_meta = run_readonly_plan_agent(
@@ -683,6 +695,8 @@ def ensure_plan_validated(
             json_dump(sd / "state.json", state)
             return None, 6
         candidate = _normalise_plan_control(raw_plan, objective)
+        candidate["scope_baseline"] = scope_baseline
+        candidate["scope_baseline_sha256"] = scope_sha256
         plan_errors = validate_plan_graph(candidate)
         plan_errors.extend(validate_plan_completeness(candidate))
         plan_errors.extend(
