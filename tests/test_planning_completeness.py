@@ -138,11 +138,7 @@ def test_rejects_complex_catch_all_plan():
     plan = _base_plan("complex", dims)
     errors = validate_plan_completeness(plan)
     assert any(
-        "at least 8 concrete implementation tasks" in item
-        for item in errors
-    )
-    assert any(
-        "at least 3 architecture decisions" in item
+        "high-impact complexity dimensions are missing plan coverage" in item
         for item in errors
     )
     assert any(
@@ -236,6 +232,43 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
         "architecture": architecture,
         "tasks": tasks,
         "traceability": traceability,
+        "complexity_coverage": [
+            {
+                "dimension": "scope_breadth",
+                "requirement_ids": ["R001"],
+                "architecture_ids": [],
+                "task_ids": ["T001"],
+                "verification": ["Verify scope breadth"],
+            },
+            {
+                "dimension": "component_coupling",
+                "requirement_ids": ["R001"],
+                "architecture_ids": ["A001"],
+                "task_ids": ["T001"],
+                "verification": ["Verify component coupling"],
+            },
+            {
+                "dimension": "integration_surface",
+                "requirement_ids": ["R002"],
+                "architecture_ids": ["A002"],
+                "task_ids": ["T002"],
+                "verification": ["Verify integration surface"],
+            },
+            {
+                "dimension": "data_state",
+                "requirement_ids": ["R003"],
+                "architecture_ids": ["A003"],
+                "task_ids": ["T003"],
+                "verification": ["Verify data and state behaviour"],
+            },
+            {
+                "dimension": "security_authority",
+                "requirement_ids": ["R003"],
+                "architecture_ids": ["A003"],
+                "task_ids": ["T003"],
+                "verification": ["Verify security boundaries"],
+            },
+        ],
         "concern_coverage": [
             {
                 "concern": "regression safety",
@@ -257,6 +290,11 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
             {
                 "level": "regression",
                 "scope": "whole accepted surface",
+                "requirement_ids": ["R003"],
+            },
+            {
+                "level": "security",
+                "scope": "authority boundaries",
                 "requirement_ids": ["R003"],
             },
         ],
@@ -383,3 +421,37 @@ def test_section_artifact_paths_are_state_location_independent(tmp_path: Path):
     second = persist_plan_sections(tmp_path / "two", 7, plan)
     assert first == second
     assert first == ["plan-v0007-sections/01-requirements.md"]
+
+
+def test_dimension_score_cannot_drop_below_independent_scope():
+    scope = {
+        "complexity": "standard",
+        "complexity_evidence": {
+            "dimensions": {
+                "scope_breadth": 2,
+                "component_coupling": 1,
+                "integration_surface": 1,
+                "data_state": 1,
+                "security_authority": 1,
+                "runtime_deployment": 0,
+                "failure_recovery": 0,
+                "uncertainty_research": 0,
+            }
+        },
+        "requirements": [
+            {
+                "id": "S001",
+                "statement": "Primary behaviour",
+                "kind": "explicit",
+                "source": "objective",
+            }
+        ],
+        "mandatory_concerns": ["regression safety"],
+    }
+    plan = _base_plan("standard")
+    plan["complexity_evidence"]["dimensions"]["scope_breadth"] = 1
+    errors = validate_plan_against_scope(plan, scope)
+    assert any(
+        "complexity dimension scope_breadth=1" in item
+        for item in errors
+    )
