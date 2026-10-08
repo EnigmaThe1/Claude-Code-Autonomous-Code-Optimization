@@ -20,6 +20,7 @@ from typing import Any
 
 from planning_complexity import (
     ALLOWED_REQUIREMENT_SOURCES,
+    COMPLEXITY_DIMENSIONS,
     complexity_rank,
     complexity_score,
     nonempty_strings,
@@ -32,9 +33,20 @@ _COMPLEX_REQUIRED_SECTIONS = {
     "verification",
     "operations",
 }
-_MIN_COMPLEX_TASKS = 8
-_MIN_COMPLEX_ARCHITECTURE_DECISIONS = 3
-_MIN_COMPLEX_VERIFICATION_LEVELS = 3
+_ARCHITECTURE_RELEVANT_DIMENSIONS = {
+    "component_coupling",
+    "integration_surface",
+    "data_state",
+    "security_authority",
+    "runtime_deployment",
+    "failure_recovery",
+}
+_DIMENSION_VERIFICATION_LEVELS = {
+    "integration_surface": {"integration", "system"},
+    "security_authority": {"security"},
+    "runtime_deployment": {"system", "operational"},
+    "failure_recovery": {"system", "operational"},
+}
 
 def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
     """Fail closed when a plan has no auditable requirement-to-evidence chain."""
