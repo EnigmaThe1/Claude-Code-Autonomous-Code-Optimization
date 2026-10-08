@@ -150,8 +150,17 @@ def validate_scope_baseline(scope: dict[str, Any]) -> list[str]:
                 + ", ".join(sorted(ALLOWED_REQUIREMENT_SOURCES))
             )
 
-    if not nonempty_strings(scope.get("mandatory_concerns")):
-        errors.append("scope mandatory_concerns must be a non-empty list")
+    concerns = scope.get("mandatory_concerns")
+    if not isinstance(concerns, list):
+        errors.append("scope mandatory_concerns must be a list")
+    else:
+        normalised_concerns = nonempty_strings(concerns)
+        if len(normalised_concerns) != len(concerns):
+            errors.append(
+                "scope mandatory_concerns entries must be non-empty strings"
+            )
+        if len(set(normalised_concerns)) != len(normalised_concerns):
+            errors.append("scope mandatory_concerns must not contain duplicates")
     return errors
 
 
