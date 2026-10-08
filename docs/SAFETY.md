@@ -46,7 +46,7 @@ A token-aware container guard rejects dangerous host-control forms while allowin
 
 ## Read-only control roles
 
-Planning, simulation, red-team, correctness, security and model-qualification roles are more restricted than the mutating worker and use repository mutation evidence checks.
+Independent scope analysis, planning, simulation, red-team, Plan Verifier, correctness, security and model-qualification roles are more restricted than the mutating worker and use repository mutation evidence checks. RC5 does not grant product-mutation authority from a vague objective: scope/complexity, deterministic plan completeness and independent plan-review gates must succeed first.
 
 ## Git trust and recovery
 

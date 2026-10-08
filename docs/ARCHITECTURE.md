@@ -9,7 +9,7 @@ The system has an always-on low-risk user layer and an explicit autonomous super
 ## Main modules
 
 - `claude_auto.py`: orchestration and autonomous run loop.
-- `planning_support.py` / `control_plane.py`: planning, simulation and review control.
+- `planning_support.py` / `planning_completeness.py` / `control_plane.py`: independent scope analysis, complexity-aware plan generation, deterministic completeness/traceability validation, simulation and review control.
 - `governance_contract.py` / `authority_set.py`: exact-Git repository authority and control-surface snapshots.
 - `task_spec.py` / `task_sources.py`: deterministic repository-owned TaskSpec normalisation, graph validation and bounded adapter resolution.
 - `task_authority.py` / `execution_envelope.py`: dependency-safe task activation, exact WIP-bound ExecutionEnvelopes, staged/promotion admission and violation recovery.
@@ -50,8 +50,10 @@ The system has an always-on low-risk user layer and an explicit autonomous super
 ```text
 objective or plan
   -> repository discovery
+  -> independent scope + complexity baseline
   -> plan generation/reconciliation
-  -> simulation + red team
+  -> deterministic completeness + requirement traceability
+  -> simulation + red team + independent Plan Verifier
   -> selected profile
   -> resolve/reuse repository TaskSpec + ExecutionEnvelope when configured
   -> implement / post-batch envelope check / verify / diagnose / repair
@@ -66,7 +68,7 @@ Claude Code owns model/tool execution and native turn continuation. Claude Auto 
 
 ## Plan control
 
-Planning, simulation and red-team roles run in fresh read-only contexts. External state stores versioned executable plans and evidence. The original objective and acceptance criteria remain above the plan in the authority chain.
+Scope analysis, planning, simulation, red-team and Plan Verifier roles run in fresh read-only contexts. RC5 first establishes an independent scope/complexity baseline, then requires the planner to cover every baseline requirement and pass deterministic requirement-to-task-to-verification-to-acceptance traceability. Complex plans persist both a machine-checkable graph and substantive versioned section files. External state stores versioned executable plans and evidence. The original objective and acceptance criteria remain above the plan in the authority chain, and product mutation authority is withheld until all plan gates pass.
 
 RC4 represents one-file and multi-file planning through named AuthoritySets derived from exact committed Git objects. Legacy one-file planning remains a one-member `default` AuthoritySet. Authority members, governance and resolved control surfaces are fenced from ordinary worker mutation in every runtime profile, including Unattended.
 
