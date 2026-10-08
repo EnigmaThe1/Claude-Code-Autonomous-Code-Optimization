@@ -214,6 +214,54 @@ def validate_plan_against_scope(
             "independent scope requirements are missing from the plan: "
             + ", ".join(missing[:40])
         )
+
+    task_ids = {
+        str(row.get("id")).strip()
+        for row in plan.get("tasks", [])
+        if isinstance(row, dict)
+        and isinstance(row.get("id"), str)
+        and str(row.get("id")).strip()
+    }
+    concerns = _nonempty_strings(scope.get("mandatory_concerns"))
+    concern_rows = (
+        plan.get("concern_coverage")
+        if isinstance(plan.get("concern_coverage"), list)
+        else []
+    )
+    covered_concerns: set[str] = set()
+    for index, row in enumerate(concern_rows):
+        label = f"concern_coverage[{index}]"
+        if not isinstance(row, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        concern = str(row.get("concern") or "").strip()
+        if concern not in concerns:
+            errors.append(
+                f"{label}.concern must match an independent mandatory concern"
+            )
+            continue
+        covered_concerns.add(concern)
+        mapped_tasks = _nonempty_strings(row.get("task_ids"))
+        if not mapped_tasks:
+            errors.append(f"{label}.task_ids must be a non-empty list")
+        unknown = sorted(set(mapped_tasks) - task_ids)
+        if unknown:
+            errors.append(
+                f"{label} references unknown task ids: "
+                + ", ".join(unknown)
+            )
+        if not _nonempty_strings(row.get("verification")):
+            errors.append(f"{label}.verification must be a non-empty list")
+
+    missing_concerns = [
+        concern for concern in concerns
+        if concern not in covered_concerns
+    ]
+    if missing_concerns:
+        errors.append(
+            "independent mandatory concerns are missing plan coverage: "
+            + "; ".join(missing_concerns[:20])
+        )
     return errors
 
 
@@ -264,8 +312,12 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
 
     criteria = _nonempty_strings(plan.get("acceptance_criteria"))
     criteria_set = set(criteria)
+    if not criteria:
+        errors.append("acceptance_criteria must be a non-empty list")
 
     tasks = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
+    if not tasks:
+        errors.append("tasks must be a non-empty list")
     task_ids = {
         str(task.get("id")).strip()
         for task in tasks
@@ -494,6 +546,8 @@ def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
             if not sid:
                 errors.append(f"{label}.id must be a non-empty string")
                 continue
+            if sid in section_ids:
+                errors.append(f"duplicate complex plan section id: {sid}")
             section_ids.add(sid)
             if (
                 not isinstance(row.get("title"), str)

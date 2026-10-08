@@ -74,6 +74,13 @@ def _base_plan(complexity="simple", dims=None):
                 "requirement_ids": ["R001"],
             }
         ],
+        "concern_coverage": [
+            {
+                "concern": "regression safety",
+                "task_ids": ["T001"],
+                "verification": ["Run focused and regression checks"],
+            }
+        ],
         "plan_sections": [],
     }
 
@@ -227,6 +234,13 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
         "architecture": architecture,
         "tasks": tasks,
         "traceability": traceability,
+        "concern_coverage": [
+            {
+                "concern": "regression safety",
+                "task_ids": ["T001"],
+                "verification": ["Verify regression safety"],
+            }
+        ],
         "verification_strategy": [
             {
                 "level": "unit",
@@ -324,5 +338,28 @@ def test_plan_cannot_classify_below_independent_scope():
     errors = validate_plan_against_scope(plan, scope)
     assert any(
         "below independent scope baseline standard" in item
+        for item in errors
+    )
+
+
+def test_independent_mandatory_concern_requires_task_and_verification():
+    scope = {
+        "complexity": "simple",
+        "requirements": [
+            {
+                "id": "S001",
+                "statement": "Primary behaviour",
+                "kind": "explicit",
+                "source": "objective",
+            }
+        ],
+        "mandatory_concerns": ["regression safety"],
+    }
+    plan = _base_plan()
+    assert validate_plan_against_scope(plan, scope) == []
+    plan["concern_coverage"] = []
+    errors = validate_plan_against_scope(plan, scope)
+    assert any(
+        "mandatory concerns are missing plan coverage" in item
         for item in errors
     )
