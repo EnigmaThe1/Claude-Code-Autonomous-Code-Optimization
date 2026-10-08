@@ -1362,8 +1362,9 @@ def test_goal_only_creates_validated_external_plan_before_worker(monkeypatch):
         planner=next(i for i,p in enumerate(prompts) if "PLAN_CONTROL:" in p)
         simulation=next(i for i,p in enumerate(prompts) if "REVIEW STAGE: preflight" in p and "PLAN_SIMULATION:" in p)
         redteam=next(i for i,p in enumerate(prompts) if "REVIEW STAGE: preflight" in p and "PLAN_REDTEAM:" in p)
+        verifier=next(i for i,p in enumerate(prompts) if "REVIEW STAGE: preflight" in p and "PLAN_VERIFIER:" in p)
         worker=next(i for i,p in enumerate(prompts) if p.startswith("/goal "))
-        assert planner < simulation < redteam < worker
+        assert planner < simulation < redteam < verifier < worker
 
 
 def test_supplied_plan_is_candidate_and_validated_before_execution(monkeypatch):
@@ -1438,6 +1439,19 @@ def test_plan_gate_fails_closed_after_bounded_redteam_revision_loop(monkeypatch)
         assert state["plan_status"] == "VALIDATION_FAILED"
 
 
+def test_plan_verifier_fails_closed_after_bounded_revision_loop(monkeypatch):
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as dh, tempfile.TemporaryDirectory() as bd:
+        r=Path(td); git_init(r); (r/"README.md").write_text("x\n")
+        make_fake_claude(Path(bd))
+        monkeypatch.setenv("PATH", bd+os.pathsep+os.environ.get("PATH", ""))
+        monkeypatch.setenv("CLAUDE_AUTONOMY_HOME", dh)
+        monkeypatch.setenv("FAKE_PLAN_VERIFIER_VERDICT", "REVISE")
+        assert ca.main(["run","--model-qualification","off","--repo",str(r),"--objective","test","--max-plan-revisions","2","--max-cycles","1","--max-turns","5"]) == 6
+        state=json.loads((ca.repo_state_dir(r)/"state.json").read_text())
+        assert state["plan_version"] == 2
+        assert state["plan_status"] == "VALIDATION_FAILED"
+
+
 def test_nontrivial_local_fix_triggers_whole_plan_remediation_review(monkeypatch):
     with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as dh, tempfile.TemporaryDirectory() as bd:
         r=Path(td); git_init(r); (r/"README.md").write_text("x\n")
@@ -1475,6 +1489,7 @@ def test_metrics_include_plan_control_usage(monkeypatch, capsys):
 def test_parser_defaults_to_unlimited_outer_rounds():
     args = ca.build_parser().parse_args(["run", "--objective", "x"])
     assert args.max_cycles == 0
+    assert args.max_plan_revisions == 5
     assert args.max_stagnant_cycles == 3
     assert args.max_total_turns == 0
     assert args.max_wall_seconds == 0
