@@ -456,3 +456,33 @@ def test_dimension_score_cannot_drop_below_independent_scope():
         "complexity dimension scope_breadth=1" in item
         for item in errors
     )
+
+
+def test_scope_can_be_valid_without_invented_cross_cutting_concerns():
+    scope = {
+        "verdict": "READY",
+        "complexity": "simple",
+        "complexity_evidence": {
+            "dimensions": {
+                "scope_breadth": 1,
+                "component_coupling": 0,
+                "integration_surface": 0,
+                "data_state": 0,
+                "security_authority": 0,
+                "runtime_deployment": 0,
+                "failure_recovery": 0,
+                "uncertainty_research": 0,
+            },
+            "rationale": ["single bounded objective"],
+        },
+        "requirements": [
+            {
+                "id": "S001",
+                "statement": "Perform one bounded change",
+                "kind": "explicit",
+                "source": "objective",
+            }
+        ],
+        "mandatory_concerns": [],
+    }
+    assert validate_scope_baseline(scope) == []
