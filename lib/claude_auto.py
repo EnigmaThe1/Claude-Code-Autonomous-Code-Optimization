@@ -118,7 +118,11 @@ from settings_policy import (
     validate_repository_execution_policy,
     resolve_autonomy_profile,
 )
-from planning_completeness import validate_plan_completeness
+from planning_completeness import (
+    validate_plan_against_scope,
+    validate_plan_completeness,
+    validate_scope_baseline,
+)
 from planning_support import (
     _assessment_prompt,
     _bounded_prompt_text,
@@ -127,6 +131,7 @@ from planning_support import (
     _normalise_plan_control,
     _persist_plan_version,
     _planner_prompt,
+    _scope_prompt,
     _planning_context_fingerprint,
     _validation_anchor_compatible,
     build_readonly_evidence,
@@ -565,8 +570,94 @@ def ensure_plan_validated(
             except OSError: pass
         candidate_for_prompt = _bounded_prompt_text(source_text, 180_000, pointer=str(source_copy), label="candidate source")
     revision_reason = force_reason or "initial plan construction/validation"
-    max_revisions = max(1, int(getattr(args, "max_plan_revisions", 3) or 3))
+    max_revisions = max(
+        1,
+        int(getattr(args, "max_plan_revisions", 5) or 5),
+    )
     timeout = args.cycle_timeout if getattr(args, "cycle_timeout", 0) else None
+
+    scope_text, scope_meta = run_readonly_plan_agent(
+        root=root,
+        sd=sd,
+        prompt=_scope_prompt(
+            objective=objective,
+            prof=prof,
+            source_kind=source_kind,
+            source_ref=source_ref,
+            candidate_text=candidate_for_prompt,
+        ),
+        env=env,
+        provider_detail=provider_detail,
+        model=getattr(args, "verifier_model", None) or args.model,
+        timeout=timeout,
+        max_budget_usd=effective_invocation_budget(args, state),
+    )
+    limit_reason = _account_control_meta(args, state, sd, scope_meta)
+    if limit_reason:
+        state.update({"status": "LIMIT_REACHED", "blocker": limit_reason})
+        json_dump(sd / "state.json", state)
+        return None, 4
+    raw_scope = parse_json_protocol(scope_text, "PLAN_SCOPE")
+    if not raw_scope:
+        state.update({
+            "plan_status": "BLOCKED",
+            "status": "BLOCKED",
+            "blocker": (
+                "Independent scope/complexity protocol was missing or invalid."
+            ),
+        })
+        json_dump(sd / "state.json", state)
+        return None, 6
+    scope_baseline = {
+        "verdict": str(raw_scope.get("verdict", "BLOCKED")).upper(),
+        "complexity": str(raw_scope.get("complexity", "")).lower(),
+        "complexity_evidence": (
+            raw_scope.get("complexity_evidence")
+            if isinstance(raw_scope.get("complexity_evidence"), dict)
+            else {}
+        ),
+        "requirements": (
+            raw_scope.get("requirements")
+            if isinstance(raw_scope.get("requirements"), list)
+            else []
+        ),
+        "mandatory_concerns": (
+            raw_scope.get("mandatory_concerns")
+            if isinstance(raw_scope.get("mandatory_concerns"), list)
+            else []
+        ),
+        "research_questions": (
+            raw_scope.get("research_questions")
+            if isinstance(raw_scope.get("research_questions"), list)
+            else []
+        ),
+        "summary": str(raw_scope.get("summary", ""))[:2000],
+        "blockers": (
+            raw_scope.get("blockers")
+            if isinstance(raw_scope.get("blockers"), list)
+            else []
+        ),
+    }
+    scope_errors = validate_scope_baseline(scope_baseline)
+    if scope_baseline["verdict"] == "BLOCKED" or scope_errors:
+        blocker = (
+            scope_baseline.get("summary")
+            or "; ".join(scope_errors)
+            or "Independent scope analysis blocked."
+        )
+        state.update({
+            "plan_status": "BLOCKED",
+            "status": "BLOCKED",
+            "blocker": blocker[:4000],
+            "plan_scope_errors": scope_errors or None,
+        })
+        json_dump(sd / "state.json", state)
+        return None, 3
+    pdir = plan_state_dir(sd)
+    json_dump(
+        pdir / "scope-baseline.json",
+        {"scope": scope_baseline, "meta": scope_meta},
+    )
 
     for attempt in range(1, max_revisions + 1):
         planner_text, planner_meta = run_readonly_plan_agent(
@@ -575,6 +666,7 @@ def ensure_plan_validated(
                 objective=objective, prof=prof, source_kind=source_kind, source_ref=source_ref,
                 candidate_text=candidate_for_prompt, current_plan=current_plan, revision_reason=revision_reason,
                 review_findings=review_findings,
+                scope_baseline=scope_baseline,
                 state_dir=sd,
             ),
             env=env, provider_detail=provider_detail, model=args.model, timeout=timeout,
@@ -593,6 +685,9 @@ def ensure_plan_validated(
         candidate = _normalise_plan_control(raw_plan, objective)
         plan_errors = validate_plan_graph(candidate)
         plan_errors.extend(validate_plan_completeness(candidate))
+        plan_errors.extend(
+            validate_plan_against_scope(candidate, scope_baseline)
+        )
         if source_text:
             plan_errors.extend(
                 validate_source_plan_coverage(source_text, candidate)

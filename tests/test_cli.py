@@ -642,8 +642,10 @@ prompt=args[-1] if args else ""
 if os.environ.get("FAIL_NATIVE")=="1" and not os.environ.get("ANTHROPIC_BASE_URL") and "-p" in args:
     print("native down", file=sys.stderr)
     raise SystemExit(9)
-if "PLAN_CONTROL:" in prompt:
-    result='PLAN_CONTROL: '+json.dumps({"verdict":"READY","complexity":"standard","complexity_evidence":{"dimensions":{"scope_breadth":2,"component_coupling":1,"integration_surface":1,"data_state":1,"security_authority":1,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0},"rationale":["test fixture"]},"summary":"validated","plan_markdown":"# Validated plan\\n\\n1. Implement the objective.\\n2. Verify acceptance criteria.","requirements":[{"id":"R001","statement":"Objective behaviour","source":"objective"}],"acceptance_criteria":["Objective behaviour is implemented and verified"],"architecture":[],"tasks":[{"id":"T001","title":"Implement objective","depends_on":[],"verification":["Run relevant tests"],"risk":"medium","requirement_ids":["R001"],"implementation_scope":["objective implementation"]}],"traceability":[{"requirement_id":"R001","architecture_ids":[],"task_ids":["T001"],"verification":["Run relevant tests"],"acceptance_criteria":["Objective behaviour is implemented and verified"],"acceptance_evidence":["verification pass"]}],"verification_strategy":[{"level":"regression","scope":"objective and prior behaviour","requirement_ids":["R001"]}],"plan_sections":[],"assumptions":[],"risks":[],"blockers":[]})
+if "PLAN_SCOPE:" in prompt:
+    result='PLAN_SCOPE: '+json.dumps({"verdict":"READY","complexity":"standard","complexity_evidence":{"dimensions":{"scope_breadth":2,"component_coupling":1,"integration_surface":1,"data_state":1,"security_authority":1,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0},"rationale":["independent test baseline"]},"requirements":[{"id":"S001","statement":"Objective behaviour","kind":"explicit","source":"objective"}],"mandatory_concerns":["regression safety"],"research_questions":[],"summary":"scope checked","blockers":[]})
+elif "PLAN_CONTROL:" in prompt:
+    result='PLAN_CONTROL: '+json.dumps({"verdict":"READY","complexity":"standard","complexity_evidence":{"dimensions":{"scope_breadth":2,"component_coupling":1,"integration_surface":1,"data_state":1,"security_authority":1,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0},"rationale":["test fixture"]},"summary":"validated","plan_markdown":"# Validated plan\\n\\n1. Implement the objective.\\n2. Verify acceptance criteria.","requirements":[{"id":"R001","statement":"Objective behaviour","source":"objective","scope_ids":["S001"]}],"acceptance_criteria":["Objective behaviour is implemented and verified"],"architecture":[],"tasks":[{"id":"T001","title":"Implement objective","depends_on":[],"verification":["Run relevant tests"],"risk":"medium","requirement_ids":["R001"],"implementation_scope":["objective implementation"]}],"traceability":[{"requirement_id":"R001","architecture_ids":[],"task_ids":["T001"],"verification":["Run relevant tests"],"acceptance_criteria":["Objective behaviour is implemented and verified"],"acceptance_evidence":["verification pass"]}],"verification_strategy":[{"level":"regression","scope":"objective and prior behaviour","requirement_ids":["R001"]}],"plan_sections":[],"assumptions":[],"risks":[],"blockers":[]})
 elif "PLAN_SIMULATION:" in prompt:
     is_final="REVIEW STAGE: final" in prompt
     verdict=os.environ.get("FAKE_FINAL_SIMULATION_VERDICT" if is_final else "FAKE_SIMULATION_VERDICT","PASS")
@@ -1359,12 +1361,13 @@ def test_goal_only_creates_validated_external_plan_before_worker(monkeypatch):
         assert (sd/"plans"/"current-plan.json").exists()
         assert not (r/"IMPLEMENTATION_PLAN.md").exists()
         prompts=[json.loads(x)["args"][-1] for x in capture.read_text().splitlines() if x.strip()]
+        scope=next(i for i,p in enumerate(prompts) if "PLAN_SCOPE:" in p)
         planner=next(i for i,p in enumerate(prompts) if "PLAN_CONTROL:" in p)
         simulation=next(i for i,p in enumerate(prompts) if "REVIEW STAGE: preflight" in p and "PLAN_SIMULATION:" in p)
         redteam=next(i for i,p in enumerate(prompts) if "REVIEW STAGE: preflight" in p and "PLAN_REDTEAM:" in p)
         verifier=next(i for i,p in enumerate(prompts) if "REVIEW STAGE: preflight" in p and "PLAN_VERIFIER:" in p)
         worker=next(i for i,p in enumerate(prompts) if p.startswith("/goal "))
-        assert planner < simulation < redteam < verifier < worker
+        assert scope < planner < simulation < redteam < verifier < worker
 
 
 def test_supplied_plan_is_candidate_and_validated_before_execution(monkeypatch):

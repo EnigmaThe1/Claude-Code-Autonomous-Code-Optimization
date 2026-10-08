@@ -105,6 +105,118 @@ def _level_rank(level: str) -> int:
     return {"simple": 0, "standard": 1, "complex": 2}.get(level, -1)
 
 
+def validate_scope_baseline(scope: dict[str, Any]) -> list[str]:
+    """Validate the independent pre-planning scope/complexity baseline."""
+    errors: list[str] = []
+    verdict = str(scope.get("verdict") or "").upper()
+    if verdict not in {"READY", "BLOCKED"}:
+        errors.append("scope verdict must be READY or BLOCKED")
+    declared = str(scope.get("complexity") or "").lower()
+    score, minimum, score_errors = complexity_score(scope)
+    errors.extend(score_errors)
+    if declared not in {"simple", "standard", "complex"}:
+        errors.append("scope complexity must be simple, standard or complex")
+    elif _level_rank(declared) < _level_rank(minimum):
+        errors.append(
+            f"scope complexity {declared} understates deterministic minimum "
+            f"{minimum} (score={score})"
+        )
+
+    rows = scope.get("requirements")
+    if not isinstance(rows, list) or not rows:
+        errors.append("scope requirements must be a non-empty list")
+        return errors
+
+    seen: set[str] = set()
+    allowed_kinds = {"explicit", "necessary-derived", "constraint"}
+    for index, row in enumerate(rows):
+        label = f"scope.requirements[{index}]"
+        if not isinstance(row, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        sid = str(row.get("id") or "").strip()
+        if not sid:
+            errors.append(f"{label}.id must be a non-empty string")
+        elif sid in seen:
+            errors.append(f"duplicate scope requirement id: {sid}")
+        else:
+            seen.add(sid)
+        if (
+            not isinstance(row.get("statement"), str)
+            or not row["statement"].strip()
+        ):
+            errors.append(f"{label}.statement must be a non-empty string")
+        kind = str(row.get("kind") or "").strip().lower()
+        if kind not in allowed_kinds:
+            errors.append(
+                f"{label}.kind must be explicit, necessary-derived or constraint"
+            )
+        source = str(row.get("source") or "").strip().lower()
+        if source not in _ALLOWED_REQUIREMENT_SOURCES:
+            errors.append(
+                f"{label}.source must be one of "
+                + ", ".join(sorted(_ALLOWED_REQUIREMENT_SOURCES))
+            )
+
+    concerns = _nonempty_strings(scope.get("mandatory_concerns"))
+    if not concerns:
+        errors.append("scope mandatory_concerns must be a non-empty list")
+    return errors
+
+
+def validate_plan_against_scope(
+    plan: dict[str, Any],
+    scope: dict[str, Any],
+) -> list[str]:
+    """Require the plan to cover the independently derived scope baseline."""
+    errors: list[str] = []
+    plan_level = str(plan.get("complexity") or "").lower()
+    scope_level = str(scope.get("complexity") or "").lower()
+    if _level_rank(plan_level) < _level_rank(scope_level):
+        errors.append(
+            f"plan complexity {plan_level or 'missing'} is below independent "
+            f"scope baseline {scope_level or 'missing'}"
+        )
+
+    scope_rows = (
+        scope.get("requirements")
+        if isinstance(scope.get("requirements"), list)
+        else []
+    )
+    required_scope_ids = {
+        str(row.get("id")).strip()
+        for row in scope_rows
+        if isinstance(row, dict)
+        and isinstance(row.get("id"), str)
+        and str(row.get("id")).strip()
+    }
+    covered: set[str] = set()
+    plan_rows = (
+        plan.get("requirements")
+        if isinstance(plan.get("requirements"), list)
+        else []
+    )
+    for index, row in enumerate(plan_rows):
+        if not isinstance(row, dict):
+            continue
+        scope_ids = set(_nonempty_strings(row.get("scope_ids")))
+        unknown = sorted(scope_ids - required_scope_ids)
+        if unknown:
+            errors.append(
+                f"requirements[{index}] maps unknown scope ids: "
+                + ", ".join(unknown)
+            )
+        covered.update(scope_ids & required_scope_ids)
+
+    missing = sorted(required_scope_ids - covered)
+    if missing:
+        errors.append(
+            "independent scope requirements are missing from the plan: "
+            + ", ".join(missing[:40])
+        )
+    return errors
+
+
 def validate_plan_completeness(plan: dict[str, Any]) -> list[str]:
     """Fail closed when a plan has no auditable requirement-to-evidence chain."""
     errors: list[str] = []

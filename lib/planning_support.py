@@ -560,6 +560,57 @@ def _bounded_prompt_text(text: str, limit: int, *, pointer: str | None = None, l
     return ledger + text[:half] + omission + text[-half:]
 
 
+def _scope_prompt(
+    *,
+    objective: str,
+    prof: dict[str, Any],
+    source_kind: str,
+    source_ref: str | None,
+    candidate_text: str | None,
+) -> str:
+    candidate = _bounded_prompt_text(
+        candidate_text or "",
+        160_000,
+        label="supplied objective/plan source",
+    )
+    return textwrap.dedent(f"""
+    You are the independent HARD READ-ONLY scope and complexity analyst.
+    Do not modify the repository and do not design the implementation plan.
+
+    Establish a conservative baseline that another planner must cover before
+    coding can begin. Extract explicit operator requirements, constraints and
+    only technically necessary derived requirements. Do not invent optional
+    product features. If a consequential product/business choice is genuinely
+    unresolved, return BLOCKED rather than silently choosing it.
+
+    ORIGINAL OBJECTIVE:
+    {objective}
+
+    REPOSITORY PROFILE:
+    {json.dumps(compact_profile(prof), separators=(',', ':'))}
+
+    SOURCE KIND: {source_kind}
+    SOURCE REFERENCE: {source_ref or 'none'}
+
+    SUPPLIED SOURCE:
+    {candidate or 'none'}
+
+    Assess eight universal complexity dimensions from 0..3:
+    scope_breadth, component_coupling, integration_surface, data_state,
+    security_authority, runtime_deployment, failure_recovery and
+    uncertainty_research. Use targeted read-only research only when a
+    version-sensitive external fact materially affects the baseline.
+
+    Emit stable scope requirement IDs. Distinguish explicit requirements from
+    necessary-derived engineering requirements and constraints. List mandatory
+    cross-cutting concerns that the implementation plan must address when
+    applicable.
+
+    Return exactly one single-line JSON protocol record and nothing after it:
+    PLAN_SCOPE: {{"verdict":"READY|BLOCKED","complexity":"simple|standard|complex","complexity_evidence":{{"dimensions":{{"scope_breadth":0,"component_coupling":0,"integration_surface":0,"data_state":0,"security_authority":0,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0}},"rationale":["..."]}},"requirements":[{{"id":"S001","statement":"...","kind":"explicit|necessary-derived|constraint","source":"objective|operator|repository|derived|external"}}],"mandatory_concerns":["..."],"research_questions":["..."],"summary":"...","blockers":[]}}
+    """).strip()
+
+
 def _planner_prompt(
     *,
     objective: str,
@@ -570,6 +621,7 @@ def _planner_prompt(
     current_plan: dict[str, Any] | None,
     revision_reason: str | None,
     review_findings: list[dict[str, Any]] | None,
+    scope_baseline: dict[str, Any] | None = None,
     state_dir: Path | None = None,
 ) -> str:
     candidate = _bounded_prompt_text(
@@ -611,6 +663,11 @@ def _planner_prompt(
         pointer=findings_pointer,
         label="review findings",
     )
+    scope_text = _bounded_prompt_text(
+        json.dumps(scope_baseline or {}, separators=(",", ":")),
+        80_000,
+        label="independent scope baseline",
+    )
     return textwrap.dedent(f"""
     You are the HARD READ-ONLY implementation-plan controller. Do not modify
     the repository. Reconcile the user's objective with current repository
@@ -624,6 +681,13 @@ def _planner_prompt(
 
     ORIGINAL OBJECTIVE:
     {objective}
+
+    INDEPENDENT SCOPE/COMPLEXITY BASELINE:
+    {scope_text or 'none'}
+
+    The plan may add necessary derived technical requirements, but it must map
+    every independent baseline requirement through requirement.scope_ids and
+    may not classify below the independent baseline complexity.
 
     REPOSITORY PROFILE:
     {json.dumps(compact_profile(prof), separators=(',', ':'))}
@@ -682,7 +746,7 @@ def _planner_prompt(
     external fact/credential, or mutually incompatible requirement.
 
     Return exactly one single-line JSON protocol record and nothing after it:
-    PLAN_CONTROL: {{"verdict":"READY|BLOCKED","complexity":"simple|standard|complex","complexity_evidence":{{"dimensions":{{"scope_breadth":0,"component_coupling":0,"integration_surface":0,"data_state":0,"security_authority":0,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0}},"rationale":["..."]}},"summary":"...","plan_markdown":"...","requirements":[{{"id":"R001","statement":"...","source":"objective|operator|repository|derived|external"}}],"acceptance_criteria":["..."],"architecture":[{{"id":"A001","title":"...","decision":"...","requirement_ids":["R001"]}}],"tasks":[{{"id":"T001","title":"...","depends_on":[],"verification":["..."],"risk":"low|medium|high","requirement_ids":["R001"],"implementation_scope":["..."]}}],"traceability":[{{"requirement_id":"R001","architecture_ids":["A001"],"task_ids":["T001"],"verification":["..."],"acceptance_criteria":["..."],"acceptance_evidence":["..."]}}],"verification_strategy":[{{"level":"unit|integration|system|regression|security|operational","scope":"...","requirement_ids":["R001"]}}],"plan_sections":[{{"id":"requirements|architecture|implementation|verification|operations","title":"...","content":"..."}}],"assumptions":["..."],"risks":["..."],"blockers":["..."]}}
+    PLAN_CONTROL: {{"verdict":"READY|BLOCKED","complexity":"simple|standard|complex","complexity_evidence":{{"dimensions":{{"scope_breadth":0,"component_coupling":0,"integration_surface":0,"data_state":0,"security_authority":0,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0}},"rationale":["..."]}},"summary":"...","plan_markdown":"...","requirements":[{{"id":"R001","statement":"...","source":"objective|operator|repository|derived|external","scope_ids":["S001"]}}],"acceptance_criteria":["..."],"architecture":[{{"id":"A001","title":"...","decision":"...","requirement_ids":["R001"]}}],"tasks":[{{"id":"T001","title":"...","depends_on":[],"verification":["..."],"risk":"low|medium|high","requirement_ids":["R001"],"implementation_scope":["..."]}}],"traceability":[{{"requirement_id":"R001","architecture_ids":["A001"],"task_ids":["T001"],"verification":["..."],"acceptance_criteria":["..."],"acceptance_evidence":["..."]}}],"verification_strategy":[{{"level":"unit|integration|system|regression|security|operational","scope":"...","requirement_ids":["R001"]}}],"plan_sections":[{{"id":"requirements|architecture|implementation|verification|operations","title":"...","content":"..."}}],"assumptions":["..."],"risks":["..."],"blockers":["..."]}}
     Use READY only when the emitted plan is detailed enough to undergo
     deterministic completeness validation plus independent simulation,
     red-team and Plan Verifier gates.

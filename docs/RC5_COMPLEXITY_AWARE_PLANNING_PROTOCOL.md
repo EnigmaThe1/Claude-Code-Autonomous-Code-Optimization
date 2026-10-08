@@ -10,8 +10,9 @@ The RC5 authority order is:
 
 ```text
 operator objective / supplied requirements
+  -> independent scope + complexity baseline
   -> repository and targeted external research
-  -> complexity evidence
+  -> planner complexity evidence (never below independent baseline)
   -> explicit requirements and acceptance criteria
   -> architecture decisions
   -> concrete dependency-ordered implementation tasks
@@ -37,7 +38,7 @@ The planner records eight domain-neutral dimensions from 0 through 3:
 - failure/recovery complexity;
 - uncertainty/research dependency.
 
-The package independently derives a minimum complexity level. A planner may classify upward conservatively but may not classify below the deterministic minimum. The independent Plan Verifier separately challenges attempts to understate complexity.
+Before planning, an independent hard read-only scope analyst extracts explicit and technically necessary requirements plus a conservative complexity baseline. The planner must map every baseline requirement and may classify upward conservatively but may not classify below that baseline or its own deterministic score. The independent Plan Verifier separately challenges attempts to understate complexity or omit scope.
 
 ## Mandatory requirement traceability
 

@@ -7,7 +7,9 @@ from pathlib import Path
 from planning_completeness import (
     complexity_score,
     persist_plan_sections,
+    validate_plan_against_scope,
     validate_plan_completeness,
+    validate_scope_baseline,
 )
 
 
@@ -35,6 +37,7 @@ def _base_plan(complexity="simple", dims=None):
                 "id": "R001",
                 "statement": "Deliver required behaviour",
                 "source": "objective",
+                "scope_ids": ["S001"],
             }
         ],
         "acceptance_criteria": [
@@ -247,3 +250,79 @@ def test_accepts_detailed_complex_plan(tmp_path: Path):
     paths = persist_plan_sections(tmp_path, 1, plan)
     assert len(paths) == 5
     assert all(Path(path).is_file() for path in paths)
+
+
+def test_independent_scope_baseline_must_be_covered():
+    scope = {
+        "verdict": "READY",
+        "complexity": "standard",
+        "complexity_evidence": {
+            "dimensions": {
+                "scope_breadth": 2,
+                "component_coupling": 1,
+                "integration_surface": 1,
+                "data_state": 1,
+                "security_authority": 1,
+                "runtime_deployment": 0,
+                "failure_recovery": 0,
+                "uncertainty_research": 0,
+            },
+            "rationale": ["independent baseline"],
+        },
+        "requirements": [
+            {
+                "id": "S001",
+                "statement": "Primary behaviour",
+                "kind": "explicit",
+                "source": "objective",
+            }
+        ],
+        "mandatory_concerns": ["regression safety"],
+    }
+    assert validate_scope_baseline(scope) == []
+    plan = _base_plan(
+        "standard",
+        scope["complexity_evidence"]["dimensions"],
+    )
+    assert validate_plan_against_scope(plan, scope) == []
+    plan["requirements"][0]["scope_ids"] = []
+    errors = validate_plan_against_scope(plan, scope)
+    assert any(
+        "independent scope requirements are missing" in item
+        for item in errors
+    )
+
+
+def test_plan_cannot_classify_below_independent_scope():
+    scope = {
+        "verdict": "READY",
+        "complexity": "standard",
+        "complexity_evidence": {
+            "dimensions": {
+                "scope_breadth": 2,
+                "component_coupling": 1,
+                "integration_surface": 1,
+                "data_state": 1,
+                "security_authority": 1,
+                "runtime_deployment": 0,
+                "failure_recovery": 0,
+                "uncertainty_research": 0,
+            },
+            "rationale": ["independent baseline"],
+        },
+        "requirements": [
+            {
+                "id": "S001",
+                "statement": "Primary behaviour",
+                "kind": "explicit",
+                "source": "objective",
+            }
+        ],
+        "mandatory_concerns": ["regression safety"],
+    }
+    plan = _base_plan("simple")
+    errors = validate_plan_against_scope(plan, scope)
+    assert any(
+        "below independent scope baseline standard" in item
+        for item in errors
+    )
