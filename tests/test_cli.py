@@ -1873,7 +1873,7 @@ def test_p7_rc3_identity_upgrade_preserves_durable_state():
         assert upgraded.returncode == 0, upgraded.stderr
         assert (dest / "VERSION").read_text().strip() == (ROOT / "VERSION").read_text().strip()
         new_marker = json.loads(marker_path.read_text())
-        assert new_marker["version"] == "1.0.0-rc4"
+        assert new_marker["version"] == (ROOT / "VERSION").read_text().strip()
         assert new_marker["install_uuid"] == install_uuid
         assert (repo_state / "state.json").read_bytes() == state_bytes
         assert (repo_state / "git-trust" / "policy.json").read_bytes() == trust_bytes
