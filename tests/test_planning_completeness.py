@@ -72,11 +72,11 @@ def _base_plan(complexity="simple", dims=None):
     }
 
 
-def test_rc5_simple_plan_has_complete_traceability():
+def test_simple_plan_has_complete_traceability():
     assert validate_plan_completeness(_base_plan()) == []
 
 
-def test_rc5_rejects_understated_complexity():
+def test_rejects_understated_complexity():
     plan = _base_plan()
     plan["complexity_evidence"]["dimensions"] = {
         "scope_breadth": 3,
@@ -98,7 +98,7 @@ def test_rc5_rejects_understated_complexity():
     )
 
 
-def test_rc5_rejects_missing_requirement_traceability():
+def test_rejects_missing_requirement_traceability():
     plan = _base_plan()
     plan["traceability"] = []
     errors = validate_plan_completeness(plan)
@@ -109,7 +109,7 @@ def test_rc5_rejects_missing_requirement_traceability():
     assert any("requirement R001 has no" in item for item in errors)
 
 
-def test_rc5_rejects_complex_catch_all_plan():
+def test_rejects_complex_catch_all_plan():
     dims = {
         "scope_breadth": 3,
         "component_coupling": 2,
@@ -136,7 +136,7 @@ def test_rc5_rejects_complex_catch_all_plan():
     )
 
 
-def test_rc5_accepts_detailed_complex_plan(tmp_path: Path):
+def test_accepts_detailed_complex_plan(tmp_path: Path):
     dims = {
         "scope_breadth": 3,
         "component_coupling": 2,
