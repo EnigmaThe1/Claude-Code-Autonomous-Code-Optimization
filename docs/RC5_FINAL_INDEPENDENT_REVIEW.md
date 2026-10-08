@@ -52,7 +52,7 @@ Malformed scope output is not confused with a genuine product blocker: determini
 
 ## Universality review
 
-The RC5 delta is repository- and domain-neutral. The release delta contains no Pandora-specific or other project-specific implementation assumptions. Complexity is assessed against the task-relevant surface rather than unrelated repository size.
+The RC5 delta is repository- and domain-neutral. The release delta contains no project-specific implementation assumptions. Complexity is assessed against the task-relevant surface rather than unrelated repository size.
 
 The final source sweep found no RC5 TODO/FIXME/TBD/XXX placeholders, obsolete numeric planning-floor symbols, or obvious unsafe dynamic-execution/deserialisation patterns in changed files.
 
