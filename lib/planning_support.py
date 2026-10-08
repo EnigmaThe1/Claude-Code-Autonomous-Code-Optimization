@@ -623,11 +623,14 @@ def _scope_prompt(
     preserving valid operator requirements. Do not paper over an error by
     deleting requirements or lowering complexity.
 
-    Assess eight universal complexity dimensions from 0..3:
-    scope_breadth, component_coupling, integration_surface, data_state,
-    security_authority, runtime_deployment, failure_recovery and
-    uncertainty_research. Use targeted read-only research only when a
-    version-sensitive external fact materially affects the baseline.
+    Assess the objective's TASK-RELEVANT complexity across eight universal
+    dimensions from 0..3: scope_breadth, component_coupling,
+    integration_surface, data_state, security_authority,
+    runtime_deployment, failure_recovery and uncertainty_research. Do not
+    inflate complexity merely because the repository is large or contains
+    unrelated systems; do include coupled surfaces the objective genuinely
+    touches. Use targeted read-only research only when a version-sensitive
+    external fact materially affects the baseline.
 
     Emit stable scope requirement IDs. Distinguish explicit requirements from
     necessary-derived engineering requirements and constraints. List mandatory
