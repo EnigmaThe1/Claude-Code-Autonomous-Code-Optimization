@@ -111,6 +111,7 @@ jobs:
           test "$(./bin/claude-auto --version)" = "claude-auto $(cat VERSION)"
           python -m pytest -q
           python -m pytest -q --cov=lib --cov=hooks --cov-report=term
+          python -m pytest -q tests/test_planning_completeness.py
       - name: Build deterministic archive
         run: |
           set -euo pipefail
@@ -153,6 +154,7 @@ jobs:
           test -f LICENSE
           test -f NOTICE
           PYTHONPATH=lib python -m pytest -q
+          PYTHONPATH=lib python -m pytest -q tests/test_planning_completeness.py
       - name: Transactional installer smoke
         run: |
           set -euo pipefail
