@@ -145,6 +145,11 @@ def _normalise_plan_control(
         if isinstance(obj.get("concern_coverage"), list)
         else []
     )
+    complexity_coverage = (
+        obj.get("complexity_coverage")
+        if isinstance(obj.get("complexity_coverage"), list)
+        else []
+    )
     return {
         "verdict": verdict,
         "complexity": complexity,
@@ -162,6 +167,7 @@ def _normalise_plan_control(
         "verification_strategy": verification_strategy,
         "plan_sections": plan_sections,
         "concern_coverage": concern_coverage,
+        "complexity_coverage": complexity_coverage,
         "summary": str(obj.get("summary", ""))[:2000],
     }
 
@@ -765,13 +771,20 @@ def _planner_prompt(
     rollback/recovery, security boundaries, deployment/runtime behaviour,
     operational observability and failure recovery when applicable.
 
-    For complex plans, provide substantive multi-section detail for
+    For every complexity dimension scored 2 or 3, emit explicit
+    complexity_coverage that maps the dimension to requirements, concrete
+    tasks, verification and (for architecture-relevant dimensions) architecture
+    decisions. High integration complexity needs integration/system
+    verification; high security complexity needs security verification; high
+    runtime or failure/recovery complexity needs system/operational
+    verification. This evidence-based coverage replaces arbitrary task-count
+    quotas: decompose as much as the objective needs, but never manufacture
+    filler tasks merely to hit a number.
+
+    Complex plans must also provide substantive multi-section detail for
     requirements, architecture, implementation, verification and operations.
-    At least eight concrete tasks, three architecture decisions and three
-    verification levels are deterministic safety floors, not targets. Use
-    more decomposition whenever the objective requires it. Simple and
-    standard plans should remain proportionate but still trace every
-    requirement.
+    Simple and standard plans should remain proportionate while still tracing
+    every requirement and high-impact complexity dimension.
 
     Resolve ordinary technical ambiguity from repository evidence and
     reversible engineering judgement. Only block for a genuinely
@@ -779,7 +792,7 @@ def _planner_prompt(
     external fact/credential, or mutually incompatible requirement.
 
     Return exactly one single-line JSON protocol record and nothing after it:
-    PLAN_CONTROL: {{"verdict":"READY|BLOCKED","complexity":"simple|standard|complex","complexity_evidence":{{"dimensions":{{"scope_breadth":0,"component_coupling":0,"integration_surface":0,"data_state":0,"security_authority":0,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0}},"rationale":["..."]}},"summary":"...","plan_markdown":"...","requirements":[{{"id":"R001","statement":"...","source":"objective|operator|repository|derived|external","scope_ids":["S001"]}}],"acceptance_criteria":["..."],"architecture":[{{"id":"A001","title":"...","decision":"...","requirement_ids":["R001"]}}],"tasks":[{{"id":"T001","title":"...","depends_on":[],"verification":["..."],"risk":"low|medium|high","requirement_ids":["R001"],"implementation_scope":["..."]}}],"traceability":[{{"requirement_id":"R001","architecture_ids":["A001"],"task_ids":["T001"],"verification":["..."],"acceptance_criteria":["..."],"acceptance_evidence":["..."]}}],"verification_strategy":[{{"level":"unit|integration|system|regression|security|operational","scope":"...","requirement_ids":["R001"]}}],"concern_coverage":[{{"concern":"...","task_ids":["T001"],"verification":["..."]}}],"plan_sections":[{{"id":"requirements|architecture|implementation|verification|operations","title":"...","content":"..."}}],"assumptions":["..."],"risks":["..."],"blockers":["..."]}}
+    PLAN_CONTROL: {{"verdict":"READY|BLOCKED","complexity":"simple|standard|complex","complexity_evidence":{{"dimensions":{{"scope_breadth":0,"component_coupling":0,"integration_surface":0,"data_state":0,"security_authority":0,"runtime_deployment":0,"failure_recovery":0,"uncertainty_research":0}},"rationale":["..."]}},"summary":"...","plan_markdown":"...","requirements":[{{"id":"R001","statement":"...","source":"objective|operator|repository|derived|external","scope_ids":["S001"]}}],"acceptance_criteria":["..."],"architecture":[{{"id":"A001","title":"...","decision":"...","requirement_ids":["R001"]}}],"tasks":[{{"id":"T001","title":"...","depends_on":[],"verification":["..."],"risk":"low|medium|high","requirement_ids":["R001"],"implementation_scope":["..."]}}],"traceability":[{{"requirement_id":"R001","architecture_ids":["A001"],"task_ids":["T001"],"verification":["..."],"acceptance_criteria":["..."],"acceptance_evidence":["..."]}}],"verification_strategy":[{{"level":"unit|integration|system|regression|security|operational","scope":"...","requirement_ids":["R001"]}}],"concern_coverage":[{{"concern":"...","task_ids":["T001"],"verification":["..."]}}],"complexity_coverage":[{{"dimension":"scope_breadth","requirement_ids":["R001"],"architecture_ids":[],"task_ids":["T001"],"verification":["..."]}}],"plan_sections":[{{"id":"requirements|architecture|implementation|verification|operations","title":"...","content":"..."}}],"assumptions":["..."],"risks":["..."],"blockers":["..."]}}
     Use READY only when the emitted plan is detailed enough to undergo
     deterministic completeness validation plus independent simulation,
     red-team and Plan Verifier gates.
