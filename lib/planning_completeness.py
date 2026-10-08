@@ -374,5 +374,5 @@ def persist_plan_sections(
             path.chmod(0o600)
         except OSError:
             pass
-        paths.append(str(path))
+        paths.append(path.relative_to(plan_dir).as_posix())
     return paths
